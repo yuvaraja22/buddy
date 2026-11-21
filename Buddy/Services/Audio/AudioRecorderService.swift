@@ -59,6 +59,27 @@ private final class LockedSampleBuffer: @unchecked Sendable {
     }
 }
 
+private final class AudioNotificationObserverToken: @unchecked Sendable {
+    private let token: NSObjectProtocol
+
+    init(
+        name: Notification.Name,
+        object: Any?,
+        handler: @escaping @Sendable (Notification) -> Void
+    ) {
+        self.token = NotificationCenter.default.addObserver(
+            forName: name,
+            object: object,
+            queue: .main,
+            using: handler
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(token)
+    }
+}
+
 @Observable
 @MainActor
 public final class AudioRecorderService {
@@ -80,21 +101,12 @@ public final class AudioRecorderService {
     )
     @ObservationIgnored private var recordingStartDate: Date?
     @ObservationIgnored private var durationTask: Task<Void, Never>?
-    @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
-    @ObservationIgnored private var configChangeObserver: NSObjectProtocol?
+    @ObservationIgnored private var interruptionObserver: AudioNotificationObserverToken?
+    @ObservationIgnored private var configChangeObserver: AudioNotificationObserverToken?
 
     public init() {
         refreshPermissionStatus()
         installAudioSessionObservers()
-    }
-
-    deinit {
-        if let interruptionObserver {
-            NotificationCenter.default.removeObserver(interruptionObserver)
-        }
-        if let configChangeObserver {
-            NotificationCenter.default.removeObserver(configChangeObserver)
-        }
     }
 
     public func requestPermission() async -> Bool {
@@ -204,10 +216,9 @@ public final class AudioRecorderService {
     // MARK: - Private Helpers
 
     private func installAudioSessionObservers() {
-        interruptionObserver = NotificationCenter.default.addObserver(
-            forName: AVAudioSession.interruptionNotification,
-            object: AVAudioSession.sharedInstance(),
-            queue: .main
+        interruptionObserver = AudioNotificationObserverToken(
+            name: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance()
         ) { [weak self] notification in
             guard let userInfo = notification.userInfo,
                   let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
@@ -222,10 +233,9 @@ public final class AudioRecorderService {
             }
         }
 
-        configChangeObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: nil,
-            queue: .main
+        configChangeObserver = AudioNotificationObserverToken(
+            name: .AVAudioEngineConfigurationChange,
+            object: nil
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, self.isRecording else { return }
