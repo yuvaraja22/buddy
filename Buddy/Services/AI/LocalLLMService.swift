@@ -1,0 +1,401 @@
+import Foundation
+import LLM
+import Observation
+import UIKit
+
+public enum LocalLLMError: LocalizedError, Sendable {
+    case modelNotDownloaded
+    case loadFailed(String)
+    case generationFailed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .modelNotDownloaded:
+            return "No local LLM model is downloaded. Download Qwen 2.5 in Settings to enable on-device AI."
+        case .loadFailed(let detail):
+            return "Could not load local AI model: \(detail)"
+        case .generationFailed(let detail):
+            return "Local AI generation failed: \(detail)"
+        }
+    }
+}
+
+private struct UncheckedSendableBox<Value>: @unchecked Sendable {
+    let value: Value
+}
+
+private final class LockedStringAccumulator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: String = ""
+
+    func append(_ chunk: String) {
+        lock.lock()
+        storage.append(chunk)
+        lock.unlock()
+    }
+
+    var value: String {
+        lock.lock()
+        let copy = storage
+        lock.unlock()
+        return copy
+    }
+}
+
+private final class MemoryWarningObserverToken: @unchecked Sendable {
+    private let token: NSObjectProtocol
+
+    init(handler: @escaping @Sendable () -> Void) {
+        self.token = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            handler()
+        }
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(token)
+    }
+}
+
+@Observable
+@MainActor
+public final class LocalLLMService {
+    public var isLoaded: Bool = false
+    public var isLoading: Bool = false
+    public var isGenerating: Bool = false
+    public var loadedModelName: String?
+    public var lastMemoryNotice: String?
+
+    private let modelManager: ModelManager
+    @ObservationIgnored private var llm: LLM?
+    @ObservationIgnored private var loadedFilePath: String?
+    @ObservationIgnored private var cachedTemplateHint: String?
+    @ObservationIgnored private var memoryObserverToken: MemoryWarningObserverToken?
+
+    // FIFO serialization gate preventing concurrent access to the underlying llama_context.
+    @ObservationIgnored private var isExecutingExclusiveTask: Bool = false
+    @ObservationIgnored private var accessWaiters: [CheckedContinuation<Void, Never>] = []
+
+    public init(modelManager: ModelManager) {
+        self.modelManager = modelManager
+        self.memoryObserverToken = MemoryWarningObserverToken { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.handleMemoryWarning()
+            }
+        }
+    }
+
+    public func ensureLoaded() async throws {
+        guard let fileURL = modelManager.activeLLMFileURL else {
+            throw LocalLLMError.modelNotDownloaded
+        }
+
+        let desiredPath = fileURL.path
+        if llm != nil, isLoaded, loadedFilePath == desiredPath {
+            return
+        }
+
+        if llm != nil {
+            unload()
+        }
+
+        isLoading = true
+        defer { isLoading = false }
+
+        let loadedBox: UncheckedSendableBox<LLM?> = await Task.detached(priority: .userInitiated) {
+            let instance = LLM(
+                from: fileURL,
+                topK: 40,
+                topP: 0.9,
+                temp: 0.1,
+                repeatPenalty: 1.15,
+                historyLimit: 6,
+                maxTokenCount: 1536
+            )
+            return UncheckedSendableBox(value: instance)
+        }.value
+
+        guard let instance = loadedBox.value else {
+            throw LocalLLMError.loadFailed("Failed to initialize \(fileURL.lastPathComponent).")
+        }
+
+        instance.postprocess = { _ in }
+        let hint = await instance.core.getChatTemplateHint()
+
+        self.llm = instance
+        self.loadedFilePath = desiredPath
+        self.cachedTemplateHint = hint
+        self.loadedModelName = resolvedDisplayName(for: fileURL)
+        self.isLoaded = true
+        self.lastMemoryNotice = nil
+    }
+
+    public func unload() {
+        llm?.stop()
+        llm = nil
+        loadedFilePath = nil
+        cachedTemplateHint = nil
+        loadedModelName = nil
+        isLoaded = false
+        isGenerating = false
+    }
+
+    public func parseVoiceTranscript(
+        _ transcript: String,
+        context: ActiveSessionPromptContext
+    ) async -> WorkoutCommandIntent {
+        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return WorkoutCommandIntent(
+                action: .unknown,
+                rawTranscript: transcript,
+                parserSource: .ruleBased
+            )
+        }
+
+        guard modelManager.isLLMDownloaded else {
+            return RuleBasedWorkoutParser.parse(trimmed, context: context)
+        }
+
+        await acquireExclusiveAccess()
+        defer { releaseExclusiveAccess() }
+
+        isGenerating = true
+        defer { isGenerating = false }
+
+        do {
+            try await ensureLoaded()
+            guard let bot = llm else {
+                return RuleBasedWorkoutParser.parse(trimmed, context: context)
+            }
+
+            let systemPrompt = Self.buildParserSystemPrompt(context: context)
+            bot.reset()
+            bot.temp = 0.1
+            bot.systemPrompt = systemPrompt
+            bot.template = makeTemplate(systemPrompt: systemPrompt)
+
+            let userPrompt = "Gym voice transcript: \"\(trimmed)\""
+            let structured = try await bot.respond(
+                to: userPrompt,
+                as: LLMParsedVoiceCommand.self,
+                thinking: .suppressed
+            )
+
+            let intent = structured.value.toDomainIntent(rawTranscript: trimmed)
+
+            if intent.action == .unknown || (intent.action == .logSets && intent.items.isEmpty) {
+                let fallback = RuleBasedWorkoutParser.parse(trimmed, context: context)
+                if fallback.action != .unknown {
+                    return fallback
+                }
+            }
+
+            return intent
+        } catch {
+            return RuleBasedWorkoutParser.parse(trimmed, context: context)
+        }
+    }
+
+    public func streamCoachReply(
+        userMessage: String,
+        workoutContext: String,
+        history: [(role: CoachRole, content: String)],
+        onDelta: @MainActor @escaping (String) -> Void
+    ) async throws -> String {
+        let trimmedMessage = userMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedMessage.isEmpty else { return "" }
+
+        await acquireExclusiveAccess()
+        defer { releaseExclusiveAccess() }
+
+        isGenerating = true
+        defer { isGenerating = false }
+
+        try await ensureLoaded()
+        guard let bot = llm else {
+            throw LocalLLMError.modelNotDownloaded
+        }
+
+        let coachSystemPrompt = Self.buildCoachSystemPrompt(
+            workoutContext: workoutContext,
+            history: history
+        )
+
+        bot.reset()
+        bot.temp = 0.65
+        bot.systemPrompt = coachSystemPrompt
+        bot.template = makeTemplate(systemPrompt: coachSystemPrompt)
+
+        let accumulator = LockedStringAccumulator()
+        await bot.respond(to: trimmedMessage, thinking: .suppressed) { stream in
+            var fullText = ""
+            for await delta in stream {
+                guard !delta.isEmpty else { continue }
+                fullText += delta
+                accumulator.append(delta)
+                await MainActor.run {
+                    onDelta(delta)
+                }
+            }
+            return fullText
+        }
+
+        let finalReply = accumulator.value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return finalReply
+    }
+
+    public func stopGeneration() {
+        llm?.stop()
+    }
+
+    // MARK: - Memory & Serialization Helpers
+
+    private func handleMemoryWarning() {
+        unload()
+        lastMemoryNotice = "Released model memory cleanly; reloads automatically on next use."
+    }
+
+    private func acquireExclusiveAccess() async {
+        if !isExecutingExclusiveTask {
+            isExecutingExclusiveTask = true
+            return
+        }
+        await withCheckedContinuation { continuation in
+            accessWaiters.append(continuation)
+        }
+    }
+
+    private func releaseExclusiveAccess() {
+        if !accessWaiters.isEmpty {
+            let next = accessWaiters.removeFirst()
+            next.resume()
+        } else {
+            isExecutingExclusiveTask = false
+        }
+    }
+
+    private func resolvedDisplayName(for fileURL: URL) -> String {
+        if modelManager.selectedLLMPreset == .custom {
+            return modelManager.customLLMFileName ?? fileURL.lastPathComponent
+        }
+        return modelManager.selectedLLMPreset.displayName
+    }
+
+    /// Chooses a clean chat template compatible with the loaded GGUF's embedded Jinja hint
+    /// so both structured JSON decoding (`respond(to:as:)`) and streaming chat format prompts accurately.
+    private func makeTemplate(systemPrompt: String) -> Template {
+        let hint = cachedTemplateHint ?? ""
+
+        if hint.contains("<|start_header_id|>") {
+            return Template(
+                prefix: "<|begin_of_text|>",
+                system: ("<|start_header_id|>system<|end_header_id|>\n\n", "<|eot_id|>"),
+                user: ("<|start_header_id|>user<|end_header_id|>\n\n", "<|eot_id|>"),
+                bot: ("<|start_header_id|>assistant<|end_header_id|>\n\n", "<|eot_id|>"),
+                stopSequence: "<|eot_id|>",
+                systemPrompt: systemPrompt
+            )
+        }
+
+        if hint.contains("<start_of_turn>") {
+            return Template(
+                system: ("<start_of_turn>user\n", "\n\n"),
+                user: ("", "<end_of_turn>\n"),
+                bot: ("<start_of_turn>model\n", "<end_of_turn>\n"),
+                stopSequence: "<end_of_turn>",
+                systemPrompt: systemPrompt
+            )
+        }
+
+        if hint.contains("[INST]") {
+            return Template.llama(systemPrompt)
+        }
+
+        // Clean ChatML (native format for Qwen 2.5 1.5B / 0.5B and most modern GGUFs).
+        return Template(
+            system: ("<|im_start|>system\n", "<|im_end|>\n"),
+            user: ("<|im_start|>user\n", "<|im_end|>\n"),
+            bot: ("<|im_start|>assistant\n", "<|im_end|>\n"),
+            stopSequence: "<|im_end|>",
+            systemPrompt: systemPrompt
+        )
+    }
+
+    // MARK: - Prompt Construction
+
+    private static func buildParserSystemPrompt(context: ActiveSessionPromptContext) -> String {
+        let recent = context.recentExercisesInSession.isEmpty
+            ? "none"
+            : context.recentExercisesInSession.prefix(6).joined(separator: ", ")
+        let lastExercise = context.lastExerciseName ?? "none"
+        let catalogHint = ExerciseCatalog.promptHint(limit: 30)
+
+        return """
+        You are Buddy's offline gym workout command parser. Convert spoken gym transcripts into structured workout actions.
+
+        Active session context:
+        - Preferred default unit: \(context.preferredUnit.rawValue)
+        - Session active: \(context.isSessionActive ? "yes" : "no")
+        - Last exercise logged: \(lastExercise)
+        - Recent session exercises: \(recent)
+
+        Common canonical exercises: \(catalogHint)
+
+        Rules:
+        1. Choose action:
+           - "logSets": logging one or more exercises/sets. If user says "another set", "one more", or "same weight", use Last exercise logged ("\(lastExercise)").
+           - "updateLastSet": correcting the most recent set ("make that 85 kg", "actually 12 reps", "mark as warmup").
+           - "deleteLastSet": removing/undoing the last logged set.
+           - "deleteLastExercise": removing the last logged exercise.
+           - "endSession": finishing or ending the workout.
+           - "unknown": not a workout command.
+        2. "sets" must be an integer >= 1 (default 1). "3 sets of 10" -> sets: 3, reps: 10.
+        3. "unit" must be "kg" or "lbs" ONLY when explicitly spoken; omit it otherwise.
+        4. For timed holds or cardio (e.g. "2 minute plank"), set "durationSeconds" (e.g. 120).
+        5. Use "tag": "warmup", "dropset", "failure", or "normal" when mentioned.
+        6. Omit optional fields (reps, weight, unit, durationSeconds, tag, note) when not mentioned; do not output null.
+        7. Write a concise 3-8 word "summary" of the logged action.
+        """
+    }
+
+    private static func buildCoachSystemPrompt(
+        workoutContext: String,
+        history: [(role: CoachRole, content: String)]
+    ) -> String {
+        let cappedContext = String(workoutContext.prefix(1400))
+        let recentTurns = history.suffix(4)
+
+        var historyBlock = ""
+        if !recentTurns.isEmpty {
+            let formattedTurns = recentTurns.map { turn in
+                let speaker = turn.role == .user ? "User" : "Coach"
+                let snippet = turn.content
+                    .replacingOccurrences(of: "\n", with: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return "- \(speaker): \(String(snippet.prefix(240)))"
+            }.joined(separator: "\n")
+
+            historyBlock = """
+
+            Recent conversation:
+            \(formattedTurns)
+            """
+        }
+
+        return """
+        You are Buddy, an encouraging, concise, evidence-based personal strength & conditioning coach running 100% offline on the user's iPhone.
+
+        Guidelines:
+        - Ground advice in the user's actual logged workout data below; never invent numbers that are not listed.
+        - Keep replies clear, practical, and easy to scan between sets (short paragraphs or crisp bullets).
+        - Suggest sensible progressive overload, recovery, exercise swaps, or form cues tailored to the user's goal.
+
+        Workout data snapshot:
+        \(cappedContext.isEmpty ? "No logged workouts yet." : cappedContext)\(historyBlock)
+        """
+    }
+}

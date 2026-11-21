@@ -1,0 +1,264 @@
+name: Build & Package Buddy IPA
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-test-package:
+    name: Test, Archive & Package IPA
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Inspect Xcode environment
+        run: |
+          xcodebuild -version
+          xcrun simctl list runtimes
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Cache SwiftPM packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            DerivedData/SourcePackages
+          key: spm-${{ runner.os }}-${{ hashFiles('project.yml', 'Buddy.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: |
+            spm-${{ runner.os }}-
+
+      - name: Select iOS Simulator destination
+        id: simulator
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess, sys
+
+          raw = subprocess.check_output(
+              ["xcrun", "simctl", "list", "devices", "available", "-j"],
+              text=True,
+          )
+          data = json.loads(raw)
+          devices_by_runtime = data.get("devices", {})
+
+          def runtime_version(rt):
+              m = re.search(r"iOS-(\d+)-(\d+)", rt)
+              return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+
+          ios_runtimes = sorted(
+              [rt for rt in devices_by_runtime if "SimRuntime.iOS-" in rt],
+              key=runtime_version,
+              reverse=True,
+          )
+
+          candidates = []
+          for rt in ios_runtimes:
+              for d in devices_by_runtime.get(rt, []):
+                  if d.get("isAvailable", False) and d.get("name", "").startswith("iPhone"):
+                      candidates.append((rt, d["name"], d["udid"]))
+
+          if not candidates:
+              print("No available iPhone simulators found.", file=sys.stderr)
+              sys.exit(1)
+
+          def rank(item):
+              _, name, _ = item
+              if name == "iPhone 15 Plus":
+                  return (0, name)
+              if name in ("iPhone 16 Plus", "iPhone 16", "iPhone 15"):
+                  return (1, name)
+              if name.startswith("iPhone 15") or name.startswith("iPhone 16"):
+                  return (2, name)
+              return (3, name)
+
+          chosen_rt, chosen_name, chosen_udid = min(candidates, key=rank)
+          destination = f"platform=iOS Simulator,id={chosen_udid}"
+          print(f"Selected simulator: {chosen_name} ({chosen_udid}) on {chosen_rt}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"destination={destination}\n")
+              fh.write(f"name={chosen_name}\n")
+          PY
+
+      - name: Run unit tests on iOS Simulator
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project Buddy.xcodeproj \
+            -scheme Buddy \
+            -destination "${{ steps.simulator.outputs.destination }}" \
+            -derivedDataPath DerivedData \
+            -skipMacroValidation \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Archive unsigned Release iOS app
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project Buddy.xcodeproj \
+            -scheme Buddy \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/Buddy.xcarchive \
+            -derivedDataPath DerivedData \
+            -skipMacroValidation \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES
+
+      - name: Package Buddy.ipa
+        run: |
+          set -euo pipefail
+          rm -rf build/ipa_stage build/Buddy.ipa
+          mkdir -p build/ipa_stage/Payload
+          ditto build/Buddy.xcarchive/Products/Applications/Buddy.app build/ipa_stage/Payload/Buddy.app
+          (cd build/ipa_stage && zip -qry ../Buddy.ipa Payload)
+          ls -lh build/Buddy.ipa
+
+      - name: Verify IPA contents & metadata
+        id: verify
+        run: |
+          set -euo pipefail
+          IPA_PATH="build/Buddy.ipa"
+          test -f "$IPA_PATH"
+
+          # Verify required bundle entries inside the packaged IPA
+          ZIP_LIST="$(unzip -Z1 "$IPA_PATH")"
+          echo "$ZIP_LIST" | grep -Fx "Payload/Buddy.app/Info.plist" >/dev/null
+          echo "$ZIP_LIST" | grep -E "^Payload/Buddy\.app/PlugIns/BuddyWidgets\.appex/" >/dev/null
+
+          # Extract Info.plist from the IPA and validate Live Activities & URL scheme
+          TMP_PLIST="$(mktemp /tmp/buddy_info.XXXXXX.plist)"
+          trap 'rm -f "$TMP_PLIST"' EXIT
+          unzip -p "$IPA_PATH" "Payload/Buddy.app/Info.plist" > "$TMP_PLIST"
+
+          LIVE_ACTIVITIES="$(/usr/libexec/PlistBuddy -c "Print :NSSupportsLiveActivities" "$TMP_PLIST")"
+          if [ "$LIVE_ACTIVITIES" != "true" ]; then
+            echo "ERROR: Expected NSSupportsLiveActivities=true, got '$LIVE_ACTIVITIES'" >&2
+            exit 1
+          fi
+
+          URL_SCHEME="$(/usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes:0:CFBundleURLSchemes:0" "$TMP_PLIST")"
+          if [ "$URL_SCHEME" != "buddy" ]; then
+            echo "ERROR: Expected buddy URL scheme, got '$URL_SCHEME'" >&2
+            exit 1
+          fi
+
+          IPA_BYTES="$(stat -f%z "$IPA_PATH")"
+          IPA_MB="$(awk "BEGIN { printf \"%.2f\", ${IPA_BYTES}/1048576 }")"
+          echo "Verified Payload/Buddy.app/Info.plist (NSSupportsLiveActivities=true, scheme=buddy)"
+          echo "Verified Payload/Buddy.app/PlugIns/BuddyWidgets.appex"
+          echo "IPA size: ${IPA_MB} MB (${IPA_BYTES} bytes)"
+
+          echo "ipa_bytes=${IPA_BYTES}" >> "$GITHUB_OUTPUT"
+          echo "ipa_mb=${IPA_MB}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Buddy.ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Buddy-IPA
+          path: build/Buddy.ipa
+          if-no-files-found: error
+
+      - name: Update apps.json metadata for tag release
+        id: release_meta
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          IPA_BYTES: ${{ steps.verify.outputs.ipa_bytes }}
+          TAG_NAME: ${{ github.ref_name }}
+          REPO_SLUG: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import datetime, json, os, pathlib
+
+          tag = os.environ["TAG_NAME"]
+          version = tag[1:] if tag.startswith("v") else tag
+          repo = os.environ["REPO_SLUG"]
+          size = int(os.environ["IPA_BYTES"])
+          now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+          download_url = f"https://github.com/{repo}/releases/download/{tag}/Buddy.ipa"
+
+          source_path = pathlib.Path("apps.json")
+          data = json.loads(source_path.read_text(encoding="utf-8"))
+
+          app = data["apps"][0]
+          app["version"] = version
+          app["versionDate"] = now_iso
+          app["size"] = size
+          app["downloadURL"] = download_url
+          app["iconURL"] = f"https://raw.githubusercontent.com/{repo}/main/docs/icon.png"
+
+          new_entry = {
+              "version": version,
+              "date": now_iso,
+              "localizedDescription": app.get(
+                  "versionDescription",
+                  f"Buddy {version} release."
+              ),
+              "downloadURL": download_url,
+              "size": size,
+              "minOSVersion": "17.0",
+          }
+
+          existing_versions = [
+              v for v in app.get("versions", []) if v.get("version") != version
+          ]
+          app["versions"] = [new_entry] + existing_versions
+
+          data["iconURL"] = f"https://raw.githubusercontent.com/{repo}/main/docs/icon.png"
+          data["website"] = f"https://github.com/{repo}"
+
+          out_path = pathlib.Path("build/apps.json")
+          out_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"version={version}\n")
+              fh.write(f"date={now_iso}\n")
+              fh.write(f"size={size}\n")
+              fh.write(f"download_url={download_url}\n")
+
+          print(f"Prepared build/apps.json for v{version} ({size} bytes) -> {download_url}")
+          PY
+
+      - name: Upload updated apps.json artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: SideStore-Source-apps-json
+          path: build/apps.json
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ### Buddy ${{ steps.release_meta.outputs.version }}
+            - **IPA Size:** ${{ steps.verify.outputs.ipa_mb }} MB (`${{ steps.verify.outputs.ipa_bytes }}` bytes)
+            - **Download URL:** `${{ steps.release_meta.outputs.download_url }}`
+            - **SideStore Source:** Updated `apps.json` is attached to this release and workflow artifacts.
+          files: |
+            build/Buddy.ipa
+            build/apps.json
