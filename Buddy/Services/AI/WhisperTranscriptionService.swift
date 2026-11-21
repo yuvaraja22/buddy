@@ -193,7 +193,7 @@ public final class WhisperTranscriptionService {
 
     /// Ensures ultra-short clips (0.15s–1.25s) have clean trailing silence so WhisperKit's
     /// mel spectrogram + single-window decoder never drops short spoken commands like "Undo".
-    public static func prepareAudioSamplesForWhisper(_ samples: [Float], minimumSamples: Int = 20_000) -> [Float] {
+    public nonisolated static func prepareAudioSamplesForWhisper(_ samples: [Float], minimumSamples: Int = 20_000) -> [Float] {
         guard samples.count < minimumSamples else { return samples }
         return samples + Array(repeating: Float(0), count: minimumSamples - samples.count)
     }
