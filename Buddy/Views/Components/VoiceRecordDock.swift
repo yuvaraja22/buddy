@@ -2,6 +2,7 @@ import SwiftUI
 
 struct VoiceRecordDock: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
 
     let pipeline: VoicePipelineCoordinator
     let store: WorkoutStore
@@ -57,6 +58,12 @@ struct VoiceRecordDock: View {
                 handleTouchDown()
             } else if wasPressed && !nowPressed {
                 handleTouchUp()
+            }
+        }
+        .onChange(of: pipeline.phase) { _, newPhase in
+            if case .recording = newPhase {
+                isShowingTextInput = false
+                isTextInputFocused = false
             }
         }
         .onDisappear {
@@ -247,6 +254,27 @@ struct VoiceRecordDock: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityMicLabel)
         .accessibilityAddTraits(.isButton)
+        .accessibilityAction {
+            handleAccessibilityActivation()
+        }
+    }
+
+    private func handleAccessibilityActivation() {
+        guard !isTranscribingOrParsing else { return }
+        switch pipeline.phase {
+        case .idle:
+            BuddyHaptics.lightImpact()
+            pipeline.beginRecording(isHoldMode: false)
+        case .error:
+            pipeline.dismissError()
+            BuddyHaptics.lightImpact()
+            pipeline.beginRecording(isHoldMode: false)
+        case .recording:
+            BuddyHaptics.mediumImpact()
+            pipeline.finishRecordingAndProcess(into: store)
+        case .transcribing, .parsing:
+            break
+        }
     }
 
     private func handleTouchDown() {
@@ -292,6 +320,13 @@ struct VoiceRecordDock: View {
         holdPromotionTask = nil
 
         guard case .recording(let currentlyHold) = pipeline.phase else { return }
+
+        // If the gesture ended because iOS interrupted the app (Control Center, Home swipe,
+        // incoming alert), cancel instead of submitting truncated audio for background inference.
+        if scenePhase != .active {
+            cancelCurrentRecording()
+            return
+        }
 
         if currentlyHold {
             // Released from hold-to-record -> immediately stop and process.
@@ -359,6 +394,11 @@ struct VoiceRecordDock: View {
             .buttonStyle(.plain)
             .disabled(trimmedTypedInput.isEmpty)
             .accessibilityLabel("Send workout command")
+        }
+        .onAppear {
+            Task { @MainActor in
+                isTextInputFocused = true
+            }
         }
     }
 

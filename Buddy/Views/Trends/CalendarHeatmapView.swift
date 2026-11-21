@@ -7,7 +7,11 @@ struct CalendarHeatmapView: View {
 
     var body: some View {
         let weeks = buildWeekColumns()
-        let activeDaysCount = days.filter { $0.setCount > 0 }.count
+        let activeDaysCount = weeks
+            .flatMap { $0 }
+            .compactMap { $0 }
+            .filter { $0.setCount > 0 }
+            .count
 
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 6) {
@@ -92,19 +96,26 @@ struct CalendarHeatmapView: View {
             return Array(repeating: Array(repeating: nil, count: 7), count: 12)
         }
 
-        let calendar = Calendar.current
+        // Explicitly anchor to Sunday-first so week columns match weekdayLabels ["S"..."S"]
+        // chronologically even on devices configured for Monday-first locales (UK/EU/India).
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = Calendar.current.timeZone
+        calendar.firstWeekday = 1
+
         var columns: [[HeatmapDay?]] = []
         var currentWeek: [HeatmapDay?] = Array(repeating: nil, count: 7)
-        var currentWeekKey: DateComponents?
+        var currentWeekKey: Date?
 
         for day in sorted {
-            let comps = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: day.date)
-            if let activeKey = currentWeekKey, activeKey != comps {
+            let startOfDay = calendar.startOfDay(for: day.date)
+            let weekdayIndex = max(0, min(6, calendar.component(.weekday, from: startOfDay) - 1))
+            let weekStart = calendar.date(byAdding: .day, value: -weekdayIndex, to: startOfDay) ?? startOfDay
+
+            if let activeKey = currentWeekKey, activeKey != weekStart {
                 columns.append(currentWeek)
                 currentWeek = Array(repeating: nil, count: 7)
             }
-            currentWeekKey = comps
-            let weekdayIndex = max(0, min(6, calendar.component(.weekday, from: day.date) - 1))
+            currentWeekKey = weekStart
             currentWeek[weekdayIndex] = day
         }
         columns.append(currentWeek)

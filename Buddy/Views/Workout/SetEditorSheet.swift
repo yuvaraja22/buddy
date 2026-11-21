@@ -6,6 +6,14 @@ struct SetEditorSheet: View {
     let set: LoggedSet
     let store: WorkoutStore
 
+    // Value snapshots captured on init so animated sheet dismissal never touches
+    // a deleted SwiftData backing object, and untouched weight avoids unit rounding drift.
+    private let exerciseNameSnapshot: String
+    private let setNumberSnapshot: Int
+    private let rawTranscriptSnapshot: String
+    private let initialWeightText: String
+    private let initialWeightKg: Double?
+
     @State private var weightValue: Double
     @State private var weightText: String
     @State private var hasReps: Bool
@@ -17,11 +25,18 @@ struct SetEditorSheet: View {
     init(set: LoggedSet, store: WorkoutStore) {
         self.set = set
         self.store = store
+        self.exerciseNameSnapshot = set.entry?.exerciseName ?? "Edit Set"
+        self.setNumberSnapshot = set.setNumber
+        self.rawTranscriptSnapshot = set.rawTranscript
+        self.initialWeightKg = set.weightKg
 
         let convertedWeight = set.weightKg.map { store.preferredUnit.fromKg($0) } ?? 0
         let roundedWeight = (convertedWeight * 10).rounded() / 10
+        let formattedInitial = roundedWeight > 0 ? Self.formatNumeric(roundedWeight) : ""
+        self.initialWeightText = formattedInitial
+
         _weightValue = State(initialValue: roundedWeight)
-        _weightText = State(initialValue: roundedWeight > 0 ? Self.formatNumeric(roundedWeight) : "")
+        _weightText = State(initialValue: formattedInitial)
         _hasReps = State(initialValue: set.reps != nil || set.durationSeconds == nil)
         _reps = State(initialValue: max(1, set.reps ?? 10))
         _durationText = State(initialValue: set.durationSeconds.map { "\($0)" } ?? "")
@@ -38,7 +53,7 @@ struct SetEditorSheet: View {
                 notesSection
                 deleteSection
             }
-            .navigationTitle(set.entry?.exerciseName ?? "Edit Set")
+            .navigationTitle(exerciseNameSnapshot)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -72,9 +87,12 @@ struct SetEditorSheet: View {
                     .monospacedDigit()
                     .foregroundStyle(BuddyTheme.cobalt)
                     .onChange(of: weightText) { _, newValue in
-                        if let parsed = Double(newValue.replacingOccurrences(of: ",", with: ".")) {
+                        let cleaned = newValue
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                            .replacingOccurrences(of: ",", with: ".")
+                        if let parsed = Double(cleaned) {
                             weightValue = max(0, parsed)
-                        } else if newValue.trimmingCharacters(in: .whitespaces).isEmpty {
+                        } else if cleaned.isEmpty {
                             weightValue = 0
                         }
                     }
@@ -101,7 +119,7 @@ struct SetEditorSheet: View {
             }
             .padding(.vertical, 2)
         } header: {
-            Text("Set \(set.setNumber) · Load")
+            Text("Set \(setNumberSnapshot) · Load")
         }
     }
 
@@ -184,8 +202,8 @@ struct SetEditorSheet: View {
         } header: {
             Text("Notes")
         } footer: {
-            if !set.rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text("Voice transcript: “\(set.rawTranscript)”")
+            if !rawTranscriptSnapshot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text("Voice transcript: “\(rawTranscriptSnapshot)”")
             }
         }
     }
@@ -194,8 +212,11 @@ struct SetEditorSheet: View {
         Section {
             Button(role: .destructive) {
                 BuddyHaptics.warning()
-                store.deleteSet(set)
                 dismiss()
+                let targetSet = set
+                Task { @MainActor in
+                    store.deleteSet(targetSet)
+                }
             } label: {
                 HStack {
                     Spacer()
@@ -217,14 +238,18 @@ struct SetEditorSheet: View {
     }
 
     private func saveChanges() {
-        let parsedWeight = Double(weightText.replacingOccurrences(of: ",", with: "."))
-        let resolvedWeightKg: Double? = {
-            guard let parsedWeight, parsedWeight > 0 else { return nil }
-            return store.preferredUnit.toKg(parsedWeight)
-        }()
+        let trimmedWeightText = weightText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedWeightKg: Double?
+        if trimmedWeightText == initialWeightText {
+            // Preserve exact underlying kg value when the user didn't edit weight.
+            resolvedWeightKg = initialWeightKg
+        } else {
+            let parsedWeight = Double(trimmedWeightText.replacingOccurrences(of: ",", with: "."))
+            resolvedWeightKg = parsedWeight.flatMap { $0 > 0 ? store.preferredUnit.toKg($0) : nil }
+        }
 
         let resolvedReps: Int? = hasReps ? max(1, reps) : nil
-        let resolvedDuration: Int? = Int(durationText.trimmingCharacters(in: .whitespaces)).flatMap { $0 > 0 ? $0 : nil }
+        let resolvedDuration: Int? = Int(durationText.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0 > 0 ? $0 : nil }
 
         store.updateSet(
             set,

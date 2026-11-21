@@ -31,6 +31,7 @@ struct BuddyApp: App {
             modelManager: manager
         )
         let store = WorkoutStore(modelContext: container.mainContext)
+        coordinator.attachStore(store)
 
         _modelManager = State(initialValue: manager)
         _audioRecorder = State(initialValue: recorder)
@@ -55,9 +56,10 @@ struct BuddyApp: App {
         .onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
             case .background:
-                if audioRecorder.isRecording {
+                if pipeline.phase != .idle {
                     pipeline.cancelRecording()
                 }
+                llmService.stopGeneration()
                 WidgetRefreshHelper.sync(store: workoutStore)
             case .active:
                 modelManager.refreshDownloadState()

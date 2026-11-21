@@ -48,7 +48,9 @@ public final class WhisperTranscriptionService {
     private let modelManager: ModelManager
     @ObservationIgnored private var whisperKit: WhisperKit?
     @ObservationIgnored private var loadedFolderPath: String?
+    @ObservationIgnored private var loadedVariantRawValue: String?
     @ObservationIgnored private var isTranscribing: Bool = false
+    @ObservationIgnored private var memoryWarningDuringActivity: Bool = false
     @ObservationIgnored private var inFlightLoadTask: Task<Void, Error>?
     @ObservationIgnored private var memoryWarningObserver: WhisperMemoryObserverToken?
 
@@ -56,8 +58,12 @@ public final class WhisperTranscriptionService {
         self.modelManager = modelManager
         self.memoryWarningObserver = WhisperMemoryObserverToken { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self, !self.isTranscribing, !self.isLoading else { return }
-                await self.unload()
+                guard let self else { return }
+                if self.isTranscribing || self.isLoading {
+                    self.memoryWarningDuringActivity = true
+                } else {
+                    await self.unload()
+                }
             }
         }
     }
@@ -67,13 +73,14 @@ public final class WhisperTranscriptionService {
             throw WhisperServiceError.modelNotDownloaded
         }
 
-        let desiredVariant = modelManager.selectedWhisperPreset.rawValue
+        let desiredPreset = modelManager.selectedWhisperPreset
+        let desiredVariant = desiredPreset.rawValue
         let desiredPath = folder.path
 
         if whisperKit != nil,
            isLoaded,
            loadedFolderPath == desiredPath,
-           loadedVariantName == desiredVariant {
+           loadedVariantRawValue == desiredVariant {
             return
         }
 
@@ -82,7 +89,7 @@ public final class WhisperTranscriptionService {
             if whisperKit != nil,
                isLoaded,
                loadedFolderPath == desiredPath,
-               loadedVariantName == desiredVariant {
+               loadedVariantRawValue == desiredVariant {
                 return
             }
         }
@@ -93,6 +100,7 @@ public final class WhisperTranscriptionService {
                 await self.unload()
             }
 
+            self.memoryWarningDuringActivity = false
             self.isLoading = true
             defer { self.isLoading = false }
 
@@ -113,9 +121,17 @@ public final class WhisperTranscriptionService {
             )
 
             let pipe = try await WhisperKit(config)
+            if self.memoryWarningDuringActivity || Task.isCancelled {
+                await pipe.unloadModels()
+                self.memoryWarningDuringActivity = false
+                if Task.isCancelled { throw CancellationError() }
+                throw WhisperServiceError.transcriptionFailed("Released speech model due to low iPhone memory. Please try again.")
+            }
+
             self.whisperKit = pipe
             self.loadedFolderPath = desiredPath
-            self.loadedVariantName = desiredVariant
+            self.loadedVariantRawValue = desiredVariant
+            self.loadedVariantName = desiredPreset.displayName
             self.isLoaded = true
         }
 
@@ -136,8 +152,20 @@ public final class WhisperTranscriptionService {
         }
 
         isTranscribing = true
-        defer { isTranscribing = false }
+        defer {
+            isTranscribing = false
+            if memoryWarningDuringActivity {
+                memoryWarningDuringActivity = false
+                Task { @MainActor [weak self] in
+                    await self?.unload()
+                }
+            }
+        }
 
+        let paddedSamples = Self.prepareAudioSamplesForWhisper(samples)
+
+        // Setting windowClipTime = 0.0 prevents WhisperKit's default 1.0s end-padding
+        // from skipping single-window decoding on short gym commands (< 1.0s).
         let options = DecodingOptions(
             verbose: false,
             task: .transcribe,
@@ -147,12 +175,13 @@ public final class WhisperTranscriptionService {
             usePrefillPrompt: true,
             skipSpecialTokens: true,
             withoutTimestamps: true,
-            wordTimestamps: false
+            wordTimestamps: false,
+            windowClipTime: 0.0
         )
 
         do {
             let results: [TranscriptionResult] = try await pipe.transcribe(
-                audioArray: samples,
+                audioArray: paddedSamples,
                 decodeOptions: options
             )
             let combined = results.map(\.text).joined(separator: " ")
@@ -162,12 +191,20 @@ public final class WhisperTranscriptionService {
         }
     }
 
+    /// Ensures ultra-short clips (0.15s–1.25s) have clean trailing silence so WhisperKit's
+    /// mel spectrogram + single-window decoder never drops short spoken commands like "Undo".
+    public static func prepareAudioSamplesForWhisper(_ samples: [Float], minimumSamples: Int = 20_000) -> [Float] {
+        guard samples.count < minimumSamples else { return samples }
+        return samples + Array(repeating: Float(0), count: minimumSamples - samples.count)
+    }
+
     public func unload() async {
         if let pipe = whisperKit {
             await pipe.unloadModels()
         }
         whisperKit = nil
         loadedFolderPath = nil
+        loadedVariantRawValue = nil
         loadedVariantName = nil
         isLoaded = false
     }

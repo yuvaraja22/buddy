@@ -32,8 +32,11 @@ private struct BuddyLockScreenWidgetView: View {
         if let activeName = entry.snapshot.activeSession?.lastExerciseName {
             return activeName
         }
-        if let latest = entry.snapshot.todayExercises.last?.name {
+        if let latest = entry.snapshot.lastTodayExerciseName {
             return latest
+        }
+        if let fallback = entry.snapshot.todayExercises.first?.name {
+            return fallback
         }
         return "Tap to log voice set"
     }

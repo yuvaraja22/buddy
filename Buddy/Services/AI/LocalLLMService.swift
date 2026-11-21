@@ -78,6 +78,7 @@ public final class LocalLLMService {
     // FIFO serialization gate preventing concurrent access to the underlying llama_context.
     @ObservationIgnored private var isExecutingExclusiveTask: Bool = false
     @ObservationIgnored private var accessWaiters: [CheckedContinuation<Void, Never>] = []
+    @ObservationIgnored private var pendingMemoryUnload: Bool = false
 
     public init(modelManager: ModelManager) {
         self.modelManager = modelManager
@@ -89,6 +90,8 @@ public final class LocalLLMService {
     }
 
     public func ensureLoaded() async throws {
+        try Task.checkCancellation()
+
         guard let fileURL = modelManager.activeLLMFileURL else {
             throw LocalLLMError.modelNotDownloaded
         }
@@ -99,9 +102,10 @@ public final class LocalLLMService {
         }
 
         if llm != nil {
-            unload()
+            releaseLoadedModel()
         }
 
+        pendingMemoryUnload = false
         isLoading = true
         defer { isLoading = false }
 
@@ -118,12 +122,33 @@ public final class LocalLLMService {
             return UncheckedSendableBox(value: instance)
         }.value
 
+        if pendingMemoryUnload {
+            pendingMemoryUnload = false
+            loadedBox.value?.stop()
+            lastMemoryNotice = "Released model memory cleanly; reloads automatically on next use."
+            throw LocalLLMError.loadFailed("Low memory while loading model. Please try again.")
+        }
+
+        if Task.isCancelled {
+            loadedBox.value?.stop()
+            throw CancellationError()
+        }
+
         guard let instance = loadedBox.value else {
             throw LocalLLMError.loadFailed("Failed to initialize \(fileURL.lastPathComponent).")
         }
 
         instance.postprocess = { _ in }
         let hint = await instance.core.getChatTemplateHint()
+
+        if pendingMemoryUnload || Task.isCancelled {
+            instance.stop()
+            if pendingMemoryUnload {
+                pendingMemoryUnload = false
+                lastMemoryNotice = "Released model memory cleanly; reloads automatically on next use."
+            }
+            throw CancellationError()
+        }
 
         self.llm = instance
         self.loadedFilePath = desiredPath
@@ -134,13 +159,21 @@ public final class LocalLLMService {
     }
 
     public func unload() {
+        if isLoading || isGenerating {
+            pendingMemoryUnload = true
+            llm?.stop()
+            return
+        }
+        releaseLoadedModel()
+    }
+
+    private func releaseLoadedModel() {
         llm?.stop()
         llm = nil
         loadedFilePath = nil
         cachedTemplateHint = nil
         loadedModelName = nil
         isLoaded = false
-        isGenerating = false
     }
 
     public func parseVoiceTranscript(
@@ -161,13 +194,24 @@ public final class LocalLLMService {
         }
 
         await acquireExclusiveAccess()
-        defer { releaseExclusiveAccess() }
+        defer {
+            if pendingMemoryUnload {
+                pendingMemoryUnload = false
+                releaseLoadedModel()
+            }
+            releaseExclusiveAccess()
+        }
+
+        guard !Task.isCancelled else {
+            return WorkoutCommandIntent(action: .unknown, rawTranscript: trimmed, parserSource: .localLLM)
+        }
 
         isGenerating = true
         defer { isGenerating = false }
 
         do {
             try await ensureLoaded()
+            try Task.checkCancellation()
             guard let bot = llm else {
                 return RuleBasedWorkoutParser.parse(trimmed, context: context)
             }
@@ -179,12 +223,19 @@ public final class LocalLLMService {
             bot.template = makeTemplate(systemPrompt: systemPrompt)
 
             let userPrompt = "Gym voice transcript: \"\(trimmed)\""
-            let structured = try await bot.respond(
-                to: userPrompt,
-                as: LLMParsedVoiceCommand.self,
-                thinking: .suppressed
-            )
+            let structured = try await withTaskCancellationHandler {
+                try await bot.respond(
+                    to: userPrompt,
+                    as: LLMParsedVoiceCommand.self,
+                    thinking: .suppressed
+                )
+            } onCancel: {
+                Task { @MainActor [weak self] in
+                    self?.stopGeneration()
+                }
+            }
 
+            try Task.checkCancellation()
             let intent = structured.value.toDomainIntent(rawTranscript: trimmed)
 
             if intent.action == .unknown || (intent.action == .logSets && intent.items.isEmpty) {
@@ -195,6 +246,8 @@ public final class LocalLLMService {
             }
 
             return intent
+        } catch is CancellationError {
+            return WorkoutCommandIntent(action: .unknown, rawTranscript: trimmed, parserSource: .localLLM)
         } catch {
             return RuleBasedWorkoutParser.parse(trimmed, context: context)
         }
@@ -210,12 +263,21 @@ public final class LocalLLMService {
         guard !trimmedMessage.isEmpty else { return "" }
 
         await acquireExclusiveAccess()
-        defer { releaseExclusiveAccess() }
+        defer {
+            if pendingMemoryUnload {
+                pendingMemoryUnload = false
+                releaseLoadedModel()
+            }
+            releaseExclusiveAccess()
+        }
+
+        try Task.checkCancellation()
 
         isGenerating = true
         defer { isGenerating = false }
 
         try await ensureLoaded()
+        try Task.checkCancellation()
         guard let bot = llm else {
             throw LocalLLMError.modelNotDownloaded
         }
@@ -231,17 +293,27 @@ public final class LocalLLMService {
         bot.template = makeTemplate(systemPrompt: coachSystemPrompt)
 
         let accumulator = LockedStringAccumulator()
-        await bot.respond(to: trimmedMessage, thinking: .suppressed) { stream in
-            var fullText = ""
-            for await delta in stream {
-                guard !delta.isEmpty else { continue }
-                fullText += delta
-                accumulator.append(delta)
-                await MainActor.run {
-                    onDelta(delta)
+        await withTaskCancellationHandler {
+            await bot.respond(to: trimmedMessage, thinking: .suppressed) { stream in
+                var fullText = ""
+                for await delta in stream {
+                    guard !delta.isEmpty else { continue }
+                    fullText += delta
+                    accumulator.append(delta)
+                    await MainActor.run {
+                        onDelta(delta)
+                    }
                 }
+                return fullText
             }
-            return fullText
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.stopGeneration()
+            }
+        }
+
+        if Task.isCancelled {
+            throw CancellationError()
         }
 
         let finalReply = accumulator.value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -255,7 +327,12 @@ public final class LocalLLMService {
     // MARK: - Memory & Serialization Helpers
 
     private func handleMemoryWarning() {
-        unload()
+        if isLoading || isGenerating {
+            pendingMemoryUnload = true
+            llm?.stop()
+        } else {
+            releaseLoadedModel()
+        }
         lastMemoryNotice = "Released model memory cleanly; reloads automatically on next use."
     }
 

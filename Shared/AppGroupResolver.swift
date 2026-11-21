@@ -9,21 +9,21 @@ public enum AppGroupResolver {
 
     private static let lock = NSLock()
     private static var cachedGroupID: String?
-    private static var hasResolved = false
 
     /// Returns the active, accessible App Group identifier if one is provisioned.
+    /// Non-nil results are cached; `nil` is never permanently cached so transient startup
+    /// timing issues do not lock the app out of the shared container.
     public static func activeGroupIdentifier(
         bundle: Bundle = .main,
         fileManager: FileManager = .default
     ) -> String? {
         if bundle == .main {
             lock.lock()
-            if hasResolved {
-                let value = cachedGroupID
-                lock.unlock()
-                return value
-            }
+            let cached = cachedGroupID
             lock.unlock()
+            if let cached {
+                return cached
+            }
         }
 
         let candidates = candidateGroupIdentifiers(for: bundle)
@@ -31,10 +31,9 @@ public enum AppGroupResolver {
             fileManager.containerURL(forSecurityApplicationGroupIdentifier: candidate) != nil
         }
 
-        if bundle == .main {
+        if bundle == .main, let resolved {
             lock.lock()
             cachedGroupID = resolved
-            hasResolved = true
             lock.unlock()
         }
         return resolved
@@ -54,16 +53,30 @@ public enum AppGroupResolver {
         }
 
         if let bundleID = bundle.bundleIdentifier, !bundleID.isEmpty {
-            let rootBundleID = bundleID.hasSuffix(".widgets")
-                ? String(bundleID.dropLast(".widgets".count))
-                : bundleID
-            candidates.append("group.\(rootBundleID)")
+            candidates.append(contentsOf: derivedGroupIdentifiers(fromBundleIdentifier: bundleID))
         }
 
         candidates.append(defaultGroupIdentifier)
 
         var seen = Set<String>()
         return candidates.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
+    /// Derives candidate App Group IDs from a bundle identifier, handling both standard
+    /// Xcode builds (`com.yuvaraja.buddy.widgets`) and SideStore/AltStore re-signed
+    /// extensions (`com.yuvaraja.buddy.widgets.<TEAMID>` or `com.yuvaraja.buddy.<TEAMID>.widgets`).
+    public static func derivedGroupIdentifiers(fromBundleIdentifier bundleID: String) -> [String] {
+        guard !bundleID.isEmpty else { return [] }
+        var derived: [String] = []
+
+        if let widgetsRange = bundleID.range(of: ".widgets") {
+            let stripped = String(bundleID[..<widgetsRange.lowerBound] + bundleID[widgetsRange.upperBound...])
+            if !stripped.isEmpty {
+                derived.append("group.\(stripped)")
+            }
+        }
+        derived.append("group.\(bundleID)")
+        return derived
     }
 
     /// Extracts `com.apple.security.application-groups` from raw CMS-signed `embedded.mobileprovision` bytes.

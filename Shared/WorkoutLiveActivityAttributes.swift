@@ -4,6 +4,7 @@ import ActivityKit
 
 public struct WorkoutLiveActivityAttributes: ActivityAttributes {
     public struct ContentState: Codable, Hashable {
+        public var sessionTitle: String
         public var totalSets: Int
         public var totalReps: Int
         public var totalVolumeKg: Double
@@ -13,6 +14,7 @@ public struct WorkoutLiveActivityAttributes: ActivityAttributes {
         public var preferredUnit: WeightUnit
 
         public init(
+            sessionTitle: String,
             totalSets: Int,
             totalReps: Int,
             totalVolumeKg: Double,
@@ -21,6 +23,7 @@ public struct WorkoutLiveActivityAttributes: ActivityAttributes {
             lastSetDetail: String,
             preferredUnit: WeightUnit = .kg
         ) {
+            self.sessionTitle = sessionTitle
             self.totalSets = totalSets
             self.totalReps = totalReps
             self.totalVolumeKg = totalVolumeKg
@@ -32,12 +35,10 @@ public struct WorkoutLiveActivityAttributes: ActivityAttributes {
     }
 
     public var sessionID: String
-    public var sessionTitle: String
     public var sessionStartedAt: Date
 
-    public init(sessionID: String, sessionTitle: String, sessionStartedAt: Date) {
+    public init(sessionID: String, sessionStartedAt: Date) {
         self.sessionID = sessionID
-        self.sessionTitle = sessionTitle
         self.sessionStartedAt = sessionStartedAt
     }
 }

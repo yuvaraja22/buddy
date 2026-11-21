@@ -17,7 +17,7 @@ struct ModelSetupSheet: View {
                             title: WhisperPreset.baseEn.displayName,
                             subtitle: WhisperPreset.baseEn.subtitle,
                             sizeText: "~\(WhisperPreset.baseEn.approximateSizeMB) MB",
-                            isDownloaded: modelManager.isWhisperDownloaded,
+                            isDownloaded: modelManager.isDownloaded(.baseEn),
                             isDownloading: modelManager.isDownloadingWhisper,
                             progress: modelManager.whisperDownloadProgress,
                             onDownload: {
@@ -30,7 +30,7 @@ struct ModelSetupSheet: View {
                             title: LLMPreset.qwen25_1_5B.displayName,
                             subtitle: LLMPreset.qwen25_1_5B.subtitle,
                             sizeText: formatSizeMB(LLMPreset.qwen25_1_5B.approximateSizeMB),
-                            isDownloaded: modelManager.isLLMDownloaded,
+                            isDownloaded: modelManager.isDownloaded(.qwen25_1_5B),
                             isDownloading: modelManager.isDownloadingLLM,
                             progress: modelManager.llmDownloadProgress,
                             onDownload: {

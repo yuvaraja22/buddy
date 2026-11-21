@@ -336,35 +336,58 @@ struct TrendsView: View {
 
                 let hasNonZeroPoints = points.contains { metricValue(for: $0) > 0 }
                 if !points.isEmpty && hasNonZeroPoints {
+                    let allSameDay: Bool = {
+                        guard let first = points.first?.date else { return false }
+                        return points.allSatisfy { Calendar.current.isDate($0.date, inSameDayAs: first) }
+                    }()
+                    let xTickDates: [Date] = {
+                        if points.count <= 4 {
+                            return points.map(\.date)
+                        }
+                        let step = max(1, (points.count - 1) / 3)
+                        var selected: [Date] = []
+                        var idx = 0
+                        while idx < points.count {
+                            selected.append(points[idx].date)
+                            idx += step
+                        }
+                        if let last = points.last?.date, selected.last != last {
+                            selected.append(last)
+                        }
+                        return selected
+                    }()
+
                     Chart(points, id: \.id) { point in
                         let value = metricValue(for: point)
 
-                        AreaMark(
-                            x: .value("Date", point.date),
-                            y: .value(selectedMetric.rawValue, value)
-                        )
-                        .interpolationMethod(.catmullRom)
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [BuddyTheme.cobalt.opacity(0.28), BuddyTheme.cobalt.opacity(0.02)],
-                                startPoint: .top,
-                                endPoint: .bottom
+                        if points.count >= 2 {
+                            AreaMark(
+                                x: .value("Date", point.date),
+                                y: .value(selectedMetric.rawValue, value)
                             )
-                        )
+                            .interpolationMethod(.catmullRom)
+                            .foregroundStyle(
+                                LinearGradient(
+                                    colors: [BuddyTheme.cobalt.opacity(0.28), BuddyTheme.cobalt.opacity(0.02)],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
 
-                        LineMark(
-                            x: .value("Date", point.date),
-                            y: .value(selectedMetric.rawValue, value)
-                        )
-                        .interpolationMethod(.catmullRom)
-                        .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
-                        .foregroundStyle(BuddyTheme.cobalt)
+                            LineMark(
+                                x: .value("Date", point.date),
+                                y: .value(selectedMetric.rawValue, value)
+                            )
+                            .interpolationMethod(.catmullRom)
+                            .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
+                            .foregroundStyle(BuddyTheme.cobalt)
+                        }
 
                         PointMark(
                             x: .value("Date", point.date),
                             y: .value(selectedMetric.rawValue, value)
                         )
-                        .symbolSize(38)
+                        .symbolSize(points.count == 1 ? 64 : 38)
                         .foregroundStyle(BuddyTheme.cobalt)
                     }
                     .chartYAxis {
@@ -382,10 +405,16 @@ struct TrendsView: View {
                         }
                     }
                     .chartXAxis {
-                        AxisMarks(values: .automatic(desiredCount: 4)) { _ in
-                            AxisValueLabel(format: .dateTime.month(.abbreviated).day())
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+                        AxisMarks(values: xTickDates) { _ in
+                            if allSameDay && points.count > 1 {
+                                AxisValueLabel(format: .dateTime.hour().minute())
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                AxisValueLabel(format: .dateTime.month(.abbreviated).day())
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                     .frame(height: 185)

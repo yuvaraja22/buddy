@@ -14,6 +14,8 @@ struct CoachView: View {
     @State private var streamingReply: String = ""
     @State private var coachError: String?
     @State private var generationTask: Task<Void, Never>?
+    @State private var conversationEpoch: Int = 0
+    @State private var lastStreamScrollAt: Date = .distantPast
     @State private var showClearConfirmation: Bool = false
     @FocusState private var isInputFocused: Bool
 
@@ -211,14 +213,23 @@ struct CoachView: View {
             }
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: messages.count) { _, _ in
-                scrollToBottom(proxy)
+                scrollToBottom(proxy, animated: true)
             }
             .onChange(of: streamingReply.count) { _, _ in
-                scrollToBottom(proxy)
+                let now = Date()
+                if now.timeIntervalSince(lastStreamScrollAt) >= 0.25 {
+                    lastStreamScrollAt = now
+                    scrollToBottom(proxy, animated: false)
+                }
+            }
+            .onChange(of: isInputFocused) { _, focused in
+                if focused {
+                    scrollToBottom(proxy, animated: true)
+                }
             }
             .onChange(of: llmService.isGenerating) { _, isGenerating in
                 if isGenerating {
-                    scrollToBottom(proxy)
+                    scrollToBottom(proxy, animated: true)
                 }
             }
         }
@@ -317,12 +328,6 @@ struct CoachView: View {
                 .focused($isInputFocused)
                 .padding(.vertical, 8)
                 .padding(.leading, 6)
-                .submitLabel(.send)
-                .onSubmit {
-                    if !llmService.isGenerating {
-                        sendMessage(inputText)
-                    }
-                }
 
             if llmService.isGenerating {
                 Button {
@@ -388,6 +393,7 @@ struct CoachView: View {
         coachError = nil
         streamingReply = ""
 
+        let activeEpoch = conversationEpoch
         let workoutContext = StatsCalculator.buildCoachContext(
             sessions: store.sessions,
             preferredUnit: store.preferredUnit
@@ -401,8 +407,11 @@ struct CoachView: View {
                     workoutContext: workoutContext,
                     history: priorHistory
                 ) { delta in
+                    guard conversationEpoch == activeEpoch else { return }
                     streamingReply.append(delta)
                 }
+
+                guard conversationEpoch == activeEpoch else { return }
 
                 let resolvedReply = reply.isEmpty
                     ? streamingReply.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -412,14 +421,20 @@ struct CoachView: View {
                     let assistantRecord = CoachMessage(role: .assistant, content: resolvedReply)
                     modelContext.insert(assistantRecord)
                     try? modelContext.save()
+                } else {
+                    coachError = "Coach couldn't generate a response. Please try again."
                 }
                 streamingReply = ""
             } catch is CancellationError {
-                persistPartialStreamIfNeeded()
+                if conversationEpoch == activeEpoch {
+                    persistPartialStreamIfNeeded()
+                }
             } catch {
-                persistPartialStreamIfNeeded()
-                coachError = error.localizedDescription
-                BuddyHaptics.error()
+                if conversationEpoch == activeEpoch {
+                    persistPartialStreamIfNeeded()
+                    coachError = error.localizedDescription
+                    BuddyHaptics.error()
+                }
             }
         }
     }
@@ -441,6 +456,7 @@ struct CoachView: View {
     }
 
     private func clearConversation() {
+        conversationEpoch &+= 1
         stopGenerating()
         for message in messages {
             modelContext.delete(message)
@@ -451,8 +467,12 @@ struct CoachView: View {
         BuddyHaptics.lightImpact()
     }
 
-    private func scrollToBottom(_ proxy: ScrollViewProxy) {
-        withAnimation(.easeOut(duration: 0.2)) {
+    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
+        if animated {
+            withAnimation(.easeOut(duration: 0.2)) {
+                proxy.scrollTo("coach-bottom-anchor", anchor: .bottom)
+            }
+        } else {
             proxy.scrollTo("coach-bottom-anchor", anchor: .bottom)
         }
     }

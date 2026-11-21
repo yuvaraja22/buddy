@@ -201,6 +201,14 @@ public final class ModelManager {
             case .baseMultilingual: return .base
             }
         }
+
+        public var tokenizerRepoName: String {
+            switch self {
+            case .baseEn: return "openai/whisper-base.en"
+            case .tinyEn: return "openai/whisper-tiny.en"
+            case .baseMultilingual: return "openai/whisper-base"
+            }
+        }
     }
 
     public enum LLMPreset: String, CaseIterable, Identifiable, Codable, Sendable {
@@ -314,6 +322,7 @@ public final class ModelManager {
     private let defaults: UserDefaults
     @ObservationIgnored private var activeLLMDownloadSession: URLSession?
     @ObservationIgnored private var activeLLMDownloadTask: URLSessionDownloadTask?
+    @ObservationIgnored private var activeLLMDownloadID: UUID?
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -372,7 +381,7 @@ public final class ModelManager {
                     useBackgroundSession: false,
                     from: "argmaxinc/whisperkit-coreml"
                 ) { [weak self] progress in
-                    let fraction = min(0.92, max(0.0, progress.fractionCompleted))
+                    let fraction = min(0.90, max(0.0, progress.fractionCompleted * 0.90))
                     Task { @MainActor [weak self] in
                         self?.whisperDownloadProgress = fraction
                     }
@@ -385,20 +394,24 @@ public final class ModelManager {
                     useBackgroundSession: false,
                     from: "argmaxinc/whisperkit-coreml"
                 ) { [weak self] progress in
-                    let fraction = min(0.92, max(0.0, progress.fractionCompleted))
+                    let fraction = min(0.90, max(0.0, progress.fractionCompleted * 0.90))
                     Task { @MainActor [weak self] in
                         self?.whisperDownloadProgress = fraction
                     }
                 }
             }
 
-            // Pre-cache tokenizer files while online so gym transcription works 100% offline.
-            whisperDownloadProgress = 0.95
-            _ = try? await ModelUtilities.loadTokenizer(
+            // Pre-cache tokenizer files while online (mandatory so Airplane Mode works 100% offline).
+            whisperDownloadProgress = 0.94
+            _ = try await ModelUtilities.loadTokenizer(
                 for: targetPreset.whisperModelVariant,
                 tokenizerFolder: whisperBaseDirectory,
                 additionalSearchPaths: [folderURL]
             )
+
+            guard hasCachedTokenizer(for: targetPreset, modelFolder: folderURL) else {
+                throw ModelManagerError.invalidGGUFFile("Whisper tokenizer files were not cached locally. Check your Wi-Fi connection and retry.")
+            }
 
             excludeFromBackup(whisperBaseDirectory)
             excludeFromBackup(folderURL)
@@ -431,6 +444,8 @@ public final class ModelManager {
         }
 
         ensureModelDirectories()
+        let downloadID = UUID()
+        activeLLMDownloadID = downloadID
         isDownloadingLLM = true
         llmDownloadProgress = 0
         downloadError = nil
@@ -439,10 +454,13 @@ public final class ModelManager {
         let fallbackBytes = Double(targetPreset.approximateSizeMB) * 1_048_576.0
 
         defer {
-            isDownloadingLLM = false
-            activeLLMDownloadTask = nil
-            activeLLMDownloadSession?.finishTasksAndInvalidate()
-            activeLLMDownloadSession = nil
+            if activeLLMDownloadID == downloadID {
+                isDownloadingLLM = false
+                activeLLMDownloadTask = nil
+                activeLLMDownloadSession?.finishTasksAndInvalidate()
+                activeLLMDownloadSession = nil
+                activeLLMDownloadID = nil
+            }
         }
 
         do {
@@ -452,7 +470,8 @@ public final class ModelManager {
                     expectedFallbackBytes: fallbackBytes,
                     onProgress: { [weak self] fraction in
                         Task { @MainActor [weak self] in
-                            self?.llmDownloadProgress = fraction
+                            guard let self, self.activeLLMDownloadID == downloadID else { return }
+                            self.llmDownloadProgress = fraction
                         }
                     },
                     continuation: continuation
@@ -468,37 +487,52 @@ public final class ModelManager {
                 task.resume()
             }
 
+            guard activeLLMDownloadID == downloadID else { return }
             excludeFromBackup(destinationURL)
             llmDownloadProgress = 1.0
             refreshDownloadState()
         } catch ModelManagerError.cancelled {
-            llmDownloadProgress = 0
-            refreshDownloadState()
+            if activeLLMDownloadID == downloadID {
+                llmDownloadProgress = 0
+                refreshDownloadState()
+            }
         } catch is CancellationError {
-            cancelLLMDownload()
+            if activeLLMDownloadID == downloadID {
+                cancelLLMDownload()
+            }
         } catch {
-            downloadError = "LLM download failed: \(error.localizedDescription)"
-            llmDownloadProgress = 0
-            refreshDownloadState()
+            if activeLLMDownloadID == downloadID {
+                downloadError = "LLM download failed: \(error.localizedDescription)"
+                llmDownloadProgress = 0
+                refreshDownloadState()
+            }
         }
     }
 
     public func cancelLLMDownload() {
-        activeLLMDownloadTask?.cancel()
+        let taskToCancel = activeLLMDownloadTask
+        let sessionToCancel = activeLLMDownloadSession
+        activeLLMDownloadID = nil
         activeLLMDownloadTask = nil
-        activeLLMDownloadSession?.invalidateAndCancel()
         activeLLMDownloadSession = nil
         isDownloadingLLM = false
         llmDownloadProgress = 0
+        taskToCancel?.cancel()
+        sessionToCancel?.invalidateAndCancel()
     }
 
     public func downloadRecommendedPack() async {
         downloadError = nil
-        if !isWhisperDownloaded {
-            await downloadWhisperModel(selectedWhisperPreset)
+        if !isDownloaded(.baseEn) {
+            await downloadWhisperModel(.baseEn)
+        } else if selectedWhisperPreset != .baseEn {
+            selectedWhisperPreset = .baseEn
         }
-        if selectedLLMPreset != .custom && !isLLMDownloaded {
-            await downloadLLMModel(selectedLLMPreset)
+
+        if !isDownloaded(.qwen25_1_5B) {
+            await downloadLLMModel(.qwen25_1_5B)
+        } else if selectedLLMPreset != .qwen25_1_5B {
+            selectedLLMPreset = .qwen25_1_5B
         }
         refreshDownloadState()
     }
@@ -522,10 +556,16 @@ public final class ModelManager {
 
         let rawFileName = url.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
         let safeName = rawFileName.isEmpty ? "custom-model.gguf" : rawFileName
-        let destinationURL = llmBaseDirectory.appendingPathComponent(safeName, isDirectory: false)
-        let stagingURL = llmBaseDirectory.appendingPathComponent(".\(safeName).import-\(UUID().uuidString)")
-
+        let customDir = customLLMDirectory
         let fileManager = FileManager.default
+        if !fileManager.fileExists(atPath: customDir.path) {
+            try fileManager.createDirectory(at: customDir, withIntermediateDirectories: true)
+            excludeFromBackup(customDir)
+        }
+
+        let destinationURL = customDir.appendingPathComponent(safeName, isDirectory: false)
+        let stagingURL = customDir.appendingPathComponent(".\(safeName).import-\(UUID().uuidString)")
+
         if fileManager.fileExists(atPath: stagingURL.path) {
             try? fileManager.removeItem(at: stagingURL)
         }
@@ -579,9 +619,13 @@ public final class ModelManager {
 
     // MARK: - Private Filesystem & Persistence Helpers
 
+    private var customLLMDirectory: URL {
+        llmBaseDirectory.appendingPathComponent("Custom", isDirectory: true)
+    }
+
     private func ensureModelDirectories() {
         let fileManager = FileManager.default
-        for directory in [modelsRootDirectory, whisperBaseDirectory, llmBaseDirectory] {
+        for directory in [modelsRootDirectory, whisperBaseDirectory, llmBaseDirectory, customLLMDirectory] {
             if !fileManager.fileExists(atPath: directory.path) {
                 try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
             }
@@ -622,7 +666,7 @@ public final class ModelManager {
         if let stored = defaults.dictionary(forKey: DefaultsKey.whisperRelativePaths) as? [String: String],
            let relative = stored[preset.rawValue], !relative.isEmpty {
             let candidate = whisperBaseDirectory.appendingPathComponent(relative, isDirectory: true)
-            if Self.isValidWhisperFolder(candidate) {
+            if Self.isValidWhisperFolder(candidate) && hasCachedTokenizer(for: preset, modelFolder: candidate) {
                 return candidate
             }
         }
@@ -637,7 +681,7 @@ public final class ModelManager {
             whisperBaseDirectory.appendingPathComponent(preset.rawValue, isDirectory: true)
         ]
 
-        for candidate in standardCandidates where Self.isValidWhisperFolder(candidate) {
+        for candidate in standardCandidates where Self.isValidWhisperFolder(candidate) && hasCachedTokenizer(for: preset, modelFolder: candidate) {
             return candidate
         }
 
@@ -653,12 +697,28 @@ public final class ModelManager {
         for case let url as URL in enumerator {
             let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
             guard isDir else { continue }
-            if url.lastPathComponent == preset.rawValue && Self.isValidWhisperFolder(url) {
+            if url.lastPathComponent == preset.rawValue && Self.isValidWhisperFolder(url) && hasCachedTokenizer(for: preset, modelFolder: url) {
                 return url
             }
         }
 
         return nil
+    }
+
+    private func hasCachedTokenizer(for preset: WhisperPreset, modelFolder: URL) -> Bool {
+        let fileManager = FileManager.default
+        let tokenizerRepoName = preset.tokenizerRepoName
+        let candidateFolders: [URL] = [
+            whisperBaseDirectory
+                .appendingPathComponent("models", isDirectory: true)
+                .appendingPathComponent(tokenizerRepoName, isDirectory: true),
+            whisperBaseDirectory,
+            modelFolder
+        ]
+        return candidateFolders.contains { folder in
+            let tokenizerFile = folder.appendingPathComponent("tokenizer.json", isDirectory: false)
+            return fileManager.fileExists(atPath: tokenizerFile.path)
+        }
     }
 
     private static func isValidWhisperFolder(_ url: URL) -> Bool {
@@ -667,22 +727,31 @@ public final class ModelManager {
         guard fileManager.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
             return false
         }
-        let encoderPath = url.appendingPathComponent("AudioEncoder.mlmodelc").path
-        let decoderPath = url.appendingPathComponent("TextDecoder.mlmodelc").path
-        return fileManager.fileExists(atPath: encoderPath) && fileManager.fileExists(atPath: decoderPath)
+        let hasMel = fileManager.fileExists(atPath: url.appendingPathComponent("MelSpectrogram.mlmodelc").path)
+            || fileManager.fileExists(atPath: url.appendingPathComponent("MelSpectrogram.mlpackage").path)
+        let hasEncoder = fileManager.fileExists(atPath: url.appendingPathComponent("AudioEncoder.mlmodelc").path)
+            || fileManager.fileExists(atPath: url.appendingPathComponent("AudioEncoder.mlpackage").path)
+        let hasDecoder = fileManager.fileExists(atPath: url.appendingPathComponent("TextDecoder.mlmodelc").path)
+            || fileManager.fileExists(atPath: url.appendingPathComponent("TextDecoder.mlpackage").path)
+        return hasMel && hasEncoder && hasDecoder
     }
 
     private func resolvedLLMFileURL(for preset: LLMPreset) -> URL? {
-        let fileName: String
+        let candidate: URL
         switch preset {
         case .qwen25_1_5B, .qwen25_0_5B:
-            fileName = preset.fileName
+            candidate = llmBaseDirectory.appendingPathComponent(preset.fileName, isDirectory: false)
         case .custom:
             guard let customLLMFileName, !customLLMFileName.isEmpty else { return nil }
-            fileName = customLLMFileName
+            let isolated = customLLMDirectory.appendingPathComponent(customLLMFileName, isDirectory: false)
+            if FileManager.default.fileExists(atPath: isolated.path) {
+                candidate = isolated
+            } else {
+                // Backward-compatible lookup if a custom file was imported before Custom/ isolation.
+                candidate = llmBaseDirectory.appendingPathComponent(customLLMFileName, isDirectory: false)
+            }
         }
 
-        let candidate = llmBaseDirectory.appendingPathComponent(fileName, isDirectory: false)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDir),
               !isDir.boolValue else {

@@ -81,6 +81,8 @@ public struct WidgetSnapshot: Codable, Equatable, Sendable {
     public let todayReps: Int
     public let todayVolumeKg: Double
     public let todayExercises: [ExerciseSummarySnapshot]
+    public let lastTodayExerciseName: String?
+    public let lastTodaySetSummary: String?
     public let currentStreakDays: Int
     public let workoutsThisWeek: Int
     public let weeklyGoal: Int
@@ -94,6 +96,8 @@ public struct WidgetSnapshot: Codable, Equatable, Sendable {
         todayReps: Int = 0,
         todayVolumeKg: Double = 0,
         todayExercises: [ExerciseSummarySnapshot] = [],
+        lastTodayExerciseName: String? = nil,
+        lastTodaySetSummary: String? = nil,
         currentStreakDays: Int = 0,
         workoutsThisWeek: Int = 0,
         weeklyGoal: Int = 4,
@@ -106,10 +110,75 @@ public struct WidgetSnapshot: Codable, Equatable, Sendable {
         self.todayReps = todayReps
         self.todayVolumeKg = todayVolumeKg
         self.todayExercises = todayExercises
+        self.lastTodayExerciseName = lastTodayExerciseName
+        self.lastTodaySetSummary = lastTodaySetSummary
         self.currentStreakDays = currentStreakDays
         self.workoutsThisWeek = workoutsThisWeek
         self.weeklyGoal = weeklyGoal
         self.weeklyDays = weeklyDays
+    }
+
+    /// Normalizes a persisted snapshot across midnight / multi-day rollovers so widgets
+    /// never display yesterday's completed sets as "Today's Workout" or stale `isToday` bars.
+    public func normalized(for referenceDate: Date = Date(), calendar: Calendar = .current) -> WidgetSnapshot {
+        guard !calendar.isDate(updatedAt, inSameDayAs: referenceDate) else {
+            return self
+        }
+
+        let today = calendar.startOfDay(for: referenceDate)
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.dateFormat = "EEEEE"
+        let iso = ISO8601DateFormatter()
+
+        var byDay: [Date: DayActivitySnapshot] = [:]
+        for item in weeklyDays {
+            byDay[calendar.startOfDay(for: item.date)] = item
+        }
+
+        let shiftedDays: [DayActivitySnapshot] = (0..<7).reversed().compactMap { offset in
+            guard let day = calendar.date(byAdding: .day, value: -offset, to: today) else { return nil }
+            let existing = byDay[day]
+            return DayActivitySnapshot(
+                id: existing?.id ?? iso.string(from: day),
+                weekdayLabel: formatter.string(from: day),
+                date: day,
+                setCount: existing?.setCount ?? 0,
+                volumeKg: existing?.volumeKg ?? 0,
+                isToday: offset == 0
+            )
+        }
+
+        // Preserve streak only if yesterday (or today via active session) had activity.
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today)
+        let hadActivityYesterday = yesterday.flatMap { byDay[$0] }.map { $0.setCount > 0 || $0.volumeKg > 0 } ?? false
+        let updatedDayDiff = calendar.dateComponents([.day], from: calendar.startOfDay(for: updatedAt), to: today).day ?? 2
+        let adjustedStreak: Int
+        if activeSession != nil {
+            adjustedStreak = currentStreakDays
+        } else if updatedDayDiff == 1 && (hadActivityYesterday || todaySets > 0) {
+            adjustedStreak = currentStreakDays
+        } else {
+            adjustedStreak = 0
+        }
+
+        let activeDaysThisWeek = shiftedDays.filter { $0.setCount > 0 || $0.volumeKg > 0 }.count
+
+        return WidgetSnapshot(
+            updatedAt: referenceDate,
+            preferredUnit: preferredUnit,
+            activeSession: activeSession,
+            todaySets: activeSession?.totalSets ?? 0,
+            todayReps: activeSession?.totalReps ?? 0,
+            todayVolumeKg: activeSession?.totalVolumeKg ?? 0,
+            todayExercises: activeSession == nil ? [] : todayExercises,
+            lastTodayExerciseName: activeSession?.lastExerciseName,
+            lastTodaySetSummary: activeSession?.lastSetSummary,
+            currentStreakDays: adjustedStreak,
+            workoutsThisWeek: activeDaysThisWeek,
+            weeklyGoal: weeklyGoal,
+            weeklyDays: shiftedDays
+        )
     }
 
     public static var empty: WidgetSnapshot {
@@ -171,6 +240,8 @@ public struct WidgetSnapshot: Codable, Equatable, Sendable {
                 ExerciseSummarySnapshot(id: "2", name: "Romanian Deadlift", setCount: 3, summary: "3 × 10 · 70 kg"),
                 ExerciseSummarySnapshot(id: "3", name: "Leg Press", setCount: 3, summary: "3 × 12 · 120 kg")
             ],
+            lastTodayExerciseName: "Leg Extension",
+            lastTodaySetSummary: "3 × 15 · 45 kg",
             currentStreakDays: 4,
             workoutsThisWeek: 4,
             weeklyGoal: 4,

@@ -83,8 +83,12 @@ struct SettingsView: View {
                     get: { modelManager.selectedWhisperPreset },
                     set: { preset in
                         BuddyHaptics.selection()
+                        let changed = (modelManager.selectedWhisperPreset != preset)
                         modelManager.selectedWhisperPreset = preset
                         modelManager.refreshDownloadState()
+                        if changed {
+                            Task { await whisperService.unload() }
+                        }
                     }
                 )
             ) {
@@ -93,6 +97,7 @@ struct SettingsView: View {
                         .tag(preset)
                 }
             }
+            .disabled(modelManager.isDownloadingWhisper)
 
             Text(selected.subtitle)
                 .font(.caption)
@@ -160,8 +165,12 @@ struct SettingsView: View {
                     get: { modelManager.selectedLLMPreset },
                     set: { preset in
                         BuddyHaptics.selection()
+                        let changed = (modelManager.selectedLLMPreset != preset)
                         modelManager.selectedLLMPreset = preset
                         modelManager.refreshDownloadState()
+                        if changed {
+                            llmService.unload()
+                        }
                     }
                 )
             ) {
@@ -174,6 +183,7 @@ struct SettingsView: View {
                     }
                 }
             }
+            .disabled(modelManager.isDownloadingLLM)
 
             Text(selected.subtitle)
                 .font(.caption)

@@ -160,4 +160,72 @@ final class AppGroupAndSnapshotTests: XCTestCase {
         XCTAssertEqual(DurationFormatter.formatCompact(seconds: 90), "1m 30s")
         XCTAssertEqual(DurationFormatter.formatCompact(seconds: 1_200), "20m")
     }
+
+    func testDerivedAppGroupIdentifiersHandleSideStoreWidgetsTeamSuffix() {
+        let standard = AppGroupResolver.derivedGroupIdentifiers(fromBundleIdentifier: "com.yuvaraja.buddy.widgets")
+        XCTAssertEqual(standard.first, "group.com.yuvaraja.buddy")
+
+        let teamSuffixed = AppGroupResolver.derivedGroupIdentifiers(fromBundleIdentifier: "com.yuvaraja.buddy.widgets.ABC123XYZ9")
+        XCTAssertEqual(teamSuffixed.first, "group.com.yuvaraja.buddy.ABC123XYZ9")
+
+        let mainAppTeamSuffixed = AppGroupResolver.derivedGroupIdentifiers(fromBundleIdentifier: "com.yuvaraja.buddy.ABC123XYZ9")
+        XCTAssertEqual(mainAppTeamSuffixed.first, "group.com.yuvaraja.buddy.ABC123XYZ9")
+    }
+
+    func testWidgetSnapshotNormalizesAcrossMidnightRollover() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let day1 = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 5, day: 10, hour: 18)))
+        let day2 = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 5, day: 11, hour: 8)))
+        let day3 = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 5, day: 12, hour: 8)))
+
+        let day1Start = calendar.startOfDay(for: day1)
+        let snapshot = WidgetSnapshot(
+            updatedAt: day1,
+            preferredUnit: .kg,
+            activeSession: nil,
+            todaySets: 9,
+            todayReps: 90,
+            todayVolumeKg: 4_500,
+            todayExercises: [
+                ExerciseSummarySnapshot(id: "1", name: "Leg Extension", setCount: 3, summary: "3 × 15")
+            ],
+            lastTodayExerciseName: "Leg Extension",
+            lastTodaySetSummary: "3 × 15",
+            currentStreakDays: 4,
+            workoutsThisWeek: 4,
+            weeklyGoal: 4,
+            weeklyDays: [
+                DayActivitySnapshot(id: "d1", weekdayLabel: "S", date: day1Start, setCount: 9, volumeKg: 4_500, isToday: true)
+            ]
+        )
+
+        // Next morning (+1 day): today's sets reset to 0, streak stays alive from yesterday.
+        let rolledDay2 = snapshot.normalized(for: day2, calendar: calendar)
+        XCTAssertEqual(rolledDay2.todaySets, 0)
+        XCTAssertEqual(rolledDay2.todayExercises.count, 0)
+        XCTAssertNil(rolledDay2.lastTodayExerciseName)
+        XCTAssertEqual(rolledDay2.currentStreakDays, 4)
+        XCTAssertEqual(rolledDay2.weeklyDays.count, 7)
+        XCTAssertEqual(rolledDay2.weeklyDays.last?.isToday, true)
+        XCTAssertEqual(rolledDay2.weeklyDays.last?.setCount, 0)
+
+        // Two days later (+2 days without workout): streak resets to 0.
+        let rolledDay3 = snapshot.normalized(for: day3, calendar: calendar)
+        XCTAssertEqual(rolledDay3.todaySets, 0)
+        XCTAssertEqual(rolledDay3.currentStreakDays, 0)
+    }
+
+    func testWhisperShortAudioClipPaddingProtectsUnderOneSecondCommands() {
+        let shortClip = Array(repeating: Float(0.25), count: 6_400) // 0.4 seconds at 16 kHz
+        let padded = WhisperTranscriptionService.prepareAudioSamplesForWhisper(shortClip)
+        XCTAssertEqual(padded.count, 20_000)
+        XCTAssertEqual(padded[0], 0.25, accuracy: 0.0001)
+        XCTAssertEqual(padded[6_399], 0.25, accuracy: 0.0001)
+        XCTAssertEqual(padded[6_400], 0.0, accuracy: 0.0001)
+
+        let longClip = Array(repeating: Float(0.1), count: 32_000)
+        let unchanged = WhisperTranscriptionService.prepareAudioSamplesForWhisper(longClip)
+        XCTAssertEqual(unchanged.count, 32_000)
+    }
 }

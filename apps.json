@@ -20,14 +20,14 @@
       "versionDate": "2026-01-01T00:00:00Z",
       "versionDescription": "Initial release with offline WhisperKit voice logging, Qwen2.5-1.5B intent parsing and coaching, Home & Lock Screen widgets, and Dynamic Island Live Activities.",
       "downloadURL": "https://github.com/yuvaraja22/buddy/releases/download/v1.0.0/Buddy.ipa",
-      "size": 25000000,
+      "size": 7839073,
       "versions": [
         {
           "version": "1.0.0",
           "date": "2026-01-01T00:00:00Z",
           "localizedDescription": "Initial release with offline WhisperKit voice logging, Qwen2.5-1.5B intent parsing and coaching, Home & Lock Screen widgets, and Dynamic Island Live Activities.",
           "downloadURL": "https://github.com/yuvaraja22/buddy/releases/download/v1.0.0/Buddy.ipa",
-          "size": 25000000,
+          "size": 7839073,
           "minOSVersion": "17.0"
         }
       ],

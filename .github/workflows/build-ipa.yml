@@ -113,6 +113,12 @@ jobs:
       - name: Archive unsigned Release iOS app
         run: |
           set -o pipefail
+          VERSION_FLAGS=()
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG_VER="${GITHUB_REF_NAME#v}"
+            VERSION_FLAGS+=(MARKETING_VERSION="$TAG_VER" CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}")
+            echo "Building tagged release version: ${TAG_VER} (${GITHUB_RUN_NUMBER})"
+          fi
           xcodebuild archive \
             -project Buddy.xcodeproj \
             -scheme Buddy \
@@ -125,7 +131,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES
+            "${VERSION_FLAGS[@]}"
 
       - name: Package Buddy.ipa
         run: |
@@ -133,6 +139,21 @@ jobs:
           rm -rf build/ipa_stage build/Buddy.ipa
           mkdir -p build/ipa_stage/Payload
           ditto build/Buddy.xcarchive/Products/Applications/Buddy.app build/ipa_stage/Payload/Buddy.app
+
+          # Embed App Group entitlements via ad-hoc signature so SideStore/AltSign
+          # can read and remap com.apple.security.application-groups on free Apple IDs.
+          if [ -d "build/ipa_stage/Payload/Buddy.app/Frameworks" ]; then
+            find "build/ipa_stage/Payload/Buddy.app/Frameworks" -maxdepth 1 \( -name "*.framework" -o -name "*.dylib" \) -print0 | while IFS= read -r -d '' fw; do
+              codesign --force --sign - "$fw"
+            done
+          fi
+          codesign --force --sign - \
+            --entitlements BuddyWidgets/Resources/BuddyWidgets.entitlements \
+            build/ipa_stage/Payload/Buddy.app/PlugIns/BuddyWidgets.appex
+          codesign --force --sign - \
+            --entitlements Buddy/Resources/Buddy.entitlements \
+            build/ipa_stage/Payload/Buddy.app
+
           (cd build/ipa_stage && zip -qry ../Buddy.ipa Payload)
           ls -lh build/Buddy.ipa
 
@@ -148,10 +169,12 @@ jobs:
           echo "$ZIP_LIST" | grep -Fx "Payload/Buddy.app/Info.plist" >/dev/null
           echo "$ZIP_LIST" | grep -E "^Payload/Buddy\.app/PlugIns/BuddyWidgets\.appex/" >/dev/null
 
-          # Extract Info.plist from the IPA and validate Live Activities & URL scheme
+          # Extract Info.plist from the IPA and validate Live Activities, URL scheme, & ALTAppGroups
           TMP_PLIST="$(mktemp /tmp/buddy_info.XXXXXX.plist)"
-          trap 'rm -f "$TMP_PLIST"' EXIT
+          TMP_WIDGET_PLIST="$(mktemp /tmp/buddy_widget_info.XXXXXX.plist)"
+          trap 'rm -f "$TMP_PLIST" "$TMP_WIDGET_PLIST"' EXIT
           unzip -p "$IPA_PATH" "Payload/Buddy.app/Info.plist" > "$TMP_PLIST"
+          unzip -p "$IPA_PATH" "Payload/Buddy.app/PlugIns/BuddyWidgets.appex/Info.plist" > "$TMP_WIDGET_PLIST"
 
           LIVE_ACTIVITIES="$(/usr/libexec/PlistBuddy -c "Print :NSSupportsLiveActivities" "$TMP_PLIST")"
           if [ "$LIVE_ACTIVITIES" != "true" ]; then
@@ -165,10 +188,21 @@ jobs:
             exit 1
           fi
 
+          APP_ALT_GROUP="$(/usr/libexec/PlistBuddy -c "Print :ALTAppGroups:0" "$TMP_PLIST")"
+          WIDGET_ALT_GROUP="$(/usr/libexec/PlistBuddy -c "Print :ALTAppGroups:0" "$TMP_WIDGET_PLIST")"
+          if [ "$APP_ALT_GROUP" != "group.com.yuvaraja.buddy" ] || [ "$WIDGET_ALT_GROUP" != "group.com.yuvaraja.buddy" ]; then
+            echo "ERROR: Expected ALTAppGroups=group.com.yuvaraja.buddy in app ('$APP_ALT_GROUP') and widget ('$WIDGET_ALT_GROUP')" >&2
+            exit 1
+          fi
+
+          # Verify embedded App Groups entitlements on staged bundles
+          codesign -d --entitlements - --xml build/ipa_stage/Payload/Buddy.app 2>/dev/null | grep -q "group.com.yuvaraja.buddy"
+          codesign -d --entitlements - --xml build/ipa_stage/Payload/Buddy.app/PlugIns/BuddyWidgets.appex 2>/dev/null | grep -q "group.com.yuvaraja.buddy"
+
           IPA_BYTES="$(stat -f%z "$IPA_PATH")"
           IPA_MB="$(awk "BEGIN { printf \"%.2f\", ${IPA_BYTES}/1048576 }")"
-          echo "Verified Payload/Buddy.app/Info.plist (NSSupportsLiveActivities=true, scheme=buddy)"
-          echo "Verified Payload/Buddy.app/PlugIns/BuddyWidgets.appex"
+          echo "Verified Payload/Buddy.app/Info.plist (NSSupportsLiveActivities=true, scheme=buddy, ALTAppGroups=group.com.yuvaraja.buddy)"
+          echo "Verified embedded App Groups entitlements on Buddy.app and BuddyWidgets.appex"
           echo "IPA size: ${IPA_MB} MB (${IPA_BYTES} bytes)"
 
           echo "ipa_bytes=${IPA_BYTES}" >> "$GITHUB_OUTPUT"

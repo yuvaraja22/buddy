@@ -15,6 +15,12 @@ public final class WorkoutStore {
 
     @ObservationIgnored
     private let modelContext: ModelContext
+    @ObservationIgnored
+    private let defaults: UserDefaults
+    @ObservationIgnored
+    private let enableSystemSync: Bool
+    @ObservationIgnored
+    private var liveActivitySyncTask: Task<Void, Never>?
 
     private var undoStack: [UndoAction] = []
 
@@ -26,7 +32,7 @@ public final class WorkoutStore {
     public var preferredUnit: WeightUnit {
         didSet {
             if oldValue != preferredUnit {
-                AppGroupResolver.sharedDefaults.set(
+                defaults.set(
                     preferredUnit.rawValue,
                     forKey: Self.preferredUnitDefaultsKey
                 )
@@ -35,9 +41,15 @@ public final class WorkoutStore {
         }
     }
 
-    public init(modelContext: ModelContext) {
+    public init(
+        modelContext: ModelContext,
+        defaults: UserDefaults = AppGroupResolver.sharedDefaults,
+        enableSystemSync: Bool = true
+    ) {
         self.modelContext = modelContext
-        if let savedRaw = AppGroupResolver.sharedDefaults.string(forKey: Self.preferredUnitDefaultsKey),
+        self.defaults = defaults
+        self.enableSystemSync = enableSystemSync
+        if let savedRaw = defaults.string(forKey: Self.preferredUnitDefaultsKey),
            let savedUnit = WeightUnit(rawValue: savedRaw) {
             self.preferredUnit = savedUnit
         } else {
@@ -54,8 +66,21 @@ public final class WorkoutStore {
             sortBy: [SortDescriptor(\.startedAt, order: .reverse)]
         )
         let fetched = (try? modelContext.fetch(descriptor)) ?? []
+
+        // Enforce at most one active session (newest by startedAt wins).
+        let activeMatches = fetched.filter(\.isActive)
+        if activeMatches.count > 1 {
+            for duplicate in activeMatches.dropFirst() {
+                duplicate.isActive = false
+                if duplicate.endedAt == nil {
+                    duplicate.endedAt = Date()
+                }
+            }
+            saveContext()
+        }
+
         sessions = fetched
-        activeSession = fetched.first(where: { $0.isActive })
+        activeSession = activeMatches.first
     }
 
     // MARK: - Session Lifecycle
@@ -296,6 +321,9 @@ public final class WorkoutStore {
             entry.sets.append(newSet)
         }
 
+        if entry.session?.id == activeSession?.id {
+            undoStack.removeAll()
+        }
         saveContext()
         reload()
         syncWidgetsAndLiveActivity()
@@ -358,6 +386,7 @@ public final class WorkoutStore {
             }
         }
 
+        undoStack.removeAll()
         saveContext()
         reload()
         syncWidgetsAndLiveActivity()
@@ -377,12 +406,16 @@ public final class WorkoutStore {
         set.tag = tag
         set.notes = notes
 
+        if set.entry?.session?.id == activeSession?.id {
+            undoStack.removeAll()
+        }
         saveContext()
         reload()
         syncWidgetsAndLiveActivity()
     }
 
     public func deleteSet(_ set: LoggedSet) {
+        let affectsActive = set.entry?.session?.id == activeSession?.id
         if let entry = set.entry {
             entry.sets.removeAll(where: { $0.id == set.id })
             set.entry = nil
@@ -401,6 +434,9 @@ public final class WorkoutStore {
             modelContext.delete(set)
         }
 
+        if affectsActive {
+            undoStack.removeAll()
+        }
         if latestBanner?.editableSetID == set.id {
             latestBanner = nil
         }
@@ -411,12 +447,16 @@ public final class WorkoutStore {
     }
 
     public func deleteEntry(_ entry: ExerciseEntry) {
+        let affectsActive = entry.session?.id == activeSession?.id
         if let session = entry.session {
             session.entries.removeAll(where: { $0.id == entry.id })
             entry.session = nil
         }
         modelContext.delete(entry)
 
+        if affectsActive {
+            undoStack.removeAll()
+        }
         if latestBanner?.editableEntryID == entry.id {
             latestBanner = nil
         }
@@ -485,6 +525,8 @@ public final class WorkoutStore {
     // MARK: - WidgetKit & ActivityKit Sync
 
     public func syncWidgetsAndLiveActivity() {
+        guard enableSystemSync else { return }
+
         let snapshot = StatsCalculator.buildWidgetSnapshot(
             sessions: sessions,
             preferredUnit: preferredUnit
@@ -917,6 +959,7 @@ extension WorkoutStore {
             ?? "Tap mic to log a set"
 
         let state = WorkoutLiveActivityAttributes.ContentState(
+            sessionTitle: session.derivedTitle,
             totalSets: session.totalSets,
             totalReps: session.totalReps,
             totalVolumeKg: session.totalVolumeKg,
@@ -927,38 +970,43 @@ extension WorkoutStore {
         )
         let content = ActivityContent(state: state, staleDate: nil)
         let sessionID = session.id.uuidString
+        let startedAt = session.startedAt
 
-        let allActivities = Activity<WorkoutLiveActivityAttributes>.activities
-        for stale in allActivities where stale.attributes.sessionID != sessionID {
-            let finalContent = ActivityContent(state: stale.content.state, staleDate: nil)
-            Task {
+        let previousTask = liveActivitySyncTask
+        liveActivitySyncTask = Task {
+            await previousTask?.value
+
+            let allActivities = Activity<WorkoutLiveActivityAttributes>.activities
+            for stale in allActivities where stale.attributes.sessionID != sessionID {
+                let finalContent = ActivityContent(state: stale.content.state, staleDate: nil)
                 await stale.end(finalContent, dismissalPolicy: .immediate)
             }
-        }
 
-        if let existing = allActivities.first(where: { $0.attributes.sessionID == sessionID }) {
-            Task {
+            if let existing = Activity<WorkoutLiveActivityAttributes>.activities.first(where: {
+                $0.attributes.sessionID == sessionID
+            }) {
                 await existing.update(content)
+            } else {
+                let attributes = WorkoutLiveActivityAttributes(
+                    sessionID: sessionID,
+                    sessionStartedAt: startedAt
+                )
+                _ = try? Activity<WorkoutLiveActivityAttributes>.request(
+                    attributes: attributes,
+                    content: content,
+                    pushType: nil
+                )
             }
-        } else {
-            let attributes = WorkoutLiveActivityAttributes(
-                sessionID: sessionID,
-                sessionTitle: session.derivedTitle,
-                sessionStartedAt: session.startedAt
-            )
-            _ = try? Activity<WorkoutLiveActivityAttributes>.request(
-                attributes: attributes,
-                content: content,
-                pushType: nil
-            )
         }
     }
 
     private func endAllLiveActivities() {
-        let activities = Activity<WorkoutLiveActivityAttributes>.activities
-        for activity in activities {
-            let finalContent = ActivityContent(state: activity.content.state, staleDate: nil)
-            Task {
+        let previousTask = liveActivitySyncTask
+        liveActivitySyncTask = Task {
+            await previousTask?.value
+            let activities = Activity<WorkoutLiveActivityAttributes>.activities
+            for activity in activities {
+                let finalContent = ActivityContent(state: activity.content.state, staleDate: nil)
                 await activity.end(finalContent, dismissalPolicy: .immediate)
             }
         }

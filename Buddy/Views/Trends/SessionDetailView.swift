@@ -8,21 +8,32 @@ struct SessionDetailView: View {
 
     @State private var editingSet: LoggedSet?
     @State private var showDeleteConfirmation: Bool = false
+    @State private var isDeletingSession: Bool = false
+    @State private var titleSnapshot: String = ""
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 16) {
-                sessionHeaderCard
-                metricsGrid
-                exercisesSection
+        Group {
+            if isDeletingSession {
+                BuddyTheme.canvasBackground.ignoresSafeArea()
+            } else {
+                ScrollView {
+                    VStack(spacing: 16) {
+                        sessionHeaderCard
+                        metricsGrid
+                        exercisesSection
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 10)
+                    .padding(.bottom, 28)
+                }
+                .background(BuddyTheme.canvasBackground.ignoresSafeArea())
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 10)
-            .padding(.bottom, 28)
         }
-        .background(BuddyTheme.canvasBackground.ignoresSafeArea())
-        .navigationTitle(session.derivedTitle)
+        .navigationTitle(isDeletingSession ? titleSnapshot : session.derivedTitle)
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            titleSnapshot = session.derivedTitle
+        }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
@@ -39,9 +50,14 @@ struct SessionDetailView: View {
         .alert("Delete Workout Session?", isPresented: $showDeleteConfirmation) {
             Button("Delete", role: .destructive) {
                 BuddyHaptics.warning()
-                store.deleteSession(session)
-                WidgetRefreshHelper.sync(store: store)
+                titleSnapshot = session.derivedTitle
+                isDeletingSession = true
                 dismiss()
+                let targetSession = session
+                Task { @MainActor in
+                    store.deleteSession(targetSession)
+                    WidgetRefreshHelper.sync(store: store)
+                }
             }
             Button("Cancel", role: .cancel) {}
         } message: {

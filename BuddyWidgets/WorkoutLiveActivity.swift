@@ -7,7 +7,7 @@ struct WorkoutLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: WorkoutLiveActivityAttributes.self) { context in
             WorkoutLiveActivityLockScreenView(context: context)
-                .widgetURL(DeepLink.record.url)
+                .widgetURL(DeepLink.session.url)
                 .activitySystemActionForegroundColor(BuddyWidgetTheme.lightCobalt)
         } dynamicIsland: { context in
             DynamicIsland {
@@ -17,7 +17,7 @@ struct WorkoutLiveActivity: Widget {
                             Image(systemName: "dumbbell.fill")
                                 .font(.system(size: 11, weight: .bold))
                                 .foregroundStyle(BuddyWidgetTheme.darkCobalt)
-                            Text(context.attributes.sessionTitle)
+                            Text(context.state.sessionTitle)
                                 .font(.system(.caption, design: .rounded, weight: .bold))
                                 .foregroundStyle(.white)
                                 .lineLimit(1)
@@ -37,8 +37,9 @@ struct WorkoutLiveActivity: Widget {
                             .monospacedDigit()
                             .foregroundStyle(BuddyWidgetTheme.darkCobalt)
                             .multilineTextAlignment(.trailing)
-                            .frame(maxWidth: 72, alignment: .trailing)
+                            .frame(maxWidth: 82, alignment: .trailing)
                             .lineLimit(1)
+                            .minimumScaleFactor(0.75)
 
                         Text(
                             context.state.totalVolumeKg > 0
@@ -106,16 +107,16 @@ struct WorkoutLiveActivity: Widget {
                     .monospacedDigit()
                     .foregroundStyle(.white)
                     .multilineTextAlignment(.trailing)
-                    .frame(maxWidth: 48, alignment: .trailing)
+                    .frame(maxWidth: 58, alignment: .trailing)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                    .minimumScaleFactor(0.75)
             } minimal: {
                 Image(systemName: "mic.fill")
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(BuddyWidgetTheme.darkCobalt)
             }
             .keylineTint(BuddyWidgetTheme.darkCobalt)
-            .widgetURL(DeepLink.record.url)
+            .widgetURL(DeepLink.session.url)
         }
     }
 }
@@ -137,7 +138,7 @@ private struct WorkoutLiveActivityLockScreenView: View {
                     Circle()
                         .fill(cobalt)
                         .frame(width: 8, height: 8)
-                    Text(context.attributes.sessionTitle)
+                    Text(context.state.sessionTitle)
                         .font(.system(.subheadline, design: .rounded, weight: .bold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
@@ -154,8 +155,9 @@ private struct WorkoutLiveActivityLockScreenView: View {
                         .monospacedDigit()
                         .foregroundStyle(cobalt)
                         .multilineTextAlignment(.trailing)
-                        .frame(maxWidth: 74, alignment: .trailing)
+                        .frame(maxWidth: 84, alignment: .trailing)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                 }
             }
 

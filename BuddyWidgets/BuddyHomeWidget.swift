@@ -21,16 +21,28 @@ struct BuddyTimelineProvider: TimelineProvider {
     }
 
     func getSnapshot(in context: Context, completion: @escaping (BuddyWidgetEntry) -> Void) {
-        let snapshot = context.isPreview ? WidgetSnapshot.placeholder : WidgetSnapshot.load()
-        completion(BuddyWidgetEntry(date: Date(), snapshot: snapshot))
+        let now = Date()
+        let snapshot = context.isPreview
+            ? WidgetSnapshot.placeholder
+            : WidgetSnapshot.load().normalized(for: now)
+        completion(BuddyWidgetEntry(date: now, snapshot: snapshot))
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<BuddyWidgetEntry>) -> Void) {
         let now = Date()
-        let snapshot = WidgetSnapshot.load()
+        let calendar = Calendar.current
+        let snapshot = WidgetSnapshot.load().normalized(for: now)
         let entry = BuddyWidgetEntry(date: now, snapshot: snapshot)
-        let nextRefresh = Calendar.current.date(byAdding: .minute, value: 30, to: now)
+
+        let halfHour = calendar.date(byAdding: .minute, value: 30, to: now)
             ?? now.addingTimeInterval(1800)
+        let nextMidnight = calendar.nextDate(
+            after: now,
+            matching: DateComponents(hour: 0, minute: 0, second: 5),
+            matchingPolicy: .nextTime
+        ) ?? halfHour
+        let nextRefresh = min(halfHour, nextMidnight)
+
         completion(Timeline(entries: [entry], policy: .after(nextRefresh)))
     }
 }
@@ -61,10 +73,10 @@ private struct BuddyHomeWidgetView: View {
                 .widgetURL(DeepLink.record.url)
         case .systemMedium:
             MediumHomeWidgetView(snapshot: entry.snapshot)
-                .widgetURL(DeepLink.record.url)
+                .widgetURL(DeepLink.session.url)
         case .systemLarge:
             LargeHomeWidgetView(snapshot: entry.snapshot)
-                .widgetURL(DeepLink.record.url)
+                .widgetURL(DeepLink.session.url)
         default:
             SmallHomeWidgetView(snapshot: entry.snapshot)
                 .widgetURL(DeepLink.record.url)
@@ -103,7 +115,7 @@ private struct SmallHomeWidgetView: View {
                         .monospacedDigit()
                         .foregroundStyle(cobalt)
                         .lineLimit(1)
-                        .minimumScaleFactor(0.8)
+                        .minimumScaleFactor(0.75)
                 } else {
                     Image(systemName: "flame.fill")
                         .font(.system(size: 12, weight: .semibold))
@@ -183,8 +195,11 @@ private struct MediumHomeWidgetView: View {
         if let activeName = snapshot.activeSession?.lastExerciseName {
             return activeName
         }
-        if let todayFirst = snapshot.todayExercises.last?.name {
-            return todayFirst
+        if let latestToday = snapshot.lastTodayExerciseName {
+            return latestToday
+        }
+        if let fallback = snapshot.todayExercises.first?.name {
+            return fallback
         }
         return "No sets logged yet"
     }
@@ -193,8 +208,11 @@ private struct MediumHomeWidgetView: View {
         if let activeSummary = snapshot.activeSession?.lastSetSummary {
             return activeSummary
         }
-        if let todaySummary = snapshot.todayExercises.last?.summary {
-            return todaySummary
+        if let latestSummary = snapshot.lastTodaySetSummary {
+            return latestSummary
+        }
+        if let fallback = snapshot.todayExercises.first?.summary {
+            return fallback
         }
         return "Tap to log by voice"
     }
@@ -216,15 +234,14 @@ private struct MediumHomeWidgetView: View {
                             .font(.system(.caption, design: .rounded, weight: .bold))
                             .foregroundStyle(cobalt)
                             .lineLimit(1)
-                            .layoutPriority(1)
                         Text(active.startedAt, style: .timer)
                             .font(.system(.caption2, design: .rounded, weight: .semibold))
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.trailing)
-                            .frame(maxWidth: 48, alignment: .trailing)
+                            .frame(maxWidth: 60, alignment: .trailing)
                             .lineLimit(1)
-                            .minimumScaleFactor(0.8)
+                            .minimumScaleFactor(0.75)
                     } else {
                         Image(systemName: "flame.fill")
                             .font(.system(size: 11, weight: .semibold))
@@ -351,15 +368,14 @@ private struct LargeHomeWidgetView: View {
                                 .monospacedDigit()
                                 .foregroundStyle(cobalt)
                                 .multilineTextAlignment(.leading)
-                                .frame(maxWidth: 52, alignment: .leading)
+                                .frame(maxWidth: 66, alignment: .leading)
                                 .lineLimit(1)
-                                .minimumScaleFactor(0.85)
+                                .minimumScaleFactor(0.75)
                             Text("· \(displaySets) sets · \(snapshot.preferredUnit.formatVolume(kg: displayVolumeKg))")
                                 .font(.system(.caption, design: .rounded, weight: .medium))
                                 .monospacedDigit()
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
-                                .layoutPriority(1)
                         }
                     } else {
                         Text("Today's Workout")

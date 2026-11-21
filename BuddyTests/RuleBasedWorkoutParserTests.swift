@@ -106,4 +106,55 @@ final class RuleBasedWorkoutParserTests: XCTestCase {
         XCTAssertEqual(resolved.muscleGroup, .hamstrings)
         XCTAssertFalse(resolved.canonicalName.isEmpty)
     }
+
+    func testParsesUnitlessWeightsAndUpdateCommands() {
+        let at80 = RuleBasedWorkoutParser.parse("bench press 3x10 at 80", context: defaultContext)
+        XCTAssertEqual(at80.action, .logSets)
+        XCTAssertEqual(at80.items.first?.exerciseName, "Bench Press")
+        XCTAssertEqual(at80.items.first?.setCount, 3)
+        XCTAssertEqual(at80.items.first?.reps, 10)
+        XCTAssertEqual(at80.items.first?.weightValue ?? -1, 80, accuracy: 0.01)
+        XCTAssertNil(at80.items.first?.weightUnit)
+
+        let bareWeight = RuleBasedWorkoutParser.parse("bench press 135 3x8", context: defaultContext)
+        XCTAssertEqual(bareWeight.action, .logSets)
+        XCTAssertEqual(bareWeight.items.first?.exerciseName, "Bench Press")
+        XCTAssertEqual(bareWeight.items.first?.setCount, 3)
+        XCTAssertEqual(bareWeight.items.first?.reps, 8)
+        XCTAssertEqual(bareWeight.items.first?.weightValue ?? -1, 135, accuracy: 0.01)
+
+        let activeCtx = ActiveSessionPromptContext(preferredUnit: .kg, lastExerciseName: "Bench Press", isSessionActive: true)
+
+        let makeThat50 = RuleBasedWorkoutParser.parse("make that 50", context: activeCtx)
+        XCTAssertEqual(makeThat50.action, .updateLastSet)
+        XCTAssertEqual(makeThat50.items.first?.weightValue ?? -1, 50, accuracy: 0.01)
+
+        let actuallyReps = RuleBasedWorkoutParser.parse("actually 12 reps", context: activeCtx)
+        XCTAssertEqual(actuallyReps.action, .updateLastSet)
+        XCTAssertEqual(actuallyReps.items.first?.reps, 12)
+
+        let markWarmup = RuleBasedWorkoutParser.parse("mark as warmup", context: activeCtx)
+        XCTAssertEqual(markWarmup.action, .updateLastSet)
+        XCTAssertEqual(markWarmup.items.first?.tag, .warmup)
+    }
+
+    func testSplitsChainedAndClausesWithoutBreakingCompoundExerciseNames() {
+        let chained = RuleBasedWorkoutParser.parse(
+            "bench press 3x10 at 80 kg and lateral raise 3x15 at 12 kg",
+            context: defaultContext
+        )
+        XCTAssertEqual(chained.action, .logSets)
+        XCTAssertEqual(chained.items.count, 2)
+        XCTAssertEqual(chained.items[0].exerciseName, "Bench Press")
+        XCTAssertEqual(chained.items[0].weightValue ?? -1, 80, accuracy: 0.01)
+        XCTAssertEqual(chained.items[1].exerciseName, "Lateral Raise")
+        XCTAssertEqual(chained.items[1].weightValue ?? -1, 12, accuracy: 0.01)
+
+        let compound = RuleBasedWorkoutParser.parse("clean and jerk 3x5 at 60 kg", context: defaultContext)
+        XCTAssertEqual(compound.action, .logSets)
+        XCTAssertEqual(compound.items.count, 1)
+        XCTAssertEqual(compound.items[0].setCount, 3)
+        XCTAssertEqual(compound.items[0].reps, 5)
+        XCTAssertEqual(compound.items[0].weightValue ?? -1, 60, accuracy: 0.01)
+    }
 }

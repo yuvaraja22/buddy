@@ -426,15 +426,16 @@ public enum RuleBasedWorkoutParser {
         rawTranscript: String,
         context: ActiveSessionPromptContext
     ) -> WorkoutCommandIntent? {
-        let triggerPattern = #"^(?:actually\s+|wait\s+|sorry\s+|correction\s+)?(?:(?:change|update|edit|fix|modify|correct|set)\s+(?:the\s+|my\s+)?(?:last\s+set|previous\s+set|that\s+set|that|it)|make\s+(?:the\s+|my\s+)?(?:last\s+set|previous\s+set|that\s+set|that|it)|actually\s+(?:that|it)\s+was)\b(.*)$"#
+        let triggerPattern = #"^(?:(?:actually\s+|wait\s+|sorry\s+|correction\s+)?(?:(?:change|update|edit|fix|modify|correct|set|mark|tag)\s+(?:the\s+|my\s+)?(?:last\s+set|previous\s+set|that\s+set|that|it)|make\s+(?:the\s+|my\s+)?(?:last\s+set|previous\s+set|that\s+set|that|it)|(?:mark|tag)\s+(?:as\s+)?(?=(?:to\s+failure|failure|drop\s*set|dropset|warm\s*up|warmup|working|normal))|actually\s+(?:that|it)\s+was|actually\s+(?=\d)))\b(.*)$"#
 
         guard let match = firstMatch(pattern: triggerPattern, in: normalized),
               var remainder = captureGroup(1, in: match, text: normalized) else {
             return nil
         }
 
-        // Remove optional leading "to" / "as"
+        // Remove optional leading "to" / "as" / "a"
         remainder = replaceMatches(pattern: #"^\s*(?:to|as|into|=)\b"#, in: remainder, with: " ")
+        remainder = replaceMatches(pattern: #"^\s*(?:a|an)\b"#, in: remainder, with: " ")
 
         var tag: SetTag = .normal
         var explicitNormalTag = false
@@ -493,6 +494,17 @@ public enum RuleBasedWorkoutParser {
             remainder = removingMatch(rMatch, from: remainder)
         }
 
+        // Bare unitless number after "make that 50" / "change last set to 85" -> resolve as weight in preferred unit.
+        if weightValue == nil && reps == nil && durationSeconds == nil {
+            let trimmedRemainder = remainder.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let bareMatch = firstMatch(pattern: #"^(?:at\s+)?(\d+(?:\.\d+)?)$"#, in: trimmedRemainder),
+               let numStr = captureGroup(1, in: bareMatch, text: trimmedRemainder),
+               let parsedWeight = Double(numStr), parsedWeight > 0 {
+                weightValue = parsedWeight
+                weightUnit = nil
+            }
+        }
+
         let hasAnyMutation = reps != nil || weightValue != nil || durationSeconds != nil || tag != .normal || explicitNormalTag
         guard hasAnyMutation else {
             return nil
@@ -541,11 +553,27 @@ public enum RuleBasedWorkoutParser {
     private static func splitIntoClauses(_ normalized: String) -> [String] {
         let separatorPattern = #"(?:\s*;\s*|\s+and\s+then\s+|\s+then\s+)"#
         let replaced = replaceMatches(pattern: separatorPattern, in: normalized, with: " || ")
-        let parts = replaced
+        let primaryParts = replaced
             .components(separatedBy: " || ")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        return parts.isEmpty ? [normalized] : parts
+
+        // Also split on plain " and " ONLY when both halves contain workout metrics (digits),
+        // preserving compound exercise names like "clean and jerk" or "snatch and press".
+        var finalParts: [String] = []
+        for part in primaryParts {
+            let subParts = part
+                .components(separatedBy: " and ")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            if subParts.count > 1 && subParts.allSatisfy({ firstMatch(pattern: #"\d"#, in: $0) != nil }) {
+                finalParts.append(contentsOf: subParts)
+            } else {
+                finalParts.append(part)
+            }
+        }
+
+        return finalParts.isEmpty ? [normalized] : finalParts
     }
 
     private static func parseSetGroupClause(
@@ -705,6 +733,29 @@ public enum RuleBasedWorkoutParser {
                 setCount = s
                 reps = r
                 explicitSetsMentioned = true
+                working = removingMatch(m, from: working)
+            }
+        }
+
+        // 10b. Unitless weight when reps/sets are already extracted (e.g., "bench press 3x10 at 80" or "bench press 135 3x8")
+        if weightValue == nil && (reps != nil || explicitSetsMentioned) {
+            if let m = firstMatch(
+                pattern: #"\b(?:at|with|@)\s+(\d+(?:\.\d+)?)\b(?!\s*(?:degree|deg|incline|percent|%))"#,
+                in: working
+            ),
+               let numStr = captureGroup(1, in: m, text: working),
+               let parsed = Double(numStr), parsed >= 2.5, parsed <= 1500 {
+                weightValue = parsed
+                weightUnit = nil
+                working = removingMatch(m, from: working)
+            } else if let m = firstMatch(
+                pattern: #"\b(\d+(?:\.\d+)?)\b(?!\s*(?:degree|deg|incline|percent|%))\s*$"#,
+                in: working
+            ),
+               let numStr = captureGroup(1, in: m, text: working),
+               let parsed = Double(numStr), parsed >= 2.5, parsed <= 1500 {
+                weightValue = parsed
+                weightUnit = nil
                 working = removingMatch(m, from: working)
             }
         }

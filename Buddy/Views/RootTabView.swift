@@ -15,6 +15,8 @@ struct RootTabView: View {
 
     @State private var selectedTab: BuddyTab = .workout
     @State private var showModelSetup: Bool = false
+    @State private var didHandleDeepLinkOnLaunch: Bool = false
+    @State private var dismissWorkoutSheetsToken: Int = 0
     @AppStorage("buddy.hasSeenOnboarding") private var hasSeenOnboarding: Bool = false
 
     var body: some View {
@@ -24,7 +26,8 @@ struct RootTabView: View {
                 pipeline: pipeline,
                 modelManager: modelManager,
                 whisperService: whisperService,
-                llmService: llmService
+                llmService: llmService,
+                dismissSheetsToken: dismissWorkoutSheetsToken
             )
             .tabItem {
                 Label("Workout", systemImage: "figure.strengthtraining.traditional")
@@ -54,7 +57,7 @@ struct RootTabView: View {
         }
         .task {
             modelManager.refreshDownloadState()
-            if !hasSeenOnboarding && !modelManager.isAllDownloaded {
+            if !didHandleDeepLinkOnLaunch && !hasSeenOnboarding && !modelManager.isAllDownloaded {
                 hasSeenOnboarding = true
                 showModelSetup = true
             }
@@ -68,10 +71,12 @@ struct RootTabView: View {
 
     private func handleDeepLink(_ url: URL) {
         guard let deepLink = DeepLink(url: url) else { return }
+        didHandleDeepLinkOnLaunch = true
 
         switch deepLink {
         case .record:
             showModelSetup = false
+            dismissWorkoutSheetsToken &+= 1
             selectedTab = .workout
             Task { @MainActor in
                 switch pipeline.phase {
@@ -88,12 +93,15 @@ struct RootTabView: View {
             }
 
         case .session:
+            showModelSetup = false
             selectedTab = .workout
 
         case .trends:
+            showModelSetup = false
             selectedTab = .trends
 
         case .coach:
+            showModelSetup = false
             selectedTab = .coach
         }
     }

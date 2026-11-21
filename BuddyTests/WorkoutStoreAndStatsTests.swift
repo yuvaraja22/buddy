@@ -5,9 +5,14 @@ import XCTest
 @MainActor
 final class WorkoutStoreAndStatsTests: XCTestCase {
     private var modelContainer: ModelContainer?
+    private var testDefaultsSuiteName: String?
 
     override func tearDown() {
         modelContainer = nil
+        if let suiteName = testDefaultsSuiteName {
+            UserDefaults.standard.removePersistentDomain(forName: suiteName)
+            testDefaultsSuiteName = nil
+        }
         super.tearDown()
     }
 
@@ -21,7 +26,16 @@ final class WorkoutStoreAndStatsTests: XCTestCase {
         let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
         let container = try ModelContainer(for: schema, configurations: [configuration])
         self.modelContainer = container
-        let store = WorkoutStore(modelContext: container.mainContext)
+
+        let suiteName = "com.yuvaraja.buddy.tests.\(UUID().uuidString)"
+        self.testDefaultsSuiteName = suiteName
+        let isolatedDefaults = UserDefaults(suiteName: suiteName) ?? .standard
+
+        let store = WorkoutStore(
+            modelContext: container.mainContext,
+            defaults: isolatedDefaults,
+            enableSystemSync: false
+        )
         store.preferredUnit = .kg
         return store
     }
@@ -329,9 +343,97 @@ final class WorkoutStoreAndStatsTests: XCTestCase {
         )
         XCTAssertEqual(snapshot.todaySets, 3)
         XCTAssertEqual(snapshot.todayVolumeKg, 2_100, accuracy: 0.01)
+        XCTAssertEqual(snapshot.lastTodayExerciseName, "Bench Press")
         XCTAssertEqual(snapshot.currentStreakDays, 3)
         XCTAssertEqual(snapshot.workoutsThisWeek, 3)
         XCTAssertEqual(snapshot.weeklyDays.count, 7)
+    }
+
+    func testReloadDeduplicatesMultipleActiveSessionsKeepingNewest() throws {
+        let store = try makeInMemoryStore()
+        let context = try XCTUnwrap(modelContainer?.mainContext)
+
+        let older = WorkoutSession(
+            startedAt: Date().addingTimeInterval(-7_200),
+            title: "Morning",
+            isActive: true
+        )
+        let newer = WorkoutSession(
+            startedAt: Date().addingTimeInterval(-600),
+            title: "Evening",
+            isActive: true
+        )
+        context.insert(older)
+        context.insert(newer)
+        try context.save()
+
+        store.reload()
+
+        XCTAssertEqual(store.activeSession?.id, newer.id)
+        XCTAssertTrue(newer.isActive)
+        XCTAssertFalse(older.isActive)
+        XCTAssertNotNil(older.endedAt)
+    }
+
+    func testUndoRestoresVoiceDeletedSetAndDeletedExercise() throws {
+        let store = try makeInMemoryStore()
+
+        _ = store.apply(RuleBasedWorkoutParser.parse(
+            "leg extension 2 sets 15 reps 40 kg",
+            context: ActiveSessionPromptContext(preferredUnit: .kg)
+        ))
+        XCTAssertEqual(store.activeSession?.totalSets, 2)
+
+        _ = store.apply(RuleBasedWorkoutParser.parse("delete last set", context: store.promptContext()))
+        XCTAssertEqual(store.activeSession?.totalSets, 1)
+
+        store.undoLastMutation()
+        XCTAssertEqual(store.activeSession?.totalSets, 2)
+
+        _ = store.apply(RuleBasedWorkoutParser.parse("delete last exercise", context: store.promptContext()))
+        XCTAssertEqual(store.activeSession?.entries.count, 0)
+
+        store.undoLastMutation()
+        XCTAssertEqual(store.activeSession?.entries.count, 1)
+        XCTAssertEqual(store.activeSession?.totalSets, 2)
+    }
+
+    func testWidgetSnapshotPicksMostRecentSessionExerciseOnTwoSessionDay() throws {
+        _ = try makeInMemoryStore()
+        let context = try XCTUnwrap(modelContainer?.mainContext)
+
+        let calendar = Calendar.current
+        let morning = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 5, day: 15, hour: 8)))
+        let evening = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 5, day: 15, hour: 19)))
+
+        let sMorning = makeSession(
+            in: context,
+            startedAt: morning,
+            exerciseName: "Bench Press",
+            canonicalName: "Bench Press",
+            muscleGroup: .chest,
+            setCount: 3,
+            reps: 10,
+            weightKg: 60
+        )
+        let sEvening = makeSession(
+            in: context,
+            startedAt: evening,
+            exerciseName: "Leg Extension",
+            canonicalName: "Leg Extension",
+            muscleGroup: .quads,
+            setCount: 3,
+            reps: 15,
+            weightKg: 45
+        )
+
+        let snapshot = StatsCalculator.buildWidgetSnapshot(
+            sessions: [sMorning, sEvening],
+            preferredUnit: .kg,
+            referenceDate: evening.addingTimeInterval(3_600)
+        )
+        XCTAssertEqual(snapshot.lastTodayExerciseName, "Leg Extension")
+        XCTAssertEqual(snapshot.todaySets, 6)
     }
 
     // MARK: - Fixture Helper

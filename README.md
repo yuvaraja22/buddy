@@ -44,18 +44,18 @@ Buddy is built automatically in GitHub Actions (`.github/workflows/build-ipa.yml
 2. Download the **`Buddy-IPA`** artifact (unzip if downloaded from Actions) or **`Buddy.ipa`** directly from a tagged Release.
 3. Open **SideStore** on your iPhone, go to **My Apps**, tap **`+`**, and select `Buddy.ipa`.
 4. When prompted about App Extensions (`BuddyWidgets`), choose **Keep App Extensions** so Home Screen widgets, Lock Screen widgets, and Dynamic Island Live Activities remain active.
-5. Note: A free Apple ID allows up to **3 active App IDs** (`Buddy` + `BuddyWidgets` = 2 App IDs, leaving 1 slot free for SideStore).
+5. Note: A free Apple ID allows up to **3 active sideloaded apps** and **10 App IDs per 7 days** (`Buddy` uses 1 active app slot and 2 App IDs: `Buddy` + `BuddyWidgets`).
 
 ### Option B: Public Repository (SideStore `apps.json` Source Feed)
 
 If the repository is public and has a published tag release (e.g., `v1.0.0`):
 
 1. Open **SideStore** → **Sources** → **`+`**.
-2. Add the source URL:
+2. Add the latest release source URL:
    ```
-   https://raw.githubusercontent.com/yuvaraja22/buddy/main/apps.json
+   https://github.com/yuvaraja22/buddy/releases/latest/download/apps.json
    ```
-3. Tap **Buddy** and install with one tap. Future `v*` tag releases automatically publish an updated `Buddy.ipa` and `apps.json` metadata.
+3. Tap **Buddy** and install with one tap. Future `v*` tag releases automatically publish an updated `Buddy.ipa` (with matching version metadata) and `apps.json` feed.
 
 ---
 

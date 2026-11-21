@@ -71,15 +71,30 @@ public final class AudioRecorderService {
     public var recordingDuration: TimeInterval = 0
     public var permissionDenied: Bool = false
 
+    @ObservationIgnored public var onMaxDurationReached: (@MainActor () -> Void)?
+    @ObservationIgnored public var onAudioInterrupted: (@MainActor (String) -> Void)?
+
     @ObservationIgnored private var audioEngine: AVAudioEngine?
     private let sampleBuffer = LockedSampleBuffer(
         maxSampleCount: Int(targetSampleRate * maxRecordingSeconds)
     )
     @ObservationIgnored private var recordingStartDate: Date?
     @ObservationIgnored private var durationTask: Task<Void, Never>?
+    @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
+    @ObservationIgnored private var configChangeObserver: NSObjectProtocol?
 
     public init() {
         refreshPermissionStatus()
+        installAudioSessionObservers()
+    }
+
+    deinit {
+        if let interruptionObserver {
+            NotificationCenter.default.removeObserver(interruptionObserver)
+        }
+        if let configChangeObserver {
+            NotificationCenter.default.removeObserver(configChangeObserver)
+        }
     }
 
     public func requestPermission() async -> Bool {
@@ -188,6 +203,39 @@ public final class AudioRecorderService {
 
     // MARK: - Private Helpers
 
+    private func installAudioSessionObservers() {
+        interruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] notification in
+            guard let userInfo = notification.userInfo,
+                  let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: typeValue),
+                  type == .began else {
+                return
+            }
+            Task { @MainActor [weak self] in
+                guard let self, self.isRecording else { return }
+                self.cancelRecording()
+                self.onAudioInterrupted?("Recording paused due to an audio interruption.")
+            }
+        }
+
+        configChangeObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.isRecording else { return }
+                // Audio route changed mid-recording (e.g. AirPods connected/disconnected);
+                // cleanly finalize captured speech rather than leaving a dead engine.
+                self.onMaxDurationReached?()
+            }
+        }
+    }
+
     private func refreshPermissionStatus() {
         permissionDenied = (AVAudioApplication.shared.recordPermission == .denied)
     }
@@ -202,6 +250,7 @@ public final class AudioRecorderService {
                 let elapsed = Date().timeIntervalSince(start)
                 self.recordingDuration = min(Self.maxRecordingSeconds, max(0, elapsed))
                 if elapsed >= Self.maxRecordingSeconds {
+                    self.onMaxDurationReached?()
                     break
                 }
                 try? await Task.sleep(for: .milliseconds(100))

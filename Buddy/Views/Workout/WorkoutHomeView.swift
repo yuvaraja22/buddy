@@ -6,6 +6,7 @@ struct WorkoutHomeView: View {
     let modelManager: ModelManager
     let whisperService: WhisperTranscriptionService
     let llmService: LocalLLMService
+    var dismissSheetsToken: Int = 0
 
     @State private var showSettings: Bool = false
     @State private var showManualAdd: Bool = false
@@ -58,6 +59,13 @@ struct WorkoutHomeView: View {
             }
             .safeAreaInset(edge: .bottom) {
                 bottomOverlay
+            }
+            .onChange(of: dismissSheetsToken) { _, _ in
+                showSettings = false
+                showManualAdd = false
+                editingSet = nil
+                showEndSessionDialog = false
+                store.recentlyEndedSession = nil
             }
             .confirmationDialog(
                 "End current workout?",

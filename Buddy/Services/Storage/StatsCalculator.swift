@@ -423,9 +423,9 @@ public enum StatsCalculator {
         let today = calendar.startOfDay(for: referenceDate)
         let stats = consistency(sessions: sessions, referenceDate: referenceDate)
 
-        // Active session snapshot
+        // Active session snapshot (deterministically pick newest if multiple exist)
         let activeSnapshot: ActiveSessionSnapshot?
-        if let active = sessions.first(where: { $0.isActive }) {
+        if let active = sessions.filter(\.isActive).sorted(by: { $0.startedAt > $1.startedAt }).first {
             let lastEntry = mostRecentlyUpdatedEntry(in: active)
             activeSnapshot = ActiveSessionSnapshot(
                 sessionID: active.id.uuidString,
@@ -443,16 +443,16 @@ public enum StatsCalculator {
         }
 
         // Today's totals and exercise summaries
-        let todaySessions = sessions.filter {
-            calendar.isDate($0.startedAt, inSameDayAs: referenceDate) || $0.isActive
-        }
+        let todaySessions = sessions
+            .filter { calendar.isDate($0.startedAt, inSameDayAs: referenceDate) || $0.isActive }
+            .sorted(by: { $0.startedAt > $1.startedAt })
         let todaySets = todaySessions.reduce(0) { $0 + $1.totalSets }
         let todayReps = todaySessions.reduce(0) { $0 + $1.totalReps }
         let todayVolumeKg = todaySessions.reduce(0.0) { $0 + $1.totalVolumeKg }
 
         var seenEntryIDs = Set<UUID>()
         var todayExercises: [ExerciseSummarySnapshot] = []
-        for session in todaySessions.sorted(by: { $0.startedAt > $1.startedAt }) {
+        for session in todaySessions {
             for entry in session.sortedEntries where !entry.sets.isEmpty {
                 guard seenEntryIDs.insert(entry.id).inserted else { continue }
                 todayExercises.append(
@@ -467,6 +467,15 @@ public enum StatsCalculator {
             }
             if todayExercises.count >= 6 { break }
         }
+
+        // Most recently logged exercise across all of today's sessions (by latest set timestamp)
+        let mostRecentTodayEntry: ExerciseEntry? = todaySessions
+            .compactMap { mostRecentlyUpdatedEntry(in: $0) }
+            .max { lhs, rhs in
+                let lDate = lhs.sets.map(\.loggedAt).max() ?? lhs.createdAt
+                let rDate = rhs.sets.map(\.loggedAt).max() ?? rhs.createdAt
+                return lDate < rDate
+            }
 
         // Last 7 days activity bars
         let totalsByDay = aggregateByDay(sessions: sessions, calendar: calendar)
@@ -497,6 +506,8 @@ public enum StatsCalculator {
             todayReps: todayReps,
             todayVolumeKg: todayVolumeKg,
             todayExercises: todayExercises,
+            lastTodayExerciseName: mostRecentTodayEntry?.exerciseName,
+            lastTodaySetSummary: mostRecentTodayEntry?.compactSummary(unit: preferredUnit),
             currentStreakDays: stats.currentStreakDays,
             workoutsThisWeek: stats.workoutsThisWeek,
             weeklyGoal: stats.weeklyGoal,

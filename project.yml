@@ -58,6 +58,8 @@ targets:
         NSSupportsLiveActivities: true
         NSMicrophoneUsageDescription: "Buddy uses your microphone offline in the gym to transcribe and log your workout sets locally. Audio never leaves your iPhone."
         ITSAppUsesNonExemptEncryption: false
+        ALTAppGroups:
+          - group.com.yuvaraja.buddy
         CFBundleURLTypes:
           - CFBundleTypeRole: Editor
             CFBundleURLName: com.yuvaraja.buddy
@@ -93,6 +95,8 @@ targets:
         CFBundleDisplayName: Buddy Widgets
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        ALTAppGroups:
+          - group.com.yuvaraja.buddy
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
 
