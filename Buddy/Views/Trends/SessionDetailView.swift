@@ -24,13 +24,14 @@ struct SessionDetailView: View {
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 10)
-                    .padding(.bottom, 28)
+                    .padding(.bottom, BuddyTheme.floatingBarClearance)
                 }
                 .background(BuddyTheme.canvasBackground.ignoresSafeArea())
             }
         }
         .navigationTitle(isDeletingSession ? titleSnapshot : session.derivedTitle)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
         .onAppear {
             titleSnapshot = session.derivedTitle
         }
@@ -44,6 +45,7 @@ struct SessionDetailView: View {
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
+                        .foregroundStyle(.primary)
                 }
             }
         }
@@ -71,32 +73,32 @@ struct SessionDetailView: View {
     }
 
     private var sessionHeaderCard: some View {
-        NativeCard(padding: 16, cornerRadius: 20, tint: session.isActive ? BuddyTheme.emeraldLive : nil) {
+        NativeCard(padding: 15, cornerRadius: 14, tint: session.isActive ? BuddyTheme.emeraldLive : nil) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     if session.isActive {
-                        StatusPill(text: "ACTIVE SESSION", tint: BuddyTheme.emeraldLive, isPulsing: true)
+                        StatusPill(text: "LIVE", tint: BuddyTheme.emeraldLive, isPulsing: true)
                     } else {
                         StatusPill(
                             text: DurationFormatter.formatCompact(seconds: session.durationSeconds),
                             icon: "clock",
-                            tint: BuddyTheme.cobalt
+                            tint: BuddyTheme.inkPrimary
                         )
                     }
                     Spacer()
                     Text(session.startedAt.formatted(date: .abbreviated, time: .shortened))
                         .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(BuddyTheme.mutedText)
                 }
 
                 Text(session.derivedTitle)
-                    .font(.system(size: 24, weight: .bold, design: .rounded))
+                    .font(.system(size: 22, weight: .bold))
                     .foregroundStyle(.primary)
 
                 if !session.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text(session.notes)
                         .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(BuddyTheme.mutedText)
                 }
             }
         }
@@ -108,25 +110,21 @@ struct SessionDetailView: View {
             StatMetricTile(
                 title: "Volume",
                 value: session.totalVolumeKg > 0 ? store.preferredUnit.formatVolume(kg: session.totalVolumeKg) : "—",
-                tint: BuddyTheme.cobalt,
                 compact: true
             )
             StatMetricTile(
                 title: "Sets",
                 value: "\(session.totalSets)",
-                tint: BuddyTheme.cobalt,
                 compact: true
             )
             StatMetricTile(
                 title: "Reps",
                 value: "\(session.totalReps)",
-                tint: BuddyTheme.cobalt,
                 compact: true
             )
             StatMetricTile(
-                title: "Exercises",
+                title: "Lifts",
                 value: "\(session.exerciseCount)",
-                tint: BuddyTheme.cobalt,
                 compact: true
             )
         }
@@ -136,10 +134,10 @@ struct SessionDetailView: View {
     private var exercisesSection: some View {
         let entries = session.sortedEntries
         if entries.isEmpty {
-            NativeCard(padding: 18, cornerRadius: 18) {
+            NativeCard(padding: 16, cornerRadius: 14) {
                 Text("No exercises were recorded in this session.")
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(BuddyTheme.mutedText)
             }
         } else {
             VStack(spacing: 12) {
@@ -151,28 +149,30 @@ struct SessionDetailView: View {
     }
 
     private func exerciseTableCard(_ entry: ExerciseEntry) -> some View {
-        NativeCard(padding: 15, cornerRadius: 18) {
+        NativeCard(padding: 13, cornerRadius: 14) {
             VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 6) {
-                            Text(entry.exerciseName)
-                                .font(.headline)
-                            Text(entry.muscleGroup.rawValue)
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(BuddyTheme.cobalt)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2)
-                                .background(Capsule().fill(BuddyTheme.cobaltSoft))
-                        }
+                HStack(alignment: .center, spacing: 10) {
+                    WorkoutThumbnailView(
+                        assetName: entry.muscleGroup.thumbnailAssetName,
+                        bottomRightBadge: "\(entry.sets.count)s",
+                        width: 76,
+                        height: 46
+                    )
 
-                        Text(entry.compactSummary(unit: store.preferredUnit))
-                            .font(.caption)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(entry.exerciseName)
+                            .font(.system(size: 15.5, weight: .bold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+
+                        Text("\(entry.muscleGroup.rawValue) · \(entry.compactSummary(unit: store.preferredUnit))")
+                            .font(.caption.weight(.medium))
                             .buddyNumeric()
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(BuddyTheme.mutedText)
+                            .lineLimit(1)
                     }
 
-                    Spacer()
+                    Spacer(minLength: 4)
 
                     Button {
                         BuddyHaptics.lightImpact()
@@ -186,12 +186,19 @@ struct SessionDetailView: View {
                             notes: ""
                         )
                     } label: {
-                        Label("Set", systemImage: "plus")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(BuddyTheme.cobalt)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 5)
-                            .background(Capsule().fill(BuddyTheme.cobaltSoft))
+                        HStack(spacing: 3) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 10, weight: .bold))
+                            Text("Set")
+                                .font(.system(size: 12, weight: .bold))
+                        }
+                        .foregroundStyle(BuddyTheme.inkInverse)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(BuddyTheme.inkPrimary)
+                        )
                     }
                     .buttonStyle(.plain)
                 }
@@ -209,8 +216,9 @@ struct SessionDetailView: View {
                     Text("TAG")
                         .frame(width: 54, alignment: .trailing)
                 }
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 9.5, weight: .semibold))
+                .tracking(0.4)
+                .foregroundStyle(BuddyTheme.mutedText)
                 .padding(.horizontal, 6)
 
                 VStack(spacing: 6) {
@@ -220,20 +228,20 @@ struct SessionDetailView: View {
                             editingSet = set
                         } label: {
                             HStack {
-                                Text("\(set.setNumber)")
-                                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                                Text(String(format: "%02d", set.setNumber))
+                                    .font(.system(size: 12, weight: .bold))
                                     .monospacedDigit()
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(BuddyTheme.mutedText)
                                     .frame(width: 34, alignment: .leading)
 
                                 Text(set.weightKg.flatMap { $0 > 0 ? store.preferredUnit.formatWeight(kg: $0) : nil } ?? "BW")
-                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                    .font(.system(size: 14, weight: .semibold))
                                     .monospacedDigit()
                                     .foregroundStyle(.primary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
 
                                 Text(repsOrTimeLabel(for: set))
-                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                    .font(.system(size: 14, weight: .semibold))
                                     .monospacedDigit()
                                     .foregroundStyle(.primary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -242,27 +250,30 @@ struct SessionDetailView: View {
                                     if let badge = set.tag.shortBadge {
                                         let tint = BuddyTheme.tagTint(for: set.tag)
                                         Text(badge)
-                                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                                            .font(.system(size: 10, weight: .bold))
                                             .foregroundStyle(tint)
                                             .padding(.horizontal, 6)
                                             .padding(.vertical, 2)
-                                            .background(Capsule().fill(tint.opacity(0.16)))
+                                            .background(
+                                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                                    .fill(tint.opacity(0.16))
+                                            )
                                     } else {
                                         Text("—")
                                             .font(.caption)
-                                            .foregroundStyle(.tertiary)
+                                            .foregroundStyle(BuddyTheme.mutedText)
                                     }
                                     Image(systemName: "chevron.right")
                                         .font(.system(size: 10, weight: .semibold))
-                                        .foregroundStyle(.tertiary)
+                                        .foregroundStyle(BuddyTheme.mutedText)
                                 }
                                 .frame(width: 54, alignment: .trailing)
                             }
                             .padding(.horizontal, 8)
                             .padding(.vertical, 8)
                             .background(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(BuddyTheme.elevatedSurface.opacity(0.65))
+                                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                    .fill(BuddyTheme.elevatedSurface)
                             )
                         }
                         .buttonStyle(.plain)

@@ -1,20 +1,21 @@
 import SwiftUI
 
+/// Uber-inspired floating monochrome bottom capsule combining tab navigation (`Workout | Trends | Coach`)
+/// with a persistent thumb-reachable tap/hold Mic FAB that morphs seamlessly into a live-caption
+/// recording bar when active — eliminating double-stacked bottom chrome.
 struct VoiceRecordDock: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
 
+    @Binding var selectedTab: BuddyTab
     let pipeline: VoicePipelineCoordinator
     let store: WorkoutStore
+    let onVoiceRecordingBegan: () -> Void
 
     @GestureState private var isMicPressed: Bool = false
     @State private var pressBeganWhileIdle: Bool = false
     @State private var pressStartTime: Date?
     @State private var holdPromotionTask: Task<Void, Never>?
-
-    @State private var isShowingTextInput: Bool = false
-    @State private var typedInput: String = ""
-    @FocusState private var isTextInputFocused: Bool
 
     private let holdThresholdNanoseconds: UInt64 = 350_000_000
 
@@ -25,45 +26,46 @@ struct VoiceRecordDock: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
-            Group {
-                if isShowingTextInput && isIdleOrError {
-                    textInputBar
-                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                } else {
-                    mainVoiceBar
-                        .transition(.opacity)
+            HStack(spacing: 10) {
+                // Left capsule: switches cleanly between Uber-style pill nav tabs and live recording bar
+                Group {
+                    if isIdleOrError {
+                        floatingTabCapsule
+                    } else {
+                        activeRecordingCapsule
+                    }
                 }
+                .frame(maxWidth: .infinity)
+                .frame(height: 60)
+                .background {
+                    Capsule(style: .continuous)
+                        .fill(BuddyTheme.floatingBarSurface)
+                }
+                .overlay {
+                    Capsule(style: .continuous)
+                        .strokeBorder(
+                            isRecording ? activeButtonColor.opacity(0.55) : BuddyTheme.glassBorder,
+                            lineWidth: isRecording ? 1.25 : 0.9
+                        )
+                }
+                .shadow(
+                    color: Color.black.opacity(colorScheme == .dark ? 0.60 : 0.14),
+                    radius: 16,
+                    x: 0,
+                    y: 6
+                )
+
+                // Persistent right-side Mic FAB: never recreated across idle -> recording -> hold
+                // so the active DragGesture is never invalidated mid-hold.
+                dualModeMicButton
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background {
-                Capsule(style: .continuous)
-                    .fill(.ultraThinMaterial)
-            }
-            .overlay {
-                Capsule(style: .continuous)
-                    .strokeBorder(dockBorderColor, lineWidth: isRecording ? 1.25 : 0.85)
-            }
-            .shadow(
-                color: Color.black.opacity(colorScheme == .dark ? 0.42 : 0.12),
-                radius: 18,
-                x: 0,
-                y: 8
-            )
         }
         .animation(.snappy(duration: 0.24), value: phaseAnimationKey)
-        .animation(.snappy(duration: 0.22), value: isShowingTextInput)
         .onChange(of: isMicPressed) { wasPressed, nowPressed in
             if !wasPressed && nowPressed {
                 handleTouchDown()
             } else if wasPressed && !nowPressed {
                 handleTouchUp()
-            }
-        }
-        .onChange(of: pipeline.phase) { _, newPhase in
-            if case .recording = newPhase {
-                isShowingTextInput = false
-                isTextInputFocused = false
             }
         }
         .onDisappear {
@@ -72,19 +74,80 @@ struct VoiceRecordDock: View {
         }
     }
 
-    // MARK: - Main Floating Voice Bar
+    // MARK: - Uber-Style Floating Pill Navigation Bar
 
-    private var mainVoiceBar: some View {
-        HStack(spacing: 12) {
+    private var floatingTabCapsule: some View {
+        HStack(spacing: 4) {
+            tabPillItem(
+                tab: .workout,
+                title: "Home",
+                symbol: "house.fill",
+                inactiveSymbol: "house"
+            )
+            tabPillItem(
+                tab: .trends,
+                title: "Trends",
+                symbol: "chart.bar.fill",
+                inactiveSymbol: "chart.bar"
+            )
+            tabPillItem(
+                tab: .coach,
+                title: "Coach",
+                symbol: "sparkles",
+                inactiveSymbol: "sparkles"
+            )
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 6)
+    }
+
+    private func tabPillItem(
+        tab: BuddyTab,
+        title: String,
+        symbol: String,
+        inactiveSymbol: String
+    ) -> some View {
+        let isSelected = (selectedTab == tab)
+
+        return Button {
+            guard selectedTab != tab else { return }
+            BuddyHaptics.selection()
+            selectedTab = tab
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: isSelected ? symbol : inactiveSymbol)
+                    .font(.system(size: 16, weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected ? Color.primary : BuddyTheme.mutedText)
+
+                Text(title)
+                    .font(.system(size: 10, weight: isSelected ? .semibold : .medium))
+                    .foregroundStyle(isSelected ? Color.primary : BuddyTheme.mutedText)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background {
+                if isSelected {
+                    Capsule(style: .continuous)
+                        .fill(BuddyTheme.elevatedSurface)
+                }
+            }
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    // MARK: - Live Recording / Processing Capsule
+
+    private var activeRecordingCapsule: some View {
+        HStack(spacing: 10) {
             leadingControl
 
             centerStatusArea
                 .frame(maxWidth: .infinity, alignment: .leading)
-
-            // Kept as a single persistent view across idle -> recording -> hold transitions
-            // so the active DragGesture is never invalidated mid-hold.
-            dualModeMicButton
         }
+        .padding(.leading, 8)
+        .padding(.trailing, 14)
     }
 
     @ViewBuilder
@@ -95,9 +158,9 @@ struct VoiceRecordDock: View {
                 cancelCurrentRecording()
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 42, height: 42)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 40, height: 40)
                     .background(Circle().fill(BuddyTheme.elevatedSurface))
             }
             .buttonStyle(.plain)
@@ -105,75 +168,51 @@ struct VoiceRecordDock: View {
 
         case .transcribing, .parsing:
             ProgressView()
-                .controlSize(.regular)
-                .tint(BuddyTheme.cobalt)
-                .frame(width: 42, height: 42)
-                .background(Circle().fill(BuddyTheme.cobaltSoft))
+                .controlSize(.small)
+                .tint(BuddyTheme.inkPrimary)
+                .frame(width: 40, height: 40)
+                .background(Circle().fill(BuddyTheme.elevatedSurface))
 
         case .idle, .error:
-            Button {
-                BuddyHaptics.lightImpact()
-                if case .error = pipeline.phase {
-                    pipeline.dismissError()
-                }
-                isShowingTextInput = true
-                isTextInputFocused = true
-            } label: {
-                Image(systemName: "keyboard")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 42, height: 42)
-                    .background(Circle().fill(BuddyTheme.elevatedSurface))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Type workout command")
+            EmptyView()
         }
     }
 
     @ViewBuilder
     private var centerStatusArea: some View {
         switch pipeline.phase {
-        case .idle, .error:
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Log Set")
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.primary)
-                Text("Tap or hold to log set")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
         case .recording(let isHoldMode):
             let streamingText = pipeline.liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
-            VStack(alignment: .leading, spacing: streamingText.isEmpty ? 6 : 4) {
+            VStack(alignment: .leading, spacing: streamingText.isEmpty ? 5 : 3) {
                 if !streamingText.isEmpty {
                     Text("“\(streamingText)”")
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                         .truncationMode(.head)
                 }
 
-                VoiceWaveformStrip(levels: pipeline.audioLevels, barCount: 28)
-                    .frame(height: streamingText.isEmpty ? 24 : 16)
+                VoiceWaveformStrip(levels: pipeline.audioLevels, barCount: 24)
+                    .frame(height: streamingText.isEmpty ? 20 : 14)
 
-                HStack(spacing: 6) {
-                    PulsingLiveDot(color: isHoldMode ? BuddyTheme.cobalt : BuddyTheme.destructive, size: 6)
+                HStack(spacing: 5) {
+                    PulsingLiveDot(
+                        color: isHoldMode ? BuddyTheme.inkPrimary : BuddyTheme.destructive,
+                        size: 5
+                    )
 
                     Text(DurationFormatter.formatClock(seconds: Int(pipeline.recordingDuration)))
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .font(.system(size: 11, weight: .bold))
                         .monospacedDigit()
                         .foregroundStyle(.primary)
 
                     Text("·")
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(BuddyTheme.mutedText)
 
-                    Text(isHoldMode ? "Hold — release to log" : "Listening — tap to finish")
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(.secondary)
+                    Text(isHoldMode ? "Release to log" : "Tap mic to finish")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(BuddyTheme.mutedText)
                         .lineLimit(1)
-                        .minimumScaleFactor(0.85)
                 }
             }
 
@@ -188,32 +227,35 @@ struct VoiceRecordDock: View {
                 stageTitle: pipeline.parsingStageTitle,
                 transcript: pipeline.liveTranscript
             )
+
+        case .idle, .error:
+            EmptyView()
         }
     }
 
     private func processingStatusView(stageTitle: String, transcript: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(stageTitle)
-                .font(.system(size: 14, weight: .semibold, design: .rounded))
-                .foregroundStyle(BuddyTheme.cobalt)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.primary)
                 .lineLimit(1)
 
             if !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Text("“\(transcript)”")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(BuddyTheme.mutedText)
                     .lineLimit(1)
                     .truncationMode(.tail)
             } else {
-                Text("Processing 100% offline on iPhone")
+                Text("Processing 100% offline")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(BuddyTheme.mutedText)
                     .lineLimit(1)
             }
         }
     }
 
-    // MARK: - Dual-Mode Tap / Press-and-Hold Mic Button
+    // MARK: - Persistent Monochrome Tap / Press-and-Hold Mic FAB
 
     private var dualModeMicButton: some View {
         let isProcessing = isTranscribingOrParsing
@@ -221,37 +263,35 @@ struct VoiceRecordDock: View {
         return ZStack {
             if isRecording {
                 Circle()
-                    .fill(activeButtonColor.opacity(0.22))
-                    .frame(width: 62, height: 62)
+                    .fill(activeButtonColor.opacity(0.24))
+                    .frame(width: 66, height: 66)
                     .scaleEffect(isMicPressed ? 1.12 : 1.0)
             }
 
             Circle()
-                .fill(
-                    LinearGradient(
-                        colors: isProcessing
-                            ? [BuddyTheme.cobalt.opacity(0.45), BuddyTheme.cobaltDeep.opacity(0.45)]
-                            : [activeButtonColor, activeButtonDeepColor],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .frame(width: 54, height: 54)
+                .fill(isProcessing ? BuddyTheme.elevatedSurface : activeButtonColor)
+                .frame(width: 58, height: 58)
+                .overlay {
+                    if isProcessing {
+                        Circle()
+                            .strokeBorder(BuddyTheme.glassBorder, lineWidth: 1)
+                    }
+                }
                 .shadow(
-                    color: activeButtonColor.opacity(isProcessing ? 0.1 : 0.35),
-                    radius: isMicPressed ? 12 : 8,
+                    color: Color.black.opacity(colorScheme == .dark ? 0.55 : 0.18),
+                    radius: isMicPressed ? 14 : 10,
                     x: 0,
                     y: 4
                 )
 
             Image(systemName: micButtonSymbol)
-                .font(.system(size: isRecording && !isHoldMode ? 18 : 21, weight: .semibold))
-                .foregroundStyle(.white)
+                .font(.system(size: isRecording && !isHoldMode ? 17 : 21, weight: .bold))
+                .foregroundStyle(isProcessing ? Color.primary : activeGlyphColor)
                 .contentTransition(.symbolEffect(.replace))
         }
-        .frame(width: 58, height: 58)
-        .scaleEffect(isMicPressed ? 0.93 : 1.0)
-        .animation(.spring(response: 0.22, dampingFraction: 0.7), value: isMicPressed)
+        .frame(width: 60, height: 60)
+        .scaleEffect(isMicPressed ? 0.92 : 1.0)
+        .animation(.spring(response: 0.22, dampingFraction: 0.72), value: isMicPressed)
         .contentShape(Circle())
         .gesture(
             DragGesture(minimumDistance: 0)
@@ -273,10 +313,12 @@ struct VoiceRecordDock: View {
         switch pipeline.phase {
         case .idle:
             BuddyHaptics.lightImpact()
+            onVoiceRecordingBegan()
             pipeline.beginRecording(isHoldMode: false)
         case .error:
             pipeline.dismissError()
             BuddyHaptics.lightImpact()
+            onVoiceRecordingBegan()
             pipeline.beginRecording(isHoldMode: false)
         case .recording:
             BuddyHaptics.mediumImpact()
@@ -297,6 +339,7 @@ struct VoiceRecordDock: View {
             pressBeganWhileIdle = true
             pressStartTime = Date()
             BuddyHaptics.lightImpact()
+            onVoiceRecordingBegan()
             pipeline.beginRecording(isHoldMode: false)
 
             holdPromotionTask?.cancel()
@@ -310,7 +353,6 @@ struct VoiceRecordDock: View {
             }
 
         case .recording:
-            // Second tap while already in hands-free tap-toggle recording mode
             pressBeganWhileIdle = false
             pressStartTime = Date()
 
@@ -330,27 +372,21 @@ struct VoiceRecordDock: View {
 
         guard case .recording(let currentlyHold) = pipeline.phase else { return }
 
-        // If the gesture ended because iOS interrupted the app (Control Center, Home swipe,
-        // incoming alert), cancel instead of submitting truncated audio for background inference.
         if scenePhase != .active {
             cancelCurrentRecording()
             return
         }
 
         if currentlyHold {
-            // Released from hold-to-record -> immediately stop and process.
             BuddyHaptics.mediumImpact()
             pipeline.finishRecordingAndProcess(into: store)
         } else if !beganFromIdle {
-            // Second tap in tap-toggle mode -> stop and process.
             BuddyHaptics.mediumImpact()
             pipeline.finishRecordingAndProcess(into: store)
         } else if let startedAt, Date().timeIntervalSince(startedAt) >= 0.35 {
-            // Defensive fallback if gesture ended right at the 0.35s boundary before task resumed.
             BuddyHaptics.mediumImpact()
             pipeline.finishRecordingAndProcess(into: store)
         }
-        // Otherwise: quick tap (< 0.35s) from idle -> remain in hands-free recording mode!
     }
 
     private func cancelCurrentRecording() {
@@ -360,65 +396,6 @@ struct VoiceRecordDock: View {
         pressStartTime = nil
         BuddyHaptics.lightImpact()
         pipeline.cancelRecording()
-    }
-
-    // MARK: - Quick Text-to-LLM Input Bar
-
-    private var textInputBar: some View {
-        HStack(spacing: 10) {
-            Button {
-                BuddyHaptics.lightImpact()
-                isTextInputFocused = false
-                isShowingTextInput = false
-            } label: {
-                Image(systemName: "mic.fill")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(BuddyTheme.cobalt)
-                    .frame(width: 40, height: 40)
-                    .background(Circle().fill(BuddyTheme.cobaltSoft))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Switch back to voice")
-
-            TextField("e.g. Bench press 60 kg 3 sets 10 reps", text: $typedInput)
-                .font(.subheadline)
-                .focused($isTextInputFocused)
-                .submitLabel(.send)
-                .onSubmit {
-                    submitTypedCommand()
-                }
-
-            Button {
-                submitTypedCommand()
-            } label: {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 40, height: 40)
-                    .background(
-                        Circle()
-                            .fill(trimmedTypedInput.isEmpty ? Color.secondary.opacity(0.35) : BuddyTheme.cobalt)
-                    )
-            }
-            .buttonStyle(.plain)
-            .disabled(trimmedTypedInput.isEmpty)
-            .accessibilityLabel("Send workout command")
-        }
-        .onAppear {
-            Task { @MainActor in
-                isTextInputFocused = true
-            }
-        }
-    }
-
-    private func submitTypedCommand() {
-        let trimmed = trimmedTypedInput
-        guard !trimmed.isEmpty else { return }
-        BuddyHaptics.mediumImpact()
-        typedInput = ""
-        isTextInputFocused = false
-        isShowingTextInput = false
-        pipeline.processTypedInput(trimmed, into: store)
     }
 
     // MARK: - Inline Error Pill
@@ -439,29 +416,26 @@ struct VoiceRecordDock: View {
             Button {
                 pipeline.dismissError()
             } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(BuddyTheme.mutedText)
+                    .padding(5)
             }
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 9)
+        .padding(.vertical, 10)
         .background {
-            Capsule(style: .continuous)
-                .fill(.ultraThinMaterial)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(BuddyTheme.floatingBarSurface)
         }
         .overlay {
-            Capsule(style: .continuous)
-                .strokeBorder(BuddyTheme.destructive.opacity(0.32), lineWidth: 0.9)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(BuddyTheme.destructive.opacity(0.45), lineWidth: 0.9)
         }
     }
 
     // MARK: - Helpers
-
-    private var trimmedTypedInput: String {
-        typedInput.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 
     private var isRecording: Bool {
         if case .recording = pipeline.phase { return true }
@@ -490,26 +464,19 @@ struct VoiceRecordDock: View {
     private var activeButtonColor: Color {
         switch pipeline.phase {
         case .recording(let hold):
-            return hold ? BuddyTheme.cobalt : BuddyTheme.destructive
+            return hold ? BuddyTheme.inkPrimary : BuddyTheme.destructive
         default:
-            return BuddyTheme.cobalt
+            return BuddyTheme.inkPrimary
         }
     }
 
-    private var activeButtonDeepColor: Color {
+    private var activeGlyphColor: Color {
         switch pipeline.phase {
         case .recording(let hold):
-            return hold ? BuddyTheme.cobaltDeep : Color(uiColor: .systemRed).opacity(0.85)
+            return hold ? BuddyTheme.inkInverse : Color.white
         default:
-            return BuddyTheme.cobaltDeep
+            return BuddyTheme.inkInverse
         }
-    }
-
-    private var dockBorderColor: Color {
-        if isRecording {
-            return activeButtonColor.opacity(0.45)
-        }
-        return BuddyTheme.glassBorder
     }
 
     private var micButtonSymbol: String {
@@ -530,9 +497,9 @@ struct VoiceRecordDock: View {
         case .recording(let hold):
             return hold ? "Recording in hold mode. Release to log." : "Recording. Tap to finish and log."
         case .transcribing:
-            return "Transcribing voice recording"
+            return "Finalizing speech recognition"
         case .parsing:
-            return "Parsing sets"
+            return "Parsing workout sets"
         }
     }
 
@@ -547,7 +514,7 @@ struct VoiceRecordDock: View {
     }
 }
 
-// MARK: - Live Cobalt Waveform Strip
+// MARK: - Monochrome Waveform Strip
 
 private struct VoiceWaveformStrip: View {
     let levels: [Float]
@@ -564,15 +531,9 @@ private struct VoiceWaveformStrip: View {
             HStack(alignment: .center, spacing: spacing) {
                 ForEach(0..<barCount, id: \.self) { index in
                     let magnitude = bars[index]
-                    let barHeight = max(4.0, CGFloat(magnitude) * maxHeight)
+                    let barHeight = max(3.0, CGFloat(magnitude) * maxHeight)
                     Capsule(style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [BuddyTheme.cobalt, BuddyTheme.cobaltDeep.opacity(0.75)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
+                        .fill(BuddyTheme.inkPrimary.opacity(0.35 + Double(magnitude) * 0.65))
                         .frame(width: barWidth, height: barHeight)
                 }
             }

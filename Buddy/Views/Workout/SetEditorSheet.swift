@@ -83,9 +83,9 @@ struct SetEditorSheet: View {
                 TextField("Bodyweight", text: $weightText)
                     .keyboardType(.decimalPad)
                     .multilineTextAlignment(.trailing)
-                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .font(.system(size: 18, weight: .bold))
                     .monospacedDigit()
-                    .foregroundStyle(BuddyTheme.cobalt)
+                    .foregroundStyle(.primary)
                     .onChange(of: weightText) { _, newValue in
                         let cleaned = newValue
                             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -104,14 +104,14 @@ struct SetEditorSheet: View {
                         adjustWeight(by: delta)
                     } label: {
                         Text(delta > 0 ? "+\(Self.formatNumeric(delta))" : Self.formatNumeric(delta))
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .font(.system(size: 13, weight: .semibold))
                             .monospacedDigit()
-                            .foregroundStyle(delta > 0 ? BuddyTheme.cobalt : .primary)
+                            .foregroundStyle(delta > 0 ? BuddyTheme.inkInverse : Color.primary)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 8)
                             .background(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(delta > 0 ? BuddyTheme.cobaltSoft : BuddyTheme.elevatedSurface)
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(delta > 0 ? BuddyTheme.inkPrimary : BuddyTheme.chipSurface)
                             )
                     }
                     .buttonStyle(.plain)
@@ -133,9 +133,9 @@ struct SetEditorSheet: View {
                         Text("Reps")
                         Spacer()
                         Text("\(reps)")
-                            .font(.system(size: 18, weight: .bold, design: .rounded))
+                            .font(.system(size: 18, weight: .bold))
                             .monospacedDigit()
-                            .foregroundStyle(BuddyTheme.cobalt)
+                            .foregroundStyle(.primary)
                     }
                 }
             }
@@ -151,19 +151,20 @@ struct SetEditorSheet: View {
 
             HStack(spacing: 8) {
                 ForEach([30, 45, 60, 90], id: \.self) { seconds in
+                    let isSelected = (durationText == "\(seconds)")
                     Button {
                         BuddyHaptics.selection()
                         durationText = "\(seconds)"
                     } label: {
                         Text("\(seconds)s")
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .font(.system(size: 12, weight: .semibold))
                             .monospacedDigit()
-                            .foregroundStyle(durationText == "\(seconds)" ? .white : BuddyTheme.cobalt)
+                            .foregroundStyle(isSelected ? BuddyTheme.inkInverse : Color.primary)
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, 6)
+                            .padding(.vertical, 7)
                             .background(
-                                Capsule(style: .continuous)
-                                    .fill(durationText == "\(seconds)" ? BuddyTheme.cobalt : BuddyTheme.cobaltSoft)
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(isSelected ? BuddyTheme.inkPrimary : BuddyTheme.chipSurface)
                             )
                     }
                     .buttonStyle(.plain)

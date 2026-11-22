@@ -1,6 +1,5 @@
 import Foundation
 import Observation
-import WhisperKit
 
 public enum ModelManagerError: LocalizedError, Sendable {
     case invalidDownloadURL
@@ -142,44 +141,12 @@ private final class LLMDownloadDelegate: NSObject, URLSessionDownloadDelegate, @
     }
 }
 
-public typealias SpeechEngine = ModelManager.SpeechEngine
 public typealias AppleSpeechLocaleOption = ModelManager.AppleSpeechLocaleOption
-public typealias WhisperPreset = ModelManager.WhisperPreset
 public typealias LLMPreset = ModelManager.LLMPreset
 
 @Observable
 @MainActor
 public final class ModelManager {
-    public enum SpeechEngine: String, CaseIterable, Identifiable, Codable, Sendable {
-        case appleOnDevice = "apple-on-device"
-        case whisperKit = "whisperkit"
-
-        public var id: String { rawValue }
-
-        public var displayName: String {
-            switch self {
-            case .appleOnDevice: return "Apple On-Device"
-            case .whisperKit: return "WhisperKit (CoreML)"
-            }
-        }
-
-        public var shortName: String {
-            switch self {
-            case .appleOnDevice: return "Apple Speech"
-            case .whisperKit: return "WhisperKit"
-            }
-        }
-
-        public var subtitle: String {
-            switch self {
-            case .appleOnDevice:
-                return "Instant live captions, 0 MB download, strong accent support & zero extra RAM"
-            case .whisperKit:
-                return "OpenAI Whisper running offline via CoreML + Apple Neural Engine"
-            }
-        }
-    }
-
     public enum AppleSpeechLocaleOption: String, CaseIterable, Identifiable, Codable, Sendable {
         case auto = "auto"
         case enIN = "en-IN"
@@ -211,85 +178,6 @@ public final class ModelManager {
 
         public var locale: Locale {
             explicitLocale ?? Locale.current
-        }
-    }
-
-    public enum WhisperPreset: String, CaseIterable, Identifiable, Codable, Sendable {
-        case largeV3Turbo = "openai_whisper-large-v3-v20240930_626MB"
-        case small = "openai_whisper-small_216MB"
-        case baseEn = "openai_whisper-base.en"
-        case baseMultilingual = "openai_whisper-base"
-        case tinyEn = "openai_whisper-tiny.en"
-
-        public var id: String { rawValue }
-
-        public var variantGlob: String {
-            switch self {
-            case .largeV3Turbo: return "large-v3-v20240930_626MB"
-            case .small: return "small_216MB"
-            case .baseEn: return "base.en"
-            case .baseMultilingual: return "base"
-            case .tinyEn: return "tiny.en"
-            }
-        }
-
-        public var displayName: String {
-            switch self {
-            case .largeV3Turbo: return "Whisper Large v3 Turbo"
-            case .small: return "Whisper Small"
-            case .baseEn: return "Whisper Base (English)"
-            case .baseMultilingual: return "Whisper Base (Multilingual)"
-            case .tinyEn: return "Whisper Tiny (English)"
-            }
-        }
-
-        public var subtitle: String {
-            switch self {
-            case .largeV3Turbo: return "Best Whisper accuracy & global accents (~626 MB)"
-            case .small: return "High accuracy with smaller footprint (~216 MB)"
-            case .baseEn: return "Balanced speed & size (English-only)"
-            case .baseMultilingual: return "Lightweight multilingual Whisper"
-            case .tinyEn: return "Fastest transcription & lowest RAM"
-            }
-        }
-
-        public var approximateSizeMB: Int {
-            switch self {
-            case .largeV3Turbo: return 626
-            case .small: return 216
-            case .baseEn: return 145
-            case .baseMultilingual: return 145
-            case .tinyEn: return 75
-            }
-        }
-
-        public var languageCode: String? {
-            switch self {
-            case .largeV3Turbo, .small, .baseEn, .tinyEn:
-                return "en"
-            case .baseMultilingual:
-                return nil
-            }
-        }
-
-        var whisperModelVariant: ModelVariant {
-            switch self {
-            case .largeV3Turbo: return .largev3
-            case .small: return .small
-            case .baseEn: return .baseEn
-            case .baseMultilingual: return .base
-            case .tinyEn: return .tinyEn
-            }
-        }
-
-        public var tokenizerRepoName: String {
-            switch self {
-            case .largeV3Turbo: return "openai/whisper-large-v3"
-            case .small: return "openai/whisper-small"
-            case .baseEn: return "openai/whisper-base.en"
-            case .baseMultilingual: return "openai/whisper-base"
-            case .tinyEn: return "openai/whisper-tiny.en"
-            }
         }
     }
 
@@ -345,39 +233,25 @@ public final class ModelManager {
     }
 
     private enum DefaultsKey {
-        static let selectedSpeechEngine = "buddy.models.speechEngine"
         static let selectedAppleSpeechLocale = "buddy.models.appleSpeechLocale"
-        static let selectedWhisperPreset = "buddy.models.selectedWhisperPreset"
         static let selectedLLMPreset = "buddy.models.selectedLLMPreset"
         static let customLLMFileName = "buddy.models.customLLMFileName"
-        static let whisperRelativePaths = "buddy.models.whisperRelativePaths"
+
+        // Legacy WhisperKit keys purged automatically on upgrade
+        static let legacySpeechEngine = "buddy.models.speechEngine"
+        static let legacyWhisperPreset = "buddy.models.selectedWhisperPreset"
+        static let legacyWhisperRelativePaths = "buddy.models.whisperRelativePaths"
     }
 
     public let modelsRootDirectory: URL
-    public let whisperBaseDirectory: URL
     public let llmBaseDirectory: URL
 
     @ObservationIgnored private var isInitializing: Bool = true
-
-    public var selectedSpeechEngine: SpeechEngine = .appleOnDevice {
-        didSet {
-            guard !isInitializing else { return }
-            defaults.set(selectedSpeechEngine.rawValue, forKey: DefaultsKey.selectedSpeechEngine)
-        }
-    }
 
     public var selectedAppleSpeechLocale: AppleSpeechLocaleOption = .auto {
         didSet {
             guard !isInitializing else { return }
             defaults.set(selectedAppleSpeechLocale.rawValue, forKey: DefaultsKey.selectedAppleSpeechLocale)
-        }
-    }
-
-    public var selectedWhisperPreset: WhisperPreset = .largeV3Turbo {
-        didSet {
-            guard !isInitializing else { return }
-            defaults.set(selectedWhisperPreset.rawValue, forKey: DefaultsKey.selectedWhisperPreset)
-            refreshDownloadState()
         }
     }
 
@@ -401,42 +275,17 @@ public final class ModelManager {
         }
     }
 
-    public var whisperDownloadProgress: Double = 0
-    public var isDownloadingWhisper: Bool = false
     public var llmDownloadProgress: Double = 0
     public var isDownloadingLLM: Bool = false
     public var downloadError: String?
 
-    public var isWhisperDownloaded: Bool = false
     public var isLLMDownloaded: Bool = false
-    public var activeWhisperFolderURL: URL?
     public var activeLLMFileURL: URL?
     public var totalStorageUsedDescription: String = "0 MB"
 
-    /// Evaluates whether voice logging is actually usable given Apple On-Device Speech permission
-    /// and offline dictation availability (or local WhisperKit files when WhisperKit is selected).
-    public func isVoiceReady(appleSpeechReady: Bool) -> Bool {
-        switch selectedSpeechEngine {
-        case .appleOnDevice:
-            return appleSpeechReady
-        case .whisperKit:
-            return isWhisperDownloaded
-        }
-    }
-
-    /// Returns `true` only when both the active voice engine and the local LLM are ready offline.
+    /// Returns `true` when Apple On-Device Speech is available AND the local LLM is downloaded.
     public func isAllReady(appleSpeechReady: Bool) -> Bool {
-        isVoiceReady(appleSpeechReady: appleSpeechReady) && isLLMDownloaded
-    }
-
-    /// Returns whether all required *downloadable* model files for the selected engine are on disk.
-    public var isAllDownloaded: Bool {
-        switch selectedSpeechEngine {
-        case .appleOnDevice:
-            return isLLMDownloaded
-        case .whisperKit:
-            return isWhisperDownloaded && isLLMDownloaded
-        }
+        appleSpeechReady && isLLMDownloaded
     }
 
     private let defaults: UserDefaults
@@ -450,22 +299,11 @@ public final class ModelManager {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         self.modelsRootDirectory = appSupport.appendingPathComponent("BuddyModels", isDirectory: true)
-        self.whisperBaseDirectory = modelsRootDirectory.appendingPathComponent("Whisper", isDirectory: true)
         self.llmBaseDirectory = modelsRootDirectory.appendingPathComponent("LLM", isDirectory: true)
-
-        if let storedEngine = defaults.string(forKey: DefaultsKey.selectedSpeechEngine),
-           let parsedEngine = SpeechEngine(rawValue: storedEngine) {
-            self.selectedSpeechEngine = parsedEngine
-        }
 
         if let storedLocale = defaults.string(forKey: DefaultsKey.selectedAppleSpeechLocale),
            let parsedLocale = AppleSpeechLocaleOption(rawValue: storedLocale) {
             self.selectedAppleSpeechLocale = parsedLocale
-        }
-
-        if let storedWhisper = defaults.string(forKey: DefaultsKey.selectedWhisperPreset),
-           let parsedWhisper = WhisperPreset(rawValue: storedWhisper) {
-            self.selectedWhisperPreset = parsedWhisper
         }
 
         if let storedLLM = defaults.string(forKey: DefaultsKey.selectedLLMPreset),
@@ -476,86 +314,13 @@ public final class ModelManager {
         self.customLLMFileName = defaults.string(forKey: DefaultsKey.customLLMFileName)
         self.isInitializing = false
 
+        purgeLegacyWhisperCacheIfPresent()
         ensureModelDirectories()
         refreshDownloadState()
     }
 
-    public func isDownloaded(_ preset: WhisperPreset) -> Bool {
-        resolvedWhisperFolderURL(for: preset) != nil
-    }
-
     public func isDownloaded(_ preset: LLMPreset) -> Bool {
         resolvedLLMFileURL(for: preset) != nil
-    }
-
-    public func downloadWhisperModel(_ preset: WhisperPreset? = nil) async {
-        guard !isDownloadingWhisper else { return }
-
-        let targetPreset = preset ?? selectedWhisperPreset
-        if selectedWhisperPreset != targetPreset {
-            selectedWhisperPreset = targetPreset
-        }
-
-        ensureModelDirectories()
-        isDownloadingWhisper = true
-        whisperDownloadProgress = 0
-        downloadError = nil
-        defer { isDownloadingWhisper = false }
-
-        do {
-            let folderURL: URL
-            do {
-                folderURL = try await WhisperKit.download(
-                    variant: targetPreset.rawValue,
-                    downloadBase: whisperBaseDirectory,
-                    useBackgroundSession: false,
-                    from: "argmaxinc/whisperkit-coreml"
-                ) { [weak self] progress in
-                    let fraction = min(0.90, max(0.0, progress.fractionCompleted * 0.90))
-                    Task { @MainActor [weak self] in
-                        self?.whisperDownloadProgress = fraction
-                    }
-                }
-            } catch {
-                // Fallback to shorter glob if upstream naming changes.
-                folderURL = try await WhisperKit.download(
-                    variant: targetPreset.variantGlob,
-                    downloadBase: whisperBaseDirectory,
-                    useBackgroundSession: false,
-                    from: "argmaxinc/whisperkit-coreml"
-                ) { [weak self] progress in
-                    let fraction = min(0.90, max(0.0, progress.fractionCompleted * 0.90))
-                    Task { @MainActor [weak self] in
-                        self?.whisperDownloadProgress = fraction
-                    }
-                }
-            }
-
-            // Pre-cache tokenizer files while online (mandatory so Airplane Mode works 100% offline).
-            whisperDownloadProgress = 0.94
-            _ = try await ModelUtilities.loadTokenizer(
-                for: targetPreset.whisperModelVariant,
-                tokenizerFolder: whisperBaseDirectory,
-                additionalSearchPaths: [folderURL]
-            )
-
-            guard hasCachedTokenizer(for: targetPreset, modelFolder: folderURL) else {
-                throw ModelManagerError.invalidGGUFFile("Whisper tokenizer files were not cached locally. Check your Wi-Fi connection and retry.")
-            }
-
-            excludeFromBackup(whisperBaseDirectory)
-            excludeFromBackup(folderURL)
-            saveWhisperRelativePath(for: targetPreset, folderURL: folderURL)
-
-            whisperDownloadProgress = 1.0
-            refreshDownloadState()
-        } catch is CancellationError {
-            whisperDownloadProgress = 0
-        } catch {
-            downloadError = "Whisper download failed: \(error.localizedDescription)"
-            whisperDownloadProgress = 0
-            refreshDownloadState()
-        }
     }
 
     public func downloadLLMModel(_ preset: LLMPreset? = nil) async {
@@ -653,13 +418,6 @@ public final class ModelManager {
 
     public func downloadRecommendedPack() async {
         downloadError = nil
-        if selectedSpeechEngine == .whisperKit {
-            let targetWhisper = selectedWhisperPreset
-            if !isDownloaded(targetWhisper) {
-                await downloadWhisperModel(targetWhisper)
-            }
-        }
-
         if !isDownloaded(.qwen25_1_5B) {
             await downloadLLMModel(.qwen25_1_5B)
         } else if selectedLLMPreset != .qwen25_1_5B {
@@ -714,16 +472,6 @@ public final class ModelManager {
         refreshDownloadState()
     }
 
-    public func deleteWhisperModel(_ preset: WhisperPreset? = nil) {
-        let targetPreset = preset ?? selectedWhisperPreset
-        if let folderURL = resolvedWhisperFolderURL(for: targetPreset) {
-            try? FileManager.default.removeItem(at: folderURL)
-        }
-        removeWhisperRelativePath(for: targetPreset)
-        whisperDownloadProgress = 0
-        refreshDownloadState()
-    }
-
     public func deleteLLMModel(_ preset: LLMPreset? = nil) {
         let targetPreset = preset ?? selectedLLMPreset
         if let fileURL = resolvedLLMFileURL(for: targetPreset) {
@@ -737,10 +485,6 @@ public final class ModelManager {
     }
 
     public func refreshDownloadState() {
-        let whisperFolder = resolvedWhisperFolderURL(for: selectedWhisperPreset)
-        activeWhisperFolderURL = whisperFolder
-        isWhisperDownloaded = (whisperFolder != nil)
-
         let llmFile = resolvedLLMFileURL(for: selectedLLMPreset)
         activeLLMFileURL = llmFile
         isLLMDownloaded = (llmFile != nil)
@@ -754,9 +498,21 @@ public final class ModelManager {
         llmBaseDirectory.appendingPathComponent("Custom", isDirectory: true)
     }
 
+    /// Reclaims storage from any previously downloaded WhisperKit CoreML models (145–626 MB)
+    /// left behind on devices upgrading from older builds.
+    private func purgeLegacyWhisperCacheIfPresent() {
+        let legacyWhisperDir = modelsRootDirectory.appendingPathComponent("Whisper", isDirectory: true)
+        if FileManager.default.fileExists(atPath: legacyWhisperDir.path) {
+            try? FileManager.default.removeItem(at: legacyWhisperDir)
+        }
+        defaults.removeObject(forKey: DefaultsKey.legacySpeechEngine)
+        defaults.removeObject(forKey: DefaultsKey.legacyWhisperPreset)
+        defaults.removeObject(forKey: DefaultsKey.legacyWhisperRelativePaths)
+    }
+
     private func ensureModelDirectories() {
         let fileManager = FileManager.default
-        for directory in [modelsRootDirectory, whisperBaseDirectory, llmBaseDirectory, customLLMDirectory] {
+        for directory in [modelsRootDirectory, llmBaseDirectory, customLLMDirectory] {
             if !fileManager.fileExists(atPath: directory.path) {
                 try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
             }
@@ -771,101 +527,6 @@ public final class ModelManager {
         try? mutableURL.setResourceValues(values)
     }
 
-    private func saveWhisperRelativePath(for preset: WhisperPreset, folderURL: URL) {
-        var stored = defaults.dictionary(forKey: DefaultsKey.whisperRelativePaths) as? [String: String] ?? [:]
-        let basePath = whisperBaseDirectory.standardizedFileURL.path
-        let folderPath = folderURL.standardizedFileURL.path
-        if folderPath.hasPrefix(basePath) {
-            let relative = String(folderPath.dropFirst(basePath.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            stored[preset.rawValue] = relative
-        } else {
-            stored[preset.rawValue] = folderURL.lastPathComponent
-        }
-        defaults.set(stored, forKey: DefaultsKey.whisperRelativePaths)
-    }
-
-    private func removeWhisperRelativePath(for preset: WhisperPreset) {
-        var stored = defaults.dictionary(forKey: DefaultsKey.whisperRelativePaths) as? [String: String] ?? [:]
-        stored.removeValue(forKey: preset.rawValue)
-        defaults.set(stored, forKey: DefaultsKey.whisperRelativePaths)
-    }
-
-    private func resolvedWhisperFolderURL(for preset: WhisperPreset) -> URL? {
-        let fileManager = FileManager.default
-
-        // 1. Check persisted relative path under Whisper base directory.
-        if let stored = defaults.dictionary(forKey: DefaultsKey.whisperRelativePaths) as? [String: String],
-           let relative = stored[preset.rawValue], !relative.isEmpty {
-            let candidate = whisperBaseDirectory.appendingPathComponent(relative, isDirectory: true)
-            if Self.isValidWhisperFolder(candidate) && hasCachedTokenizer(for: preset, modelFolder: candidate) {
-                return candidate
-            }
-        }
-
-        // 2. Check standard HuggingFace Hub cache structure created by WhisperKit.download.
-        let standardCandidates: [URL] = [
-            whisperBaseDirectory
-                .appendingPathComponent("models", isDirectory: true)
-                .appendingPathComponent("argmaxinc", isDirectory: true)
-                .appendingPathComponent("whisperkit-coreml", isDirectory: true)
-                .appendingPathComponent(preset.rawValue, isDirectory: true),
-            whisperBaseDirectory.appendingPathComponent(preset.rawValue, isDirectory: true)
-        ]
-
-        for candidate in standardCandidates where Self.isValidWhisperFolder(candidate) && hasCachedTokenizer(for: preset, modelFolder: candidate) {
-            return candidate
-        }
-
-        // 3. Fallback shallow scan inside Whisper base directory.
-        guard let enumerator = fileManager.enumerator(
-            at: whisperBaseDirectory,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            return nil
-        }
-
-        for case let url as URL in enumerator {
-            let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-            guard isDir else { continue }
-            if url.lastPathComponent == preset.rawValue && Self.isValidWhisperFolder(url) && hasCachedTokenizer(for: preset, modelFolder: url) {
-                return url
-            }
-        }
-
-        return nil
-    }
-
-    private func hasCachedTokenizer(for preset: WhisperPreset, modelFolder: URL) -> Bool {
-        let fileManager = FileManager.default
-        let tokenizerRepoName = preset.tokenizerRepoName
-        let candidateFolders: [URL] = [
-            whisperBaseDirectory
-                .appendingPathComponent("models", isDirectory: true)
-                .appendingPathComponent(tokenizerRepoName, isDirectory: true),
-            modelFolder
-        ]
-        return candidateFolders.contains { folder in
-            let tokenizerFile = folder.appendingPathComponent("tokenizer.json", isDirectory: false)
-            return fileManager.fileExists(atPath: tokenizerFile.path)
-        }
-    }
-
-    private static func isValidWhisperFolder(_ url: URL) -> Bool {
-        let fileManager = FileManager.default
-        var isDir: ObjCBool = false
-        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
-            return false
-        }
-        let hasMel = fileManager.fileExists(atPath: url.appendingPathComponent("MelSpectrogram.mlmodelc").path)
-            || fileManager.fileExists(atPath: url.appendingPathComponent("MelSpectrogram.mlpackage").path)
-        let hasEncoder = fileManager.fileExists(atPath: url.appendingPathComponent("AudioEncoder.mlmodelc").path)
-            || fileManager.fileExists(atPath: url.appendingPathComponent("AudioEncoder.mlpackage").path)
-        let hasDecoder = fileManager.fileExists(atPath: url.appendingPathComponent("TextDecoder.mlmodelc").path)
-            || fileManager.fileExists(atPath: url.appendingPathComponent("TextDecoder.mlpackage").path)
-        return hasMel && hasEncoder && hasDecoder
-    }
-
     private func resolvedLLMFileURL(for preset: LLMPreset) -> URL? {
         let candidate: URL
         switch preset {
@@ -877,7 +538,6 @@ public final class ModelManager {
             if FileManager.default.fileExists(atPath: isolated.path) {
                 candidate = isolated
             } else {
-                // Backward-compatible lookup if a custom file was imported before Custom/ isolation.
                 candidate = llmBaseDirectory.appendingPathComponent(customLLMFileName, isDirectory: false)
             }
         }

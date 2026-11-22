@@ -43,115 +43,73 @@ struct TrendsView: View {
         let sortedHistory = sessions.sorted { $0.startedAt > $1.startedAt }
 
         NavigationStack {
-            List {
-                Section {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    compactHeader(consistency: consistency)
+
                     consistencyHeroCard(consistency: consistency, heatmapDays: heatmapDays)
-                }
-                .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
 
-                Section {
                     volumeTrendCard(points: volumePoints)
-                }
-                .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
 
-                Section {
                     exerciseProgressionCard(
                         exerciseNames: exerciseNames,
                         activeExercise: activeExercise,
                         points: progressionPoints
                     )
-                }
-                .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
 
-                Section {
-                    if sortedHistory.isEmpty {
-                        HStack(spacing: 12) {
-                            Image(systemName: "figure.strengthtraining.traditional")
-                                .font(.title3)
-                                .foregroundStyle(.secondary)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("No Workouts Yet")
-                                    .font(.subheadline.weight(.semibold))
-                                Text("Log your first set from the Workout tab to see full history and progression.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .padding(.vertical, 6)
-                    } else {
-                        ForEach(sortedHistory, id: \.id) { session in
-                            NavigationLink {
-                                SessionDetailView(session: session, store: store)
-                            } label: {
-                                sessionHistoryRow(session)
-                            }
-                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                Button(role: .destructive) {
-                                    BuddyHaptics.warning()
-                                    store.deleteSession(session)
-                                    WidgetRefreshHelper.sync(store: store)
-                                } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
-                            }
-                        }
-                    }
-                } header: {
-                    HStack {
-                        Text("Session History")
-                        Spacer()
-                        if !sortedHistory.isEmpty {
-                            Text("\(sortedHistory.count)")
-                                .buddyNumeric()
-                                .foregroundStyle(.secondary)
-                        }
-                    }
+                    historySection(sortedHistory: sortedHistory)
                 }
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, BuddyTheme.floatingBarClearance)
             }
-            .listStyle(.insetGrouped)
-            .scrollContentBackground(.hidden)
             .background(BuddyTheme.canvasBackground.ignoresSafeArea())
-            .navigationTitle("Trends")
-            .navigationBarTitleDisplayMode(.large)
+            .toolbar(.hidden, for: .navigationBar)
         }
     }
 
-    // MARK: - Consistency Hero Card
+    // MARK: - Compact Header
+
+    private func compactHeader(consistency: ConsistencyStats) -> some View {
+        HStack(alignment: .center) {
+            Text("Trends")
+                .font(.system(size: 22, weight: .bold))
+                .foregroundStyle(.primary)
+
+            Spacer()
+
+            StatusPill(
+                text: "\(consistency.totalWorkouts) \(consistency.totalWorkouts == 1 ? "workout" : "workouts")",
+                tint: BuddyTheme.inkPrimary
+            )
+        }
+        .padding(.top, 2)
+    }
+
+    // MARK: - Consistency & Monochrome Heatmap
 
     private func consistencyHeroCard(
         consistency: ConsistencyStats,
         heatmapDays: [HeatmapDay]
     ) -> some View {
-        NativeCard(padding: 16, cornerRadius: 20) {
+        NativeCard(padding: 15, cornerRadius: 14) {
             VStack(alignment: .leading, spacing: 14) {
-                HStack(alignment: .center) {
-                    Text("Consistency")
-                        .font(.headline)
-                    Spacer()
-                    StatusPill(
-                        text: "\(consistency.totalWorkouts) \(consistency.totalWorkouts == 1 ? "workout" : "workouts")",
-                        tint: BuddyTheme.cobalt
-                    )
-                }
+                Text("Consistency")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.primary)
 
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     compactConsistencyMetric(
-                        title: "Current Streak",
+                        title: "Streak",
                         value: "\(consistency.currentStreakDays)d",
                         icon: "flame.fill",
-                        tint: consistency.currentStreakDays > 0 ? BuddyTheme.amberStreak : .secondary
+                        tint: consistency.currentStreakDays > 0 ? BuddyTheme.amberStreak : BuddyTheme.mutedText
                     )
                     compactConsistencyMetric(
-                        title: "Longest",
+                        title: "Best",
                         value: "\(consistency.longestStreakDays)d",
                         icon: "trophy.fill",
-                        tint: BuddyTheme.cobalt
+                        tint: BuddyTheme.inkPrimary
                     )
                     compactConsistencyMetric(
                         title: "This Week",
@@ -181,13 +139,14 @@ struct TrendsView: View {
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(tint)
                 Text(title.uppercased())
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .tracking(0.4)
+                    .foregroundStyle(BuddyTheme.mutedText)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
             }
             Text(value)
-                .font(.system(size: 20, weight: .bold, design: .rounded))
+                .font(.system(size: 19, weight: .bold))
                 .monospacedDigit()
                 .foregroundStyle(.primary)
         }
@@ -195,39 +154,43 @@ struct TrendsView: View {
         .padding(.vertical, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(BuddyTheme.elevatedSurface)
         )
     }
 
-    // MARK: - Volume Trend Card
+    // MARK: - Volume Trend Card (YouTube Chips + Crisp Monochrome Bars)
 
     private func volumeTrendCard(points: [VolumePoint]) -> some View {
         let totalVolumeKg = points.reduce(0.0) { $0 + $1.volumeKg }
         let totalSets = points.reduce(0) { $0 + $1.setCount }
         let hasVolume = points.contains { $0.volumeKg > 0 }
 
-        return NativeCard(padding: 16, cornerRadius: 20) {
+        return NativeCard(padding: 15, cornerRadius: 14) {
             VStack(alignment: .leading, spacing: 14) {
-                HStack(alignment: .center, spacing: 10) {
+                HStack(alignment: .center, spacing: 8) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Volume Trend")
-                            .font(.headline)
+                        Text("Volume")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(.primary)
                         Text("\(store.preferredUnit.formatVolume(kg: totalVolumeKg)) · \(totalSets) sets")
                             .font(.caption.weight(.semibold))
                             .buddyNumeric()
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(BuddyTheme.mutedText)
                     }
 
                     Spacer(minLength: 8)
 
-                    Picker("Timeframe", selection: $selectedTimeframe) {
+                    HStack(spacing: 6) {
                         ForEach(Self.timeframes, id: \.self) { timeframe in
-                            Text(timeframeLabel(timeframe)).tag(timeframe)
+                            FilterChip(
+                                title: timeframeLabel(timeframe),
+                                isSelected: selectedTimeframe == timeframe
+                            ) {
+                                selectedTimeframe = timeframe
+                            }
                         }
                     }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 142)
                 }
 
                 if hasVolume {
@@ -238,23 +201,23 @@ struct TrendsView: View {
                         )
                         .foregroundStyle(
                             LinearGradient(
-                                colors: [BuddyTheme.cobalt, BuddyTheme.cobalt.opacity(0.45)],
+                                colors: [BuddyTheme.inkPrimary, BuddyTheme.inkPrimary.opacity(0.45)],
                                 startPoint: .top,
                                 endPoint: .bottom
                             )
                         )
-                        .cornerRadius(6)
+                        .cornerRadius(5)
                     }
                     .chartYAxis {
                         AxisMarks(position: .leading) { value in
                             AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
-                                .foregroundStyle(Color.secondary.opacity(0.25))
+                                .foregroundStyle(BuddyTheme.hairlineBorder)
                             AxisValueLabel {
                                 if let doubleVal = value.as(Double.self) {
                                     Text(shortAxisVolume(doubleVal))
                                         .font(.caption2)
                                         .buddyNumeric()
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(BuddyTheme.mutedText)
                                 }
                             }
                         }
@@ -263,10 +226,10 @@ struct TrendsView: View {
                         AxisMarks(values: volumeXAxisLabels(for: points)) { _ in
                             AxisValueLabel()
                                 .font(.caption2)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(BuddyTheme.mutedText)
                         }
                     }
-                    .frame(height: 185)
+                    .frame(height: 180)
                 } else {
                     emptyChartPlaceholder(
                         icon: "chart.bar.xaxis",
@@ -277,61 +240,53 @@ struct TrendsView: View {
         }
     }
 
-    // MARK: - Exercise Progression Card
+    // MARK: - Exercise Progression Card (YouTube Exercise Chips + Crisp White Line)
 
     private func exerciseProgressionCard(
         exerciseNames: [String],
         activeExercise: String?,
         points: [ExerciseProgressPoint]
     ) -> some View {
-        NativeCard(padding: 16, cornerRadius: 20) {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(alignment: .center, spacing: 8) {
-                    Text("Exercise Progress")
-                        .font(.headline)
-
-                    Spacer(minLength: 8)
-
-                    if let activeExercise, !exerciseNames.isEmpty {
-                        Menu {
-                            ForEach(exerciseNames, id: \.self) { name in
-                                Button {
-                                    BuddyHaptics.selection()
-                                    selectedExercise = name
-                                } label: {
-                                    if name == activeExercise {
-                                        Label(displayExerciseName(name), systemImage: "checkmark")
-                                    } else {
-                                        Text(displayExerciseName(name))
-                                    }
-                                }
-                            }
-                        } label: {
-                            HStack(spacing: 4) {
-                                Text(displayExerciseName(activeExercise))
-                                    .font(.caption.weight(.semibold))
-                                    .lineLimit(1)
-                                Image(systemName: "chevron.up.chevron.down")
-                                    .font(.system(size: 10, weight: .bold))
-                            }
-                            .foregroundStyle(BuddyTheme.cobalt)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(
-                                Capsule(style: .continuous)
-                                    .fill(BuddyTheme.cobaltSoft)
-                            )
-                        }
-                    }
-                }
+        NativeCard(padding: 15, cornerRadius: 14) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Exercise Progress")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.primary)
 
                 if !exerciseNames.isEmpty {
-                    Picker("Metric", selection: $selectedMetric) {
-                        ForEach(ExerciseChartMetric.allCases) { metric in
-                            Text(metric.rawValue).tag(metric)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(exerciseNames, id: \.self) { name in
+                                FilterChip(
+                                    title: displayExerciseName(name),
+                                    isSelected: name == activeExercise
+                                ) {
+                                    selectedExercise = name
+                                }
+                            }
                         }
                     }
-                    .pickerStyle(.segmented)
+
+                    HStack(spacing: 6) {
+                        ForEach(ExerciseChartMetric.allCases) { metric in
+                            let isSelected = (selectedMetric == metric)
+                            Button {
+                                BuddyHaptics.selection()
+                                selectedMetric = metric
+                            } label: {
+                                Text(metric.rawValue)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(isSelected ? BuddyTheme.inkInverse : BuddyTheme.mutedText)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 7)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .fill(isSelected ? BuddyTheme.inkPrimary : BuddyTheme.elevatedSurface)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
                 }
 
                 let hasNonZeroPoints = points.contains { metricValue(for: $0) > 0 }
@@ -368,7 +323,7 @@ struct TrendsView: View {
                             .interpolationMethod(.catmullRom)
                             .foregroundStyle(
                                 LinearGradient(
-                                    colors: [BuddyTheme.cobalt.opacity(0.28), BuddyTheme.cobalt.opacity(0.02)],
+                                    colors: [BuddyTheme.inkPrimary.opacity(0.22), BuddyTheme.inkPrimary.opacity(0.01)],
                                     startPoint: .top,
                                     endPoint: .bottom
                                 )
@@ -379,27 +334,27 @@ struct TrendsView: View {
                                 y: .value(selectedMetric.rawValue, value)
                             )
                             .interpolationMethod(.catmullRom)
-                            .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
-                            .foregroundStyle(BuddyTheme.cobalt)
+                            .lineStyle(StrokeStyle(lineWidth: 2.25, lineCap: .round, lineJoin: .round))
+                            .foregroundStyle(BuddyTheme.inkPrimary)
                         }
 
                         PointMark(
                             x: .value("Date", point.date),
                             y: .value(selectedMetric.rawValue, value)
                         )
-                        .symbolSize(points.count == 1 ? 64 : 38)
-                        .foregroundStyle(BuddyTheme.cobalt)
+                        .symbolSize(points.count == 1 ? 60 : 34)
+                        .foregroundStyle(BuddyTheme.inkPrimary)
                     }
                     .chartYAxis {
                         AxisMarks(position: .leading) { value in
                             AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
-                                .foregroundStyle(Color.secondary.opacity(0.25))
+                                .foregroundStyle(BuddyTheme.hairlineBorder)
                             AxisValueLabel {
                                 if let doubleVal = value.as(Double.self) {
                                     Text(shortMetricLabel(doubleVal))
                                         .font(.caption2)
                                         .buddyNumeric()
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(BuddyTheme.mutedText)
                                 }
                             }
                         }
@@ -409,15 +364,15 @@ struct TrendsView: View {
                             if allSameDay && points.count > 1 {
                                 AxisValueLabel(format: .dateTime.hour().minute())
                                     .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(BuddyTheme.mutedText)
                             } else {
                                 AxisValueLabel(format: .dateTime.month(.abbreviated).day())
                                     .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(BuddyTheme.mutedText)
                             }
                         }
                     }
-                    .frame(height: 185)
+                    .frame(height: 180)
                 } else {
                     emptyChartPlaceholder(
                         icon: "chart.xyaxis.line",
@@ -430,65 +385,118 @@ struct TrendsView: View {
         }
     }
 
-    // MARK: - Session History Row
+    // MARK: - YouTube-Style Session History Feed
 
-    private func sessionHistoryRow(_ session: WorkoutSession) -> some View {
-        HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(session.isActive ? BuddyTheme.emeraldLive.opacity(0.16) : BuddyTheme.cobaltSoft)
-                    .frame(width: 40, height: 40)
-
-                Image(systemName: session.sortedEntries.first?.muscleGroup.symbolName ?? "figure.strengthtraining.traditional")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(session.isActive ? BuddyTheme.emeraldLive : BuddyTheme.cobalt)
+    private func historySection(sortedHistory: [WorkoutSession]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("History")
+                    .font(BuddyTheme.sectionTitleFont)
+                    .foregroundStyle(.primary)
+                Spacer()
+                if !sortedHistory.isEmpty {
+                    Text("\(sortedHistory.count)")
+                        .font(.caption.weight(.bold))
+                        .monospacedDigit()
+                        .foregroundStyle(BuddyTheme.mutedText)
+                }
             }
 
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(session.derivedTitle)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-
-                    if session.isActive {
-                        Text("LIVE")
-                            .font(.system(size: 9, weight: .bold, design: .rounded))
-                            .foregroundStyle(BuddyTheme.emeraldLive)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill(BuddyTheme.emeraldLive.opacity(0.15)))
+            if sortedHistory.isEmpty {
+                NativeCard(padding: 16, cornerRadius: 14) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "figure.strengthtraining.traditional")
+                            .font(.title3)
+                            .foregroundStyle(BuddyTheme.mutedText)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("No Workouts Yet")
+                                .font(.subheadline.weight(.bold))
+                            Text("Log your first set from Home to see full history and progression.")
+                                .font(.caption)
+                                .foregroundStyle(BuddyTheme.mutedText)
+                        }
                     }
                 }
+            } else {
+                LazyVStack(spacing: 12) {
+                    ForEach(sortedHistory, id: \.id) { session in
+                        HStack(alignment: .top, spacing: 8) {
+                            NavigationLink {
+                                SessionDetailView(session: session, store: store)
+                            } label: {
+                                sessionHistoryRow(session)
+                            }
+                            .buttonStyle(.plain)
 
-                Text("\(session.startedAt.formatted(date: .abbreviated, time: .shortened)) · \(DurationFormatter.formatCompact(seconds: session.durationSeconds))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            Spacer(minLength: 6)
-
-            VStack(alignment: .trailing, spacing: 2) {
-                Text("\(session.totalSets) sets")
-                    .font(.caption.weight(.bold))
-                    .buddyNumeric()
-                    .foregroundStyle(.primary)
-
-                if session.totalVolumeKg > 0 {
-                    Text(store.preferredUnit.formatVolume(kg: session.totalVolumeKg))
-                        .font(.caption2.weight(.medium))
-                        .buddyNumeric()
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("\(session.totalReps) reps")
-                        .font(.caption2.weight(.medium))
-                        .buddyNumeric()
-                        .foregroundStyle(.secondary)
+                            Menu {
+                                Button(role: .destructive) {
+                                    BuddyHaptics.warning()
+                                    store.deleteSession(session)
+                                    WidgetRefreshHelper.sync(store: store)
+                                } label: {
+                                    Label("Delete Session", systemImage: "trash")
+                                }
+                            } label: {
+                                Image(systemName: "ellipsis")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(BuddyTheme.mutedText)
+                                    .frame(width: 28, height: 28)
+                                    .contentShape(Rectangle())
+                            }
+                            .accessibilityLabel("Session options")
+                        }
+                    }
                 }
             }
         }
-        .padding(.vertical, 3)
+    }
+
+    private func sessionHistoryRow(_ session: WorkoutSession) -> some View {
+        let primaryMuscle = session.sortedEntries.first?.muscleGroup ?? .fullBody
+        let durationBadge = DurationFormatter.formatClock(seconds: max(60, session.durationSeconds))
+
+        return HStack(alignment: .top, spacing: 12) {
+            WorkoutThumbnailView(
+                assetName: primaryMuscle.thumbnailAssetName,
+                bottomRightBadge: durationBadge,
+                topLeftTag: session.isActive ? "LIVE" : nil,
+                isLiveTag: session.isActive,
+                width: 128,
+                height: 74
+            )
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(session.derivedTitle)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+
+                Text(session.startedAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(BuddyTheme.mutedText)
+                    .lineLimit(1)
+
+                HStack(spacing: 5) {
+                    Text("\(session.totalSets) sets")
+                        .monospacedDigit()
+                    Text("·")
+                    if session.totalVolumeKg > 0 {
+                        Text(store.preferredUnit.formatVolume(kg: session.totalVolumeKg))
+                            .monospacedDigit()
+                    } else {
+                        Text("\(session.totalReps) reps")
+                            .monospacedDigit()
+                    }
+                }
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(BuddyTheme.mutedText)
+                .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 2)
+        }
+        .contentShape(Rectangle())
     }
 
     // MARK: - Helpers
@@ -497,18 +505,18 @@ struct TrendsView: View {
         VStack(spacing: 8) {
             Image(systemName: icon)
                 .font(.title2)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(BuddyTheme.mutedText)
             Text(message)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(BuddyTheme.mutedText)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 260)
         }
         .frame(maxWidth: .infinity)
-        .frame(height: 140)
+        .frame(height: 136)
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(BuddyTheme.elevatedSurface.opacity(0.6))
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(BuddyTheme.elevatedSurface)
         )
     }
 

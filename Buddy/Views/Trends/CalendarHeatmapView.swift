@@ -14,8 +14,8 @@ struct CalendarHeatmapView: View {
                 VStack(spacing: 4) {
                     ForEach(0..<7, id: \.self) { row in
                         Text(row == 1 || row == 3 || row == 5 ? weekdayLabels[row] : "")
-                            .font(.system(size: 9, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(BuddyTheme.mutedText)
                             .frame(width: 11, height: 14)
                     }
                 }
@@ -49,14 +49,14 @@ struct CalendarHeatmapView: View {
                 Text("\(activeDaysCount) active \(activeDaysCount == 1 ? "day" : "days") · Last 12 weeks")
                     .font(.caption2)
                     .buddyNumeric()
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(BuddyTheme.mutedText)
 
                 Spacer()
 
                 HStack(spacing: 3) {
                     Text("Less")
                         .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(BuddyTheme.mutedText)
 
                     ForEach(0...4, id: \.self) { level in
                         RoundedRectangle(cornerRadius: 3, style: .continuous)
@@ -66,7 +66,7 @@ struct CalendarHeatmapView: View {
 
                     Text("More")
                         .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(BuddyTheme.mutedText)
                 }
             }
         }
@@ -74,13 +74,13 @@ struct CalendarHeatmapView: View {
 
     private func heatmapCell(for day: HeatmapDay, size: CGFloat) -> some View {
         let isToday = Calendar.current.isDateInToday(day.date)
-        return RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+        return RoundedRectangle(cornerRadius: 3, style: .continuous)
             .fill(BuddyTheme.heatmapColor(for: day.intensity))
             .frame(width: size, height: 14)
             .overlay {
                 if isToday {
-                    RoundedRectangle(cornerRadius: 3.5, style: .continuous)
-                        .strokeBorder(BuddyTheme.cobalt, lineWidth: 1.25)
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .strokeBorder(BuddyTheme.inkPrimary, lineWidth: 1.25)
                 }
             }
             .accessibilityLabel("\(day.date.formatted(date: .abbreviated, time: .omitted)): \(day.setCount) sets")

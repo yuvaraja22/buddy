@@ -28,6 +28,25 @@ public enum MuscleGroup: String, Codable, CaseIterable, Identifiable, Sendable {
         case .fullBody, .other: return "bolt.fill"
         }
     }
+
+    public var thumbnailAssetName: String {
+        switch self {
+        case .quads, .hamstrings, .glutes, .calves:
+            return "WorkoutThumbLegs"
+        case .chest:
+            return "WorkoutThumbChest"
+        case .back:
+            return "WorkoutThumbBack"
+        case .shoulders:
+            return "WorkoutThumbShoulders"
+        case .biceps, .triceps:
+            return "WorkoutThumbArms"
+        case .core:
+            return "WorkoutThumbCore"
+        case .cardio, .fullBody, .other:
+            return "WorkoutThumbFullBody"
+        }
+    }
 }
 
 public enum SetTag: String, Codable, CaseIterable, Identifiable, Sendable {

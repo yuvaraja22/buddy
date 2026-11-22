@@ -216,19 +216,6 @@ final class AppGroupAndSnapshotTests: XCTestCase {
         XCTAssertEqual(rolledDay3.currentStreakDays, 0)
     }
 
-    func testWhisperShortAudioClipPaddingProtectsUnderOneSecondCommands() {
-        let shortClip = Array(repeating: Float(0.25), count: 6_400) // 0.4 seconds at 16 kHz
-        let padded = WhisperTranscriptionService.prepareAudioSamplesForWhisper(shortClip)
-        XCTAssertEqual(padded.count, 20_000)
-        XCTAssertEqual(padded[0], 0.25, accuracy: 0.0001)
-        XCTAssertEqual(padded[6_399], 0.25, accuracy: 0.0001)
-        XCTAssertEqual(padded[6_400], 0.0, accuracy: 0.0001)
-
-        let longClip = Array(repeating: Float(0.1), count: 32_000)
-        let unchanged = WhisperTranscriptionService.prepareAudioSamplesForWhisper(longClip)
-        XCTAssertEqual(unchanged.count, 32_000)
-    }
-
     func testWidgetSnapshotNormalizedResetsWorkoutsThisWeekOnNewCalendarWeek() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!

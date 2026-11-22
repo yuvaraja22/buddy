@@ -2,11 +2,31 @@ import SwiftUI
 import WidgetKit
 
 enum BuddyWidgetTheme {
-    static let lightCobalt = Color(red: 0.039, green: 0.4, blue: 1.0)
-    static let darkCobalt = Color(red: 0.231, green: 0.510, blue: 0.965)
+    static let emeraldLive = Color(red: 34.0 / 255.0, green: 197.0 / 255.0, blue: 94.0 / 255.0)
+    static let amberStreak = Color(red: 245.0 / 255.0, green: 158.0 / 255.0, blue: 11.0 / 255.0)
 
-    static func cobalt(for colorScheme: ColorScheme) -> Color {
-        colorScheme == .dark ? darkCobalt : lightCobalt
+    static func canvas(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? Color(red: 0.04, green: 0.04, blue: 0.045) : Color.white
+    }
+
+    static func tile(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? Color(red: 0.11, green: 0.11, blue: 0.12) : Color(red: 0.95, green: 0.95, blue: 0.96)
+    }
+
+    static func primaryInk(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? Color.white : Color(red: 0.06, green: 0.06, blue: 0.06)
+    }
+
+    static func inverseInk(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? Color(red: 0.05, green: 0.05, blue: 0.05) : Color.white
+    }
+
+    static func mutedText(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? Color(red: 0.63, green: 0.63, blue: 0.65) : Color(red: 0.38, green: 0.38, blue: 0.40)
+    }
+
+    static func border(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.08)
     }
 }
 
@@ -53,7 +73,6 @@ struct BuddyHomeWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: BuddyTimelineProvider()) { entry in
             BuddyHomeWidgetView(entry: entry)
-                .containerBackground(.fill.tertiary, for: .widget)
         }
         .configurationDisplayName("Buddy Workout")
         .description("Glance at today's workout, weekly consistency, and log sets with one tap.")
@@ -65,22 +84,26 @@ private struct BuddyHomeWidgetView: View {
     let entry: BuddyWidgetEntry
 
     @Environment(\.widgetFamily) private var family
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        switch family {
-        case .systemSmall:
-            SmallHomeWidgetView(snapshot: entry.snapshot)
-                .widgetURL(DeepLink.record.url)
-        case .systemMedium:
-            MediumHomeWidgetView(snapshot: entry.snapshot)
-                .widgetURL(DeepLink.session.url)
-        case .systemLarge:
-            LargeHomeWidgetView(snapshot: entry.snapshot)
-                .widgetURL(DeepLink.session.url)
-        default:
-            SmallHomeWidgetView(snapshot: entry.snapshot)
-                .widgetURL(DeepLink.record.url)
+        Group {
+            switch family {
+            case .systemSmall:
+                SmallHomeWidgetView(snapshot: entry.snapshot)
+                    .widgetURL(DeepLink.record.url)
+            case .systemMedium:
+                MediumHomeWidgetView(snapshot: entry.snapshot)
+                    .widgetURL(DeepLink.session.url)
+            case .systemLarge:
+                LargeHomeWidgetView(snapshot: entry.snapshot)
+                    .widgetURL(DeepLink.session.url)
+            default:
+                SmallHomeWidgetView(snapshot: entry.snapshot)
+                    .widgetURL(DeepLink.record.url)
+            }
         }
+        .containerBackground(BuddyWidgetTheme.canvas(for: colorScheme), for: .widget)
     }
 }
 
@@ -91,9 +114,9 @@ private struct SmallHomeWidgetView: View {
 
     @Environment(\.colorScheme) private var colorScheme
 
-    private var cobalt: Color {
-        BuddyWidgetTheme.cobalt(for: colorScheme)
-    }
+    private var primaryInk: Color { BuddyWidgetTheme.primaryInk(for: colorScheme) }
+    private var inverseInk: Color { BuddyWidgetTheme.inverseInk(for: colorScheme) }
+    private var muted: Color { BuddyWidgetTheme.mutedText(for: colorScheme) }
 
     private var displaySets: Int {
         snapshot.activeSession?.totalSets ?? snapshot.todaySets
@@ -108,22 +131,22 @@ private struct SmallHomeWidgetView: View {
             HStack(spacing: 5) {
                 if let active = snapshot.activeSession {
                     Circle()
-                        .fill(cobalt)
-                        .frame(width: 7, height: 7)
+                        .fill(BuddyWidgetTheme.emeraldLive)
+                        .frame(width: 6, height: 6)
                     Text(active.startedAt, style: .timer)
-                        .font(.system(.caption, design: .rounded, weight: .bold))
+                        .font(.system(size: 12, weight: .bold))
                         .monospacedDigit()
-                        .foregroundStyle(cobalt)
+                        .foregroundStyle(BuddyWidgetTheme.emeraldLive)
                         .lineLimit(1)
                         .minimumScaleFactor(0.75)
                 } else {
                     Image(systemName: "flame.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(snapshot.currentStreakDays > 0 ? .orange : .secondary)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(snapshot.currentStreakDays > 0 ? BuddyWidgetTheme.amberStreak : muted)
                     Text("\(snapshot.currentStreakDays)d streak")
-                        .font(.system(.caption, design: .rounded, weight: .semibold))
+                        .font(.system(size: 12, weight: .semibold))
                         .monospacedDigit()
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(muted)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
@@ -134,14 +157,14 @@ private struct SmallHomeWidgetView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Text("\(displaySets)")
-                        .font(.system(size: 32, weight: .bold, design: .rounded))
+                        .font(.system(size: 32, weight: .bold))
                         .monospacedDigit()
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(primaryInk)
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                     Text(displaySets == 1 ? "set" : "sets")
-                        .font(.system(.subheadline, design: .rounded, weight: .semibold))
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(muted)
                 }
 
                 Text(
@@ -149,9 +172,9 @@ private struct SmallHomeWidgetView: View {
                         ? snapshot.preferredUnit.formatVolume(kg: displayVolumeKg)
                         : (snapshot.activeSession?.title ?? "Ready to train")
                 )
-                .font(.system(.caption, design: .rounded, weight: .medium))
+                .font(.system(size: 12, weight: .medium))
                 .monospacedDigit()
-                .foregroundStyle(.secondary)
+                .foregroundStyle(muted)
                 .lineLimit(1)
             }
 
@@ -159,14 +182,14 @@ private struct SmallHomeWidgetView: View {
 
             HStack(spacing: 6) {
                 Image(systemName: "mic.fill")
-                    .font(.system(size: 12, weight: .bold))
+                    .font(.system(size: 11.5, weight: .bold))
                 Text("Record")
-                    .font(.system(.caption, design: .rounded, weight: .bold))
+                    .font(.system(size: 12.5, weight: .bold))
             }
-            .foregroundStyle(.white)
+            .foregroundStyle(inverseInk)
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 7)
-            .background(cobalt, in: Capsule())
+            .padding(.vertical, 8)
+            .background(primaryInk, in: Capsule())
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
@@ -179,9 +202,11 @@ private struct MediumHomeWidgetView: View {
 
     @Environment(\.colorScheme) private var colorScheme
 
-    private var cobalt: Color {
-        BuddyWidgetTheme.cobalt(for: colorScheme)
-    }
+    private var primaryInk: Color { BuddyWidgetTheme.primaryInk(for: colorScheme) }
+    private var inverseInk: Color { BuddyWidgetTheme.inverseInk(for: colorScheme) }
+    private var muted: Color { BuddyWidgetTheme.mutedText(for: colorScheme) }
+    private var tile: Color { BuddyWidgetTheme.tile(for: colorScheme) }
+    private var border: Color { BuddyWidgetTheme.border(for: colorScheme) }
 
     private var displaySets: Int {
         snapshot.activeSession?.totalSets ?? snapshot.todaySets
@@ -223,33 +248,32 @@ private struct MediumHomeWidgetView: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            // Left: Active/Today stats + 7-day consistency bar strip
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
                     if let active = snapshot.activeSession {
                         Circle()
-                            .fill(cobalt)
-                            .frame(width: 7, height: 7)
+                            .fill(BuddyWidgetTheme.emeraldLive)
+                            .frame(width: 6, height: 6)
                         Text(active.title)
-                            .font(.system(.caption, design: .rounded, weight: .bold))
-                            .foregroundStyle(cobalt)
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(primaryInk)
                             .lineLimit(1)
                         Text(active.startedAt, style: .timer)
-                            .font(.system(.caption2, design: .rounded, weight: .semibold))
+                            .font(.system(size: 11, weight: .semibold))
                             .monospacedDigit()
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(BuddyWidgetTheme.emeraldLive)
                             .multilineTextAlignment(.trailing)
-                            .frame(maxWidth: 60, alignment: .trailing)
+                            .frame(maxWidth: 58, alignment: .trailing)
                             .lineLimit(1)
                             .minimumScaleFactor(0.75)
                     } else {
                         Image(systemName: "flame.fill")
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(snapshot.currentStreakDays > 0 ? .orange : .secondary)
+                            .foregroundStyle(snapshot.currentStreakDays > 0 ? BuddyWidgetTheme.amberStreak : muted)
                         Text("\(snapshot.currentStreakDays)d streak")
-                            .font(.system(.caption, design: .rounded, weight: .semibold))
+                            .font(.system(size: 12, weight: .semibold))
                             .monospacedDigit()
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(muted)
                             .lineLimit(1)
                     }
                 }
@@ -257,66 +281,69 @@ private struct MediumHomeWidgetView: View {
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
                         Text("\(displaySets)")
-                            .font(.system(size: 28, weight: .bold, design: .rounded))
+                            .font(.system(size: 28, weight: .bold))
                             .monospacedDigit()
-                            .foregroundStyle(.primary)
+                            .foregroundStyle(primaryInk)
                         Text(displaySets == 1 ? "set" : "sets")
-                            .font(.system(.footnote, design: .rounded, weight: .semibold))
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(muted)
                     }
                     Text(
                         displayVolumeKg > 0
                             ? snapshot.preferredUnit.formatVolume(kg: displayVolumeKg)
                             : "\(snapshot.workoutsThisWeek)/\(max(1, snapshot.weeklyGoal)) this week"
                     )
-                    .font(.system(.caption, design: .rounded, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .monospacedDigit()
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(muted)
                     .lineLimit(1)
                 }
 
                 Spacer(minLength: 0)
 
-                WeeklyConsistencyStrip(days: weekDays, accent: cobalt, barHeight: 22)
+                WeeklyConsistencyStrip(days: weekDays, accent: primaryInk, muted: muted, barHeight: 22)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            // Right: 1-tap Record Set button + last logged exercise summary
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 9) {
                 Link(destination: DeepLink.record.url) {
                     HStack(spacing: 6) {
                         Image(systemName: "mic.fill")
-                            .font(.system(size: 14, weight: .bold))
+                            .font(.system(size: 13, weight: .bold))
                         Text("Record Set")
-                            .font(.system(.subheadline, design: .rounded, weight: .bold))
+                            .font(.system(size: 13.5, weight: .bold))
                             .lineLimit(1)
                     }
-                    .foregroundStyle(.white)
+                    .foregroundStyle(inverseInk)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 11)
-                    .background(cobalt, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .padding(.vertical, 10)
+                    .background(primaryInk, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                 }
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text("LAST LOGGED")
-                        .font(.system(size: 9, weight: .bold, design: .rounded))
-                        .foregroundStyle(.tertiary)
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(muted)
                         .tracking(0.5)
 
                     Text(lastExerciseTitle)
-                        .font(.system(.footnote, design: .rounded, weight: .semibold))
-                        .foregroundStyle(.primary)
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(primaryInk)
                         .lineLimit(1)
 
                     Text(lastExerciseDetail)
-                        .font(.system(.caption2, design: .rounded, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                         .monospacedDigit()
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(muted)
                         .lineLimit(1)
                 }
                 .padding(9)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .background(.fill.quaternary, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .background(tile, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .strokeBorder(border, lineWidth: 0.75)
+                }
             }
             .frame(maxWidth: .infinity)
         }
@@ -331,9 +358,11 @@ private struct LargeHomeWidgetView: View {
 
     @Environment(\.colorScheme) private var colorScheme
 
-    private var cobalt: Color {
-        BuddyWidgetTheme.cobalt(for: colorScheme)
-    }
+    private var primaryInk: Color { BuddyWidgetTheme.primaryInk(for: colorScheme) }
+    private var inverseInk: Color { BuddyWidgetTheme.inverseInk(for: colorScheme) }
+    private var muted: Color { BuddyWidgetTheme.mutedText(for: colorScheme) }
+    private var tile: Color { BuddyWidgetTheme.tile(for: colorScheme) }
+    private var border: Color { BuddyWidgetTheme.border(for: colorScheme) }
 
     private var displaySets: Int {
         snapshot.activeSession?.totalSets ?? snapshot.todaySets
@@ -349,42 +378,41 @@ private struct LargeHomeWidgetView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // Header with streak badge and active/today status
             HStack(alignment: .center, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     if let active = snapshot.activeSession {
                         HStack(spacing: 6) {
                             Circle()
-                                .fill(cobalt)
-                                .frame(width: 8, height: 8)
+                                .fill(BuddyWidgetTheme.emeraldLive)
+                                .frame(width: 7, height: 7)
                             Text(active.title)
-                                .font(.system(.headline, design: .rounded, weight: .bold))
-                                .foregroundStyle(.primary)
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(primaryInk)
                                 .lineLimit(1)
                         }
                         HStack(spacing: 6) {
                             Text(active.startedAt, style: .timer)
-                                .font(.system(.caption, design: .rounded, weight: .bold))
+                                .font(.system(size: 12, weight: .bold))
                                 .monospacedDigit()
-                                .foregroundStyle(cobalt)
+                                .foregroundStyle(BuddyWidgetTheme.emeraldLive)
                                 .multilineTextAlignment(.leading)
                                 .frame(maxWidth: 66, alignment: .leading)
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.75)
                             Text("· \(displaySets) sets · \(snapshot.preferredUnit.formatVolume(kg: displayVolumeKg))")
-                                .font(.system(.caption, design: .rounded, weight: .medium))
+                                .font(.system(size: 12, weight: .medium))
                                 .monospacedDigit()
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(muted)
                                 .lineLimit(1)
                         }
                     } else {
                         Text("Today's Workout")
-                            .font(.system(.headline, design: .rounded, weight: .bold))
-                            .foregroundStyle(.primary)
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(primaryInk)
                         Text("\(displaySets) sets · \(snapshot.preferredUnit.formatVolume(kg: displayVolumeKg))")
-                            .font(.system(.caption, design: .rounded, weight: .medium))
+                            .font(.system(size: 12, weight: .medium))
                             .monospacedDigit()
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(muted)
                     }
                 }
 
@@ -392,52 +420,57 @@ private struct LargeHomeWidgetView: View {
 
                 HStack(spacing: 4) {
                     Image(systemName: "flame.fill")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(snapshot.currentStreakDays > 0 ? .orange : .secondary)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(snapshot.currentStreakDays > 0 ? BuddyWidgetTheme.amberStreak : muted)
                     Text("\(snapshot.currentStreakDays)d")
-                        .font(.system(.caption, design: .rounded, weight: .bold))
+                        .font(.system(size: 12, weight: .bold))
                         .monospacedDigit()
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(primaryInk)
                 }
                 .padding(.horizontal, 9)
                 .padding(.vertical, 5)
-                .background(.fill.quaternary, in: Capsule())
+                .background(tile, in: Capsule())
+                .overlay {
+                    Capsule().strokeBorder(border, lineWidth: 0.75)
+                }
             }
 
-            // 7-Day Volume Mini Bar Chart
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text("7-DAY VOLUME")
-                        .font(.system(size: 10, weight: .bold, design: .rounded))
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 9.5, weight: .bold))
+                        .foregroundStyle(muted)
                         .tracking(0.5)
                     Spacer()
                     Text("\(snapshot.workoutsThisWeek)/\(max(1, snapshot.weeklyGoal)) weekly goal")
-                        .font(.system(.caption2, design: .rounded, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .monospacedDigit()
-                        .foregroundStyle(cobalt)
+                        .foregroundStyle(primaryInk)
                 }
 
-                WeeklyConsistencyStrip(days: weekDays, accent: cobalt, barHeight: 42)
+                WeeklyConsistencyStrip(days: weekDays, accent: primaryInk, muted: muted, barHeight: 42)
             }
             .padding(10)
-            .background(.fill.quaternary, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(tile, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(border, lineWidth: 0.75)
+            }
 
-            // Today's Logged Exercises (up to 4 rows)
             VStack(alignment: .leading, spacing: 6) {
                 Text("EXERCISES")
-                    .font(.system(size: 10, weight: .bold, design: .rounded))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 9.5, weight: .bold))
+                    .foregroundStyle(muted)
                     .tracking(0.5)
 
                 if snapshot.todayExercises.isEmpty {
                     HStack(spacing: 8) {
-                        Image(systemName: "waveform.badge.mic")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(cobalt)
+                        Image(systemName: "waveform")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(muted)
                         Text("No exercises logged today. Tap below and speak your set.")
-                            .font(.system(.caption, design: .rounded, weight: .medium))
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(muted)
                             .lineLimit(2)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -446,14 +479,14 @@ private struct LargeHomeWidgetView: View {
                     ForEach(Array(snapshot.todayExercises.prefix(4))) { exercise in
                         HStack(spacing: 8) {
                             Text(exercise.name)
-                                .font(.system(.footnote, design: .rounded, weight: .semibold))
-                                .foregroundStyle(.primary)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(primaryInk)
                                 .lineLimit(1)
                             Spacer(minLength: 4)
                             Text(exercise.summary)
-                                .font(.system(.caption, design: .rounded, weight: .medium))
+                                .font(.system(size: 12, weight: .medium))
                                 .monospacedDigit()
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(muted)
                                 .lineLimit(1)
                         }
                         .padding(.vertical, 2)
@@ -463,29 +496,29 @@ private struct LargeHomeWidgetView: View {
 
             Spacer(minLength: 0)
 
-            // Full-width cobalt Voice Log CTA
             Link(destination: DeepLink.record.url) {
                 HStack(spacing: 8) {
                     Image(systemName: "mic.fill")
-                        .font(.system(size: 15, weight: .bold))
+                        .font(.system(size: 14, weight: .bold))
                     Text("Record Voice Set")
-                        .font(.system(.subheadline, design: .rounded, weight: .bold))
+                        .font(.system(size: 14, weight: .bold))
                 }
-                .foregroundStyle(.white)
+                .foregroundStyle(inverseInk)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 11)
-                .background(cobalt, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .background(primaryInk, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 
-// MARK: - Shared 7-Day Bar Strip
+// MARK: - Shared 7-Day Monochrome Bar Strip
 
 private struct WeeklyConsistencyStrip: View {
     let days: [DayActivitySnapshot]
     let accent: Color
+    let muted: Color
     let barHeight: CGFloat
 
     private var maxMetric: Double {
@@ -510,17 +543,17 @@ private struct WeeklyConsistencyStrip: View {
                 VStack(spacing: 4) {
                     ZStack(alignment: .bottom) {
                         Capsule()
-                            .fill(Color.primary.opacity(0.08))
+                            .fill(accent.opacity(0.08))
                             .frame(height: barHeight)
 
                         Capsule()
-                            .fill(isActiveDay ? (day.isToday ? accent : accent.opacity(0.65)) : Color.primary.opacity(0.12))
+                            .fill(isActiveDay ? (day.isToday ? accent : accent.opacity(0.55)) : accent.opacity(0.14))
                             .frame(height: max(4, barHeight * normalized))
                     }
 
                     Text(day.weekdayLabel)
-                        .font(.system(size: 9, weight: day.isToday ? .bold : .medium, design: .rounded))
-                        .foregroundStyle(day.isToday ? accent : .secondary)
+                        .font(.system(size: 9, weight: day.isToday ? .bold : .medium))
+                        .foregroundStyle(day.isToday ? accent : muted)
                         .lineLimit(1)
                 }
                 .frame(maxWidth: .infinity)

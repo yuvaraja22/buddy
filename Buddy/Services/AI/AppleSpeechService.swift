@@ -12,11 +12,11 @@ public enum AppleSpeechError: LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .permissionDenied:
-            return "Speech Recognition permission is needed for Apple On-Device voice logging. Enable it in iOS Settings, or switch to WhisperKit in Buddy Settings."
+            return "Speech Recognition permission is needed for offline voice logging. Enable it in iOS Settings → Buddy."
         case .onDeviceUnavailable(let detail):
             return detail
         case .recognizerUnavailable:
-            return "Apple On-Device Speech Recognizer is temporarily unavailable. Please try again or switch to WhisperKit in Settings."
+            return "Apple On-Device Speech Recognizer is temporarily unavailable. Please try again in a moment."
         case .recognitionFailed(let detail):
             return "Speech recognition failed: \(detail)"
         }
@@ -193,9 +193,9 @@ public final class AppleSpeechService {
     public func unavailableMessage(for option: AppleSpeechLocaleOption) -> String {
         switch option {
         case .auto:
-            return "Apple On-Device Dictation isn't enabled on this iPhone yet. Turn on Dictation in iOS Settings → General → Keyboard, or switch Speech Engine to WhisperKit in Buddy Settings."
+            return "Apple On-Device Dictation isn't enabled on this iPhone yet. Turn on Dictation in iOS Settings → General → Keyboard."
         case .enIN, .enUS, .enGB, .enAU, .enCA:
-            return "Offline dictation for \(option.displayName) isn't downloaded yet. Add it in iOS Settings → General → Keyboard → Dictation Languages, pick Auto / English (US), or switch to WhisperKit."
+            return "Offline dictation for \(option.displayName) isn't downloaded yet. Add it in iOS Settings → General → Keyboard → Dictation Languages, or pick Auto / English (US)."
         }
     }
 

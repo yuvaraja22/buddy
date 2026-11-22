@@ -1,11 +1,19 @@
 import SwiftUI
 
+private enum QuickSplitFilter: String, CaseIterable, Identifiable {
+    case all = "All"
+    case upper = "Upper"
+    case lower = "Lower"
+    case full = "Other"
+
+    var id: String { rawValue }
+}
+
 struct WorkoutHomeView: View {
     let store: WorkoutStore
     let pipeline: VoicePipelineCoordinator
     let modelManager: ModelManager
     let appleSpeechService: AppleSpeechService
-    let whisperService: WhisperTranscriptionService
     let llmService: LocalLLMService
     var dismissSheetsToken: Int = 0
 
@@ -13,54 +21,54 @@ struct WorkoutHomeView: View {
     @State private var showManualAdd: Bool = false
     @State private var editingSet: LoggedSet?
     @State private var showEndSessionDialog: Bool = false
+    @State private var quickCommandText: String = ""
+    @State private var selectedRecentFilter: QuickSplitFilter = .all
+    @FocusState private var isCommandBarFocused: Bool
 
-    private let examplePhrases: [String] = [
-        "Leg extension 3 sets 15 reps",
-        "Bench press 60 kg 3 sets 10 reps",
-        "Plank 60 seconds"
+    private let examplePhrases: [(chip: String, command: String)] = [
+        ("Leg ext 3×15", "Leg extension 3 sets 15 reps"),
+        ("Bench 60 kg 3×10", "Bench press 60 kg 3 sets 10 reps"),
+        ("RDL 80 kg 3×10", "Romanian deadlift 80 kg 3 sets 10 reps"),
+        ("Plank 60s", "Plank 60 seconds")
     ]
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 16) {
-                    if let session = store.activeSession {
-                        activeSessionContent(session)
-                    } else {
-                        idleHomeContent
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-                .padding(.bottom, 24)
-            }
-            .background(BuddyTheme.canvasBackground.ignoresSafeArea())
-            .navigationTitle("Buddy")
-            .navigationBarTitleDisplayMode(.large)
-            .toolbar {
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button {
-                        BuddyHaptics.lightImpact()
-                        showManualAdd = true
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.body.weight(.semibold))
-                    }
-                    .accessibilityLabel("Add exercise manually")
+            ZStack(alignment: .bottom) {
+                ScrollView {
+                    VStack(spacing: 16) {
+                        compactTopHeader
+                        uberCommandBar
 
-                    Button {
-                        BuddyHaptics.lightImpact()
-                        showSettings = true
-                    } label: {
-                        Image(systemName: "gearshape")
-                            .font(.body.weight(.medium))
+                        if let session = store.activeSession {
+                            activeSessionContent(session)
+                        } else {
+                            idleHomeContent
+                        }
                     }
-                    .accessibilityLabel("Settings")
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, BuddyTheme.floatingBarClearance)
+                }
+                .scrollDismissesKeyboard(.interactively)
+                .background(BuddyTheme.canvasBackground.ignoresSafeArea())
+
+                if let banner = store.latestBanner {
+                    autoSaveToast(banner)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 84)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .task(id: banner.id) {
+                            try? await Task.sleep(nanoseconds: 6_000_000_000)
+                            guard !Task.isCancelled else { return }
+                            if store.latestBanner?.id == banner.id {
+                                store.dismissBanner()
+                            }
+                        }
                 }
             }
-            .safeAreaInset(edge: .bottom) {
-                bottomOverlay
-            }
+            .animation(.snappy(duration: 0.25), value: store.latestBanner?.id)
+            .toolbar(.hidden, for: .navigationBar)
             .onChange(of: dismissSheetsToken) { _, _ in
                 showSettings = false
                 showManualAdd = false
@@ -113,150 +121,309 @@ struct WorkoutHomeView: View {
                     store: store,
                     modelManager: modelManager,
                     appleSpeechService: appleSpeechService,
-                    whisperService: whisperService,
                     llmService: llmService
                 )
             }
         }
     }
 
-    // MARK: - Active Session Layout
+    // MARK: - Compact Uber-Style Top Header
 
-    @ViewBuilder
-    private func activeSessionContent(_ session: WorkoutSession) -> some View {
-        liveSessionBanner(session)
+    private var compactTopHeader: some View {
+        let consistency = StatsCalculator.consistency(
+            sessions: store.sessions,
+            referenceDate: Date(),
+            weeklyGoal: 4
+        )
 
-        perSessionStatStrip(session)
+        return HStack(spacing: 10) {
+            if let session = store.activeSession {
+                HStack(spacing: 8) {
+                    PulsingLiveDot(color: BuddyTheme.emeraldLive, size: 7)
 
-        let entries = session.sortedEntries
-        if entries.isEmpty {
-            emptyActiveSessionCard
-        } else {
-            LazyVStack(spacing: 12) {
-                ForEach(entries, id: \.id) { entry in
-                    ExerciseCardView(
-                        entry: entry,
-                        unit: store.preferredUnit,
-                        onAddSet: {
-                            addQuickSet(to: entry)
-                        },
-                        onSelectSet: { set in
-                            BuddyHaptics.selection()
-                            editingSet = set
-                        },
-                        onDeleteSet: { set in
-                            BuddyHaptics.warning()
-                            store.deleteSet(set)
-                        },
-                        onDeleteEntry: {
-                            BuddyHaptics.warning()
-                            store.deleteEntry(entry)
-                        }
-                    )
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .top).combined(with: .opacity),
-                        removal: .opacity
-                    ))
-                }
-            }
-            .animation(.snappy(duration: 0.28), value: entries.map(\.id))
-        }
-    }
+                    Text("LIVE")
+                        .font(.system(size: 12, weight: .bold))
+                        .tracking(0.6)
+                        .foregroundStyle(BuddyTheme.emeraldLive)
 
-    private func liveSessionBanner(_ session: WorkoutSession) -> some View {
-        NativeCard(padding: 16, cornerRadius: 20, tint: BuddyTheme.emeraldLive) {
-            HStack(alignment: .center, spacing: 12) {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 8) {
-                        StatusPill(
-                            text: "LIVE",
-                            tint: BuddyTheme.emeraldLive,
-                            isPulsing: true
-                        )
-
-                        TimelineView(.periodic(from: .now, by: 1)) { context in
-                            let elapsed = max(0, Int(context.date.timeIntervalSince(session.startedAt)))
-                            Text(DurationFormatter.formatClock(seconds: elapsed))
-                                .font(.system(size: 14, weight: .bold, design: .rounded))
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                        }
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        let elapsed = max(0, Int(context.date.timeIntervalSince(session.startedAt)))
+                        Text(DurationFormatter.formatClock(seconds: elapsed))
+                            .font(.system(size: 14, weight: .bold))
+                            .monospacedDigit()
+                            .foregroundStyle(.primary)
                     }
+                }
+            } else {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(consistency.currentStreakDays > 0 ? BuddyTheme.emeraldLive : BuddyTheme.mutedText)
+                        .frame(width: 7, height: 7)
 
-                    Text(session.derivedTitle)
-                        .font(.system(size: 22, weight: .bold, design: .rounded))
+                    Text("Buddy")
+                        .font(.system(size: 17, weight: .bold))
                         .foregroundStyle(.primary)
+
+                    Text("·")
+                        .foregroundStyle(BuddyTheme.mutedText)
+
+                    Text("\(consistency.currentStreakDays)d streak · \(consistency.workoutsThisWeek)/\(consistency.weeklyGoal) wk")
+                        .font(.system(size: 13, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(BuddyTheme.mutedText)
                         .lineLimit(1)
                 }
+            }
 
-                Spacer(minLength: 8)
+            Spacer(minLength: 6)
 
+            if store.activeSession != nil {
                 Button {
                     BuddyHaptics.mediumImpact()
                     showEndSessionDialog = true
                 } label: {
                     Text("End")
-                        .font(.system(size: 14, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 10)
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(BuddyTheme.inkInverse)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
                         .background(
                             Capsule(style: .continuous)
-                                .fill(BuddyTheme.cobalt)
+                                .fill(BuddyTheme.inkPrimary)
                         )
                 }
                 .buttonStyle(.plain)
             }
+
+            Button {
+                BuddyHaptics.lightImpact()
+                showSettings = true
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .frame(width: 36, height: 36)
+                    .background(
+                        Circle()
+                            .fill(BuddyTheme.cardSurface)
+                    )
+                    .overlay {
+                        Circle()
+                            .strokeBorder(BuddyTheme.hairlineBorder, lineWidth: 0.8)
+                    }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Settings")
         }
+        .padding(.top, 2)
     }
 
-    private func perSessionStatStrip(_ session: WorkoutSession) -> some View {
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 4)
-        return LazyVGrid(columns: columns, spacing: 8) {
-            StatMetricTile(
-                title: "Volume",
-                value: compactVolumeString(kg: session.totalVolumeKg),
-                tint: BuddyTheme.cobalt,
-                compact: true
-            )
-            StatMetricTile(
-                title: "Sets",
-                value: "\(session.totalSets)",
-                tint: BuddyTheme.cobalt,
-                compact: true
-            )
-            StatMetricTile(
-                title: "Reps",
-                value: "\(session.totalReps)",
-                tint: BuddyTheme.cobalt,
-                compact: true
-            )
-            StatMetricTile(
-                title: "Exercises",
-                value: "\(session.exerciseCount)",
-                tint: BuddyTheme.cobalt,
-                compact: true
-            )
-        }
-    }
+    // MARK: - Uber-Style "Where to?" Command Bar
 
-    private var emptyActiveSessionCard: some View {
-        NativeCard(padding: 18, cornerRadius: 20) {
-            VStack(alignment: .leading, spacing: 14) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Session Started")
-                        .font(.headline)
-                    Text("Tap or hold the mic below to log your first set, or tap an example phrase to try it.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+    private var uberCommandBar: some View {
+        let trimmed = quickCommandText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return HStack(spacing: 10) {
+            Image(systemName: "waveform")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.primary)
+                .padding(.leading, 4)
+
+            TextField("Log a set or exercise…", text: $quickCommandText)
+                .font(.system(size: 15, weight: .medium))
+                .focused($isCommandBarFocused)
+                .submitLabel(.send)
+                .onSubmit {
+                    submitQuickCommand()
                 }
 
-                examplePhraseList
+            if !trimmed.isEmpty {
+                Button {
+                    submitQuickCommand()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 12, weight: .bold))
+                        Text("Log")
+                            .font(.system(size: 12.5, weight: .bold))
+                    }
+                    .foregroundStyle(BuddyTheme.inkInverse)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(BuddyTheme.inkPrimary)
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Log typed workout command")
+            } else {
+                Button {
+                    BuddyHaptics.lightImpact()
+                    isCommandBarFocused = false
+                    showManualAdd = true
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11, weight: .bold))
+                        Text("Manual")
+                            .font(.system(size: 12.5, weight: .semibold))
+                    }
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(BuddyTheme.elevatedSurface)
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Add exercise manually")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background {
+            Capsule(style: .continuous)
+                .fill(BuddyTheme.cardSurface)
+        }
+        .overlay {
+            Capsule(style: .continuous)
+                .strokeBorder(
+                    isCommandBarFocused ? BuddyTheme.inkPrimary.opacity(0.45) : BuddyTheme.glassBorder,
+                    lineWidth: 1.0
+                )
+        }
+    }
+
+    private func submitQuickCommand() {
+        let trimmed = quickCommandText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        BuddyHaptics.mediumImpact()
+        quickCommandText = ""
+        isCommandBarFocused = false
+        pipeline.processTypedInput(trimmed, into: store)
+    }
+
+    // MARK: - Active Session Layout
+
+    @ViewBuilder
+    private func activeSessionContent(_ session: WorkoutSession) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(session.derivedTitle)
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+
+                Spacer()
+
+                Text("\(session.totalSets) \(session.totalSets == 1 ? "set" : "sets")")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(BuddyTheme.mutedText)
+            }
+
+            flatSessionMetricStrip(session)
+
+            let entries = session.sortedEntries
+            if entries.isEmpty {
+                emptyActiveSessionCard
+            } else {
+                let latestEntryID = entries.last?.id
+                LazyVStack(spacing: 12) {
+                    ForEach(entries.reversed(), id: \.id) { entry in
+                        ExerciseCardView(
+                            entry: entry,
+                            unit: store.preferredUnit,
+                            isLatest: entry.id == latestEntryID,
+                            onAddSet: {
+                                addQuickSet(to: entry)
+                            },
+                            onSelectSet: { set in
+                                BuddyHaptics.selection()
+                                editingSet = set
+                            },
+                            onDeleteSet: { set in
+                                BuddyHaptics.warning()
+                                store.deleteSet(set)
+                            },
+                            onDeleteEntry: {
+                                BuddyHaptics.warning()
+                                store.deleteEntry(entry)
+                            }
+                        )
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .top).combined(with: .opacity),
+                            removal: .opacity
+                        ))
+                    }
+                }
+                .animation(.snappy(duration: 0.28), value: entries.map(\.id))
             }
         }
     }
 
-    // MARK: - Idle Home Layout
+    private func flatSessionMetricStrip(_ session: WorkoutSession) -> some View {
+        HStack(spacing: 0) {
+            stripMetricCell(title: "VOLUME", value: compactVolumeString(kg: session.totalVolumeKg))
+            stripDivider
+            stripMetricCell(title: "SETS", value: "\(session.totalSets)")
+            stripDivider
+            stripMetricCell(title: "REPS", value: "\(session.totalReps)")
+            stripDivider
+            stripMetricCell(title: "LIFTS", value: "\(session.exerciseCount)")
+        }
+        .padding(.vertical, 12)
+        .background {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(BuddyTheme.cardSurface)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(BuddyTheme.hairlineBorder, lineWidth: 0.85)
+        }
+    }
+
+    private func stripMetricCell(title: String, value: String) -> some View {
+        VStack(spacing: 3) {
+            Text(value)
+                .font(.system(size: 16, weight: .bold))
+                .monospacedDigit()
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+            Text(title)
+                .font(.system(size: 9.5, weight: .semibold))
+                .tracking(0.5)
+                .foregroundStyle(BuddyTheme.mutedText)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var stripDivider: some View {
+        Rectangle()
+            .fill(BuddyTheme.hairlineBorder)
+            .frame(width: 0.75, height: 26)
+    }
+
+    private var emptyActiveSessionCard: some View {
+        NativeCard(padding: 16, cornerRadius: 14) {
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Session active")
+                        .font(.system(size: 16, weight: .bold))
+                    Text("Tap or hold the white mic button below and speak your set naturally, or tap a quick command.")
+                        .font(.subheadline)
+                        .foregroundStyle(BuddyTheme.mutedText)
+                }
+
+                quickTryChipStrip
+            }
+        }
+    }
+
+    // MARK: - Idle Home Layout (Uber Quick Tiles + YouTube Recent Feed)
 
     private var idleHomeContent: some View {
         let consistency = StatsCalculator.consistency(
@@ -264,209 +431,229 @@ struct WorkoutHomeView: View {
             referenceDate: Date(),
             weeklyGoal: 4
         )
-        let recentSessions = Array(
-            store.sessions
-                .filter { !$0.isActive }
-                .sorted { $0.startedAt > $1.startedAt }
-                .prefix(3)
-        )
+        let completedSessions = store.sessions
+            .filter { !$0.isActive }
+            .sorted { $0.startedAt > $1.startedAt }
 
-        return VStack(spacing: 16) {
-            readyToTrainHeroCard(consistency: consistency)
+        let filteredRecent = completedSessions.filter { matchesRecentFilter($0) }
 
-            if !recentSessions.isEmpty {
-                recentSessionsSection(recentSessions)
+        return VStack(alignment: .leading, spacing: 20) {
+            // Compact weekly status banner (Uber promo/status card style)
+            weeklyGoalBanner(consistency: consistency)
+
+            // Uber "For you" circular quick-start workout tiles
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Quick start")
+                        .font(BuddyTheme.sectionTitleFont)
+                        .foregroundStyle(.primary)
+                    Spacer()
+                }
+
+                HStack(spacing: 12) {
+                    uberQuickTile(
+                        title: "Push",
+                        symbol: "figure.strengthtraining.traditional",
+                        badge: nil
+                    ) {
+                        startSplitSession(title: "Push Day")
+                    }
+
+                    uberQuickTile(
+                        title: "Pull",
+                        symbol: "dumbbell.fill",
+                        badge: nil
+                    ) {
+                        startSplitSession(title: "Pull Day")
+                    }
+
+                    uberQuickTile(
+                        title: "Legs",
+                        symbol: "figure.run",
+                        badge: nil
+                    ) {
+                        startSplitSession(title: "Leg Day")
+                    }
+
+                    uberQuickTile(
+                        title: "Open",
+                        symbol: "plus",
+                        badge: nil
+                    ) {
+                        startSplitSession(title: "Workout")
+                    }
+                }
+            }
+
+            // YouTube-style quick voice try chips
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Try saying or tapping")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(BuddyTheme.mutedText)
+
+                quickTryChipStrip
+            }
+
+            // YouTube-style Recent Sessions feed with left 16:9 dark artwork thumbnails
+            if !completedSessions.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("Recent workouts")
+                            .font(BuddyTheme.sectionTitleFont)
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Text("\(completedSessions.count) total")
+                            .font(.caption.weight(.semibold))
+                            .monospacedDigit()
+                            .foregroundStyle(BuddyTheme.mutedText)
+                    }
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(QuickSplitFilter.allCases) { filter in
+                                FilterChip(
+                                    title: filter.rawValue,
+                                    isSelected: selectedRecentFilter == filter
+                                ) {
+                                    selectedRecentFilter = filter
+                                }
+                            }
+                        }
+                    }
+
+                    if filteredRecent.isEmpty {
+                        Text("No \(selectedRecentFilter.rawValue.lowercased()) sessions logged yet.")
+                            .font(.subheadline)
+                            .foregroundStyle(BuddyTheme.mutedText)
+                            .padding(.vertical, 12)
+                    } else {
+                        VStack(spacing: 12) {
+                            ForEach(Array(filteredRecent.prefix(6)), id: \.id) { session in
+                                NavigationLink {
+                                    SessionDetailView(session: session, store: store)
+                                } label: {
+                                    youtubeSessionRow(session)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
-    private func readyToTrainHeroCard(consistency: ConsistencyStats) -> some View {
+    private func weeklyGoalBanner(consistency: ConsistencyStats) -> some View {
         let progress = consistency.weeklyGoal > 0
             ? min(1.0, Double(consistency.workoutsThisWeek) / Double(consistency.weeklyGoal))
             : 0.0
 
-        return NativeCard(padding: 18, cornerRadius: 22) {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(spacing: 8) {
-                    StatusPill(
-                        text: "\(consistency.currentStreakDays)d streak",
-                        icon: "flame.fill",
-                        tint: consistency.currentStreakDays > 0 ? BuddyTheme.amberStreak : .secondary
-                    )
-
-                    StatusPill(
-                        text: "\(consistency.workoutsThisWeek) / \(consistency.weeklyGoal) this week",
-                        icon: "calendar",
-                        tint: BuddyTheme.cobalt
-                    )
-
-                    Spacer()
+        return NativeCard(padding: 14, cornerRadius: 14) {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(BuddyTheme.elevatedSurface)
+                        .frame(width: 42, height: 42)
+                    Image(systemName: "flame.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(consistency.currentStreakDays > 0 ? BuddyTheme.amberStreak : BuddyTheme.mutedText)
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Ready to Train")
-                        .font(.system(size: 26, weight: .bold, design: .rounded))
-                        .foregroundStyle(.primary)
+                    HStack {
+                        Text("Weekly goal · \(consistency.workoutsThisWeek) of \(consistency.weeklyGoal)")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Text("\(consistency.currentStreakDays)d streak")
+                            .font(.system(size: 12, weight: .semibold))
+                            .monospacedDigit()
+                            .foregroundStyle(BuddyTheme.mutedText)
+                    }
 
-                    Text("Speak naturally after a set and Buddy starts your session and logs everything automatically.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
                     GeometryReader { proxy in
                         ZStack(alignment: .leading) {
                             Capsule(style: .continuous)
-                                .fill(BuddyTheme.cobaltSoft)
+                                .fill(BuddyTheme.elevatedSurface)
                             Capsule(style: .continuous)
-                                .fill(BuddyTheme.cobalt)
-                                .frame(width: max(progress > 0 ? 12 : 0, proxy.size.width * progress))
+                                .fill(BuddyTheme.inkPrimary)
+                                .frame(width: max(progress > 0 ? 10 : 0, proxy.size.width * progress))
                         }
                     }
-                    .frame(height: 7)
-
-                    HStack {
-                        Text("Weekly goal")
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Text("\(consistency.totalWorkouts) total \(consistency.totalWorkouts == 1 ? "workout" : "workouts")")
-                            .font(.caption2.weight(.semibold))
-                            .buddyNumeric()
-                            .foregroundStyle(.secondary)
-                    }
+                    .frame(height: 5)
                 }
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("TRY SAYING OR TAPPING")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-
-                    examplePhraseList
-                }
-
-                Button {
-                    BuddyHaptics.lightImpact()
-                    _ = store.startNewSession(title: "Workout")
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "play.fill")
-                            .font(.caption.weight(.bold))
-                        Text("Start Empty Session")
-                            .font(.subheadline.weight(.semibold))
-                    }
-                    .foregroundStyle(BuddyTheme.cobalt)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 11)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(BuddyTheme.cobaltSoft)
-                    )
-                }
-                .buttonStyle(.plain)
             }
         }
     }
 
-    private var examplePhraseList: some View {
-        VStack(spacing: 8) {
-            ForEach(examplePhrases, id: \.self) { phrase in
-                Button {
-                    BuddyHaptics.lightImpact()
-                    pipeline.processTypedInput(phrase, into: store)
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "waveform")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(BuddyTheme.cobalt)
-                            .frame(width: 24, height: 24)
-                            .background(Circle().fill(BuddyTheme.cobaltSoft))
+    private func uberQuickTile(
+        title: String,
+        symbol: String,
+        badge: String?,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button {
+            BuddyHaptics.lightImpact()
+            action()
+        } label: {
+            VStack(spacing: 8) {
+                ZStack(alignment: .top) {
+                    Circle()
+                        .fill(BuddyTheme.cardSurface)
+                        .frame(width: 64, height: 64)
+                        .overlay {
+                            Circle()
+                                .strokeBorder(BuddyTheme.hairlineBorder, lineWidth: 0.85)
+                        }
+                        .overlay {
+                            Image(systemName: symbol)
+                                .font(.system(size: 22, weight: .semibold))
+                                .foregroundStyle(.primary)
+                        }
 
-                        Text("“\(phrase)”")
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(.primary)
-                            .multilineTextAlignment(.leading)
-
-                        Spacer(minLength: 4)
-
-                        Image(systemName: "arrow.up.right")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.tertiary)
+                    if let badge {
+                        Text(badge)
+                            .font(.system(size: 9.5, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(BuddyTheme.destructive))
+                            .offset(y: -6)
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(BuddyTheme.elevatedSurface)
-                    )
                 }
-                .buttonStyle(.plain)
-            }
-        }
-    }
 
-    private func recentSessionsSection(_ sessions: [WorkoutSession]) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Recent Sessions")
-                    .font(BuddyTheme.sectionTitleFont)
+                Text(title)
+                    .font(.system(size: 12.5, weight: .medium))
                     .foregroundStyle(.primary)
-                Spacer()
+                    .lineLimit(1)
             }
-            .padding(.horizontal, 4)
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.plain)
+    }
 
-            VStack(spacing: 10) {
-                ForEach(sessions, id: \.id) { session in
-                    NavigationLink {
-                        SessionDetailView(session: session, store: store)
+    private var quickTryChipStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(examplePhrases, id: \.command) { item in
+                    Button {
+                        BuddyHaptics.lightImpact()
+                        pipeline.processTypedInput(item.command, into: store)
                     } label: {
-                        NativeCard(padding: 14, cornerRadius: 16) {
-                            HStack(spacing: 12) {
-                                ZStack {
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .fill(BuddyTheme.cobaltSoft)
-                                        .frame(width: 42, height: 42)
-                                    Image(systemName: session.sortedEntries.first?.muscleGroup.symbolName ?? "figure.strengthtraining.traditional")
-                                        .font(.system(size: 17, weight: .semibold))
-                                        .foregroundStyle(BuddyTheme.cobalt)
-                                }
-
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(session.derivedTitle)
-                                        .font(.subheadline.weight(.semibold))
-                                        .foregroundStyle(.primary)
-                                        .lineLimit(1)
-
-                                    Text("\(session.startedAt.formatted(date: .abbreviated, time: .shortened)) · \(DurationFormatter.formatCompact(seconds: session.durationSeconds))")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                }
-
-                                Spacer(minLength: 4)
-
-                                VStack(alignment: .trailing, spacing: 2) {
-                                    Text("\(session.totalSets) sets")
-                                        .font(.caption.weight(.bold))
-                                        .buddyNumeric()
-                                        .foregroundStyle(.primary)
-
-                                    if session.totalVolumeKg > 0 {
-                                        Text(store.preferredUnit.formatVolume(kg: session.totalVolumeKg))
-                                            .font(.caption2.weight(.medium))
-                                            .buddyNumeric()
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-
-                                Image(systemName: "chevron.right")
-                                    .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(.tertiary)
-                            }
+                        HStack(spacing: 6) {
+                            Image(systemName: "waveform")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(BuddyTheme.mutedText)
+                            Text("“\(item.chip)”")
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(.primary)
                         }
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(BuddyTheme.chipSurface)
+                        )
                     }
                     .buttonStyle(.plain)
                 }
@@ -474,35 +661,60 @@ struct WorkoutHomeView: View {
         }
     }
 
-    // MARK: - Bottom Overlay (Confirmation Toast + Floating Voice Dock)
+    private func youtubeSessionRow(_ session: WorkoutSession) -> some View {
+        let primaryMuscle = session.sortedEntries.first?.muscleGroup ?? .fullBody
+        let durationBadge = DurationFormatter.formatClock(seconds: max(60, session.durationSeconds))
 
-    private var bottomOverlay: some View {
-        VStack(spacing: 10) {
-            if let banner = store.latestBanner {
-                autoSaveToast(banner)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .task(id: banner.id) {
-                        try? await Task.sleep(nanoseconds: 6_000_000_000)
-                        guard !Task.isCancelled else { return }
-                        if store.latestBanner?.id == banner.id {
-                            store.dismissBanner()
-                        }
+        return HStack(alignment: .top, spacing: 12) {
+            WorkoutThumbnailView(
+                assetName: primaryMuscle.thumbnailAssetName,
+                bottomRightBadge: durationBadge,
+                topLeftTag: Calendar.current.isDateInToday(session.startedAt) ? "Today" : nil,
+                width: 132,
+                height: 76
+            )
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(session.derivedTitle)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+
+                Text(session.startedAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(BuddyTheme.mutedText)
+                    .lineLimit(1)
+
+                HStack(spacing: 6) {
+                    Text("\(session.totalSets) sets")
+                        .monospacedDigit()
+                    Text("·")
+                    Text("\(session.exerciseCount) \(session.exerciseCount == 1 ? "lift" : "lifts")")
+                        .monospacedDigit()
+                    if session.totalVolumeKg > 0 {
+                        Text("·")
+                        Text(store.preferredUnit.formatVolume(kg: session.totalVolumeKg))
+                            .monospacedDigit()
                     }
+                }
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(BuddyTheme.mutedText)
+                .lineLimit(1)
             }
-
-            VoiceRecordDock(pipeline: pipeline, store: store)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 2)
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 6)
-        .padding(.bottom, 8)
-        .animation(.snappy(duration: 0.25), value: store.latestBanner?.id)
+        .contentShape(Rectangle())
     }
+
+    // MARK: - Monochrome Auto-Save Undo Toast
 
     private func autoSaveToast(_ banner: WorkoutMutationBanner) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(BuddyTheme.emeraldLive)
                     .padding(.top, 1)
 
@@ -514,16 +726,19 @@ struct WorkoutHomeView: View {
                             .lineLimit(1)
 
                         Text(banner.parserSource.rawValue)
-                            .font(.system(size: 10, weight: .semibold, design: .rounded))
-                            .foregroundStyle(BuddyTheme.cobalt)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(BuddyTheme.mutedText)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Capsule().fill(BuddyTheme.cobaltSoft))
+                            .background(
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .fill(BuddyTheme.elevatedSurface)
+                            )
                     }
 
                     Text(banner.detail)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(BuddyTheme.mutedText)
                         .lineLimit(2)
                 }
 
@@ -534,7 +749,7 @@ struct WorkoutHomeView: View {
                 } label: {
                     Image(systemName: "xmark")
                         .font(.caption.weight(.bold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(BuddyTheme.mutedText)
                         .padding(6)
                 }
                 .buttonStyle(.plain)
@@ -548,11 +763,11 @@ struct WorkoutHomeView: View {
                         store.dismissBanner()
                     } label: {
                         Label("Edit", systemImage: "pencil")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(BuddyTheme.cobalt)
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(BuddyTheme.inkInverse)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .background(Capsule().fill(BuddyTheme.cobaltSoft))
+                            .background(Capsule().fill(BuddyTheme.inkPrimary))
                     }
                     .buttonStyle(.plain)
                 }
@@ -578,17 +793,42 @@ struct WorkoutHomeView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .background {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(.ultraThinMaterial)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(BuddyTheme.floatingBarSurface)
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .strokeBorder(BuddyTheme.glassBorder, lineWidth: 0.85)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(BuddyTheme.glassBorder, lineWidth: 0.9)
         }
-        .shadow(color: Color.black.opacity(0.10), radius: 14, x: 0, y: 6)
+        .shadow(color: Color.black.opacity(0.35), radius: 14, x: 0, y: 6)
     }
 
     // MARK: - Helpers
+
+    private func startSplitSession(title: String) {
+        _ = store.startNewSession(title: title)
+    }
+
+    private func matchesRecentFilter(_ session: WorkoutSession) -> Bool {
+        switch selectedRecentFilter {
+        case .all:
+            return true
+        case .upper:
+            let upperGroups: Set<MuscleGroup> = [.chest, .back, .shoulders, .biceps, .triceps]
+            return session.entries.contains { upperGroups.contains($0.muscleGroup) }
+                || session.derivedTitle.localizedCaseInsensitiveContains("push")
+                || session.derivedTitle.localizedCaseInsensitiveContains("pull")
+                || session.derivedTitle.localizedCaseInsensitiveContains("upper")
+        case .lower:
+            let lowerGroups: Set<MuscleGroup> = [.quads, .hamstrings, .glutes, .calves]
+            return session.entries.contains { lowerGroups.contains($0.muscleGroup) }
+                || session.derivedTitle.localizedCaseInsensitiveContains("leg")
+                || session.derivedTitle.localizedCaseInsensitiveContains("lower")
+        case .full:
+            let otherGroups: Set<MuscleGroup> = [.core, .cardio, .fullBody, .other]
+            return session.entries.isEmpty || session.entries.contains { otherGroups.contains($0.muscleGroup) }
+        }
+    }
 
     private func addQuickSet(to entry: ExerciseEntry) {
         BuddyHaptics.lightImpact()
@@ -639,8 +879,8 @@ private struct ManualAddExerciseSheet: View {
                             Spacer()
                             Text("\(setsCount)")
                                 .buddyNumeric()
-                                .fontWeight(.semibold)
-                                .foregroundStyle(BuddyTheme.cobalt)
+                                .fontWeight(.bold)
+                                .foregroundStyle(.primary)
                         }
                     }
 
@@ -653,8 +893,8 @@ private struct ManualAddExerciseSheet: View {
                                 Spacer()
                                 Text("\(repsCount)")
                                     .buddyNumeric()
-                                    .fontWeight(.semibold)
-                                    .foregroundStyle(BuddyTheme.cobalt)
+                                    .fontWeight(.bold)
+                                    .foregroundStyle(.primary)
                             }
                         }
                     }
@@ -697,7 +937,7 @@ private struct ManualAddExerciseSheet: View {
                     Button("Add") {
                         saveExercise()
                     }
-                    .fontWeight(.semibold)
+                    .fontWeight(.bold)
                     .disabled(exerciseName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }

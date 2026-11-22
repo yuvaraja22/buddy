@@ -11,7 +11,6 @@ struct RootTabView: View {
     let pipeline: VoicePipelineCoordinator
     let modelManager: ModelManager
     let appleSpeechService: AppleSpeechService
-    let whisperService: WhisperTranscriptionService
     let llmService: LocalLLMService
 
     @State private var selectedTab: BuddyTab = .workout
@@ -21,39 +20,65 @@ struct RootTabView: View {
     @AppStorage("buddy.hasSeenOnboarding") private var hasSeenOnboarding: Bool = false
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            WorkoutHomeView(
-                store: store,
-                pipeline: pipeline,
-                modelManager: modelManager,
-                appleSpeechService: appleSpeechService,
-                whisperService: whisperService,
-                llmService: llmService,
-                dismissSheetsToken: dismissWorkoutSheetsToken
-            )
-            .tabItem {
-                Label("Workout", systemImage: "figure.strengthtraining.traditional")
-            }
-            .tag(BuddyTab.workout)
+        ZStack(alignment: .bottom) {
+            BuddyTheme.canvasBackground
+                .ignoresSafeArea()
 
-            TrendsView(store: store)
-                .tabItem {
-                    Label("Trends", systemImage: "chart.xyaxis.line")
-                }
-                .tag(BuddyTab.trends)
+            // Keep all three tabs mounted so scroll position and chat state persist across switches,
+            // while replacing iOS's dated translucent TabView with Uber's floating bottom pill bar.
+            ZStack {
+                WorkoutHomeView(
+                    store: store,
+                    pipeline: pipeline,
+                    modelManager: modelManager,
+                    appleSpeechService: appleSpeechService,
+                    llmService: llmService,
+                    dismissSheetsToken: dismissWorkoutSheetsToken
+                )
+                .opacity(selectedTab == .workout ? 1 : 0)
+                .allowsHitTesting(selectedTab == .workout)
+                .accessibilityHidden(selectedTab != .workout)
+                .zIndex(selectedTab == .workout ? 1 : 0)
 
-            CoachView(
-                store: store,
-                llmService: llmService,
-                modelManager: modelManager,
-                onOpenModelSetup: { showModelSetup = true }
-            )
-            .tabItem {
-                Label("Coach", systemImage: "sparkles")
+                TrendsView(store: store)
+                    .opacity(selectedTab == .trends ? 1 : 0)
+                    .allowsHitTesting(selectedTab == .trends)
+                    .accessibilityHidden(selectedTab != .trends)
+                    .zIndex(selectedTab == .trends ? 1 : 0)
+
+                CoachView(
+                    store: store,
+                    llmService: llmService,
+                    modelManager: modelManager,
+                    onOpenModelSetup: { showModelSetup = true }
+                )
+                .opacity(selectedTab == .coach ? 1 : 0)
+                .allowsHitTesting(selectedTab == .coach)
+                .accessibilityHidden(selectedTab != .coach)
+                .zIndex(selectedTab == .coach ? 1 : 0)
             }
-            .tag(BuddyTab.coach)
+
+            // Pinned Uber-style floating pill bar + persistent Mic FAB.
+            // Ignores keyboard avoidance so keyboards glide cleanly over the bottom nav while
+            // text input bars (Workout command bar / Coach composer) remain above the keyboard.
+            VStack(spacing: 0) {
+                VoiceRecordDock(
+                    selectedTab: $selectedTab,
+                    pipeline: pipeline,
+                    store: store,
+                    onVoiceRecordingBegan: {
+                        if selectedTab != .workout {
+                            selectedTab = .workout
+                        }
+                    }
+                )
+                .padding(.horizontal, 16)
+                .padding(.bottom, 10)
+            }
+            .ignoresSafeArea(.keyboard, edges: .bottom)
+            .zIndex(10)
         }
-        .tint(BuddyTheme.cobalt)
+        .tint(BuddyTheme.inkPrimary)
         .onOpenURL { url in
             handleDeepLink(url)
         }
