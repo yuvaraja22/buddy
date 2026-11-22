@@ -115,6 +115,12 @@ public enum RuleBasedWorkoutParser {
         "arm", "armed", "leg", "legged", "hand", "handed", "sided"
     ]
 
+    private static let colloquialHundredTeenFollowers: Set<String> = [
+        "kg", "kgs", "kilo", "kilos", "kilogram", "kilograms",
+        "lb", "lbs", "pound", "pounds",
+        "for", "rep", "reps", "set", "sets", "x", "by"
+    ]
+
     private static func isNumberWord(_ word: String) -> Bool {
         word == "zero" || word == "hundred" ||
         onesWords[word] != nil || teensWords[word] != nil || tensWords[word] != nil
@@ -275,6 +281,51 @@ public enum RuleBasedWorkoutParser {
                         }
                         output.append("\(lead)\(value)\(finalTrail)")
                         continue
+                    }
+
+                    // Colloquial 3-digit gym weights without "hundred":
+                    // e.g. "one thirty five" -> 135, "two twenty five" -> 225, "one eighty" -> 180.
+                    if nextLead.isEmpty, let tensVal = tensWords[nextCore] {
+                        var value = onesVal * 100 + tensVal
+                        var finalTrail = nextTrail
+                        i += 2
+                        if finalTrail.isEmpty, i < tokens.count {
+                            let (thirdLead, thirdCore, thirdTrail) = splitPunctuation(tokens[i])
+                            if thirdLead.isEmpty, let trailingOnes = onesWords[thirdCore] {
+                                value += trailingOnes
+                                finalTrail = thirdTrail
+                                i += 1
+                            }
+                        }
+                        output.append("\(lead)\(value)\(finalTrail)")
+                        continue
+                    }
+
+                    // Colloquial plate weights like "one oh five" (105) or "four oh five" (405).
+                    if nextLead.isEmpty, nextTrail.isEmpty,
+                       (nextCore == "oh" || nextCore == "zero"),
+                       i + 2 < tokens.count {
+                        let (thirdLead, thirdCore, thirdTrail) = splitPunctuation(tokens[i + 2])
+                        if thirdLead.isEmpty, let trailingOnes = onesWords[thirdCore] {
+                            let value = onesVal * 100 + trailingOnes
+                            output.append("\(lead)\(value)\(thirdTrail)")
+                            i += 3
+                            continue
+                        }
+                    }
+
+                    // Colloquial 3-digit teen weights like "three fifteen for five" (315) or "two fifteen lbs",
+                    // while preserving bare set/rep shorthand like "leg extension three fifteen" -> "3 15".
+                    if nextLead.isEmpty, let teensVal = teensWords[nextCore], i + 2 < tokens.count {
+                        let (_, afterCore, _) = splitPunctuation(tokens[i + 2])
+                        let followedByWeightOrReps = colloquialHundredTeenFollowers.contains(afterCore)
+                            || (afterCore.range(of: #"^\d+x\d+$"#, options: .regularExpression) != nil)
+                        if followedByWeightOrReps {
+                            let value = onesVal * 100 + teensVal
+                            output.append("\(lead)\(value)\(nextTrail)")
+                            i += 2
+                            continue
+                        }
                     }
                 }
                 output.append("\(lead)\(onesVal)\(trail)")
@@ -518,7 +569,8 @@ public enum RuleBasedWorkoutParser {
             weightUnit: weightUnit,
             durationSeconds: durationSeconds,
             tag: tag,
-            note: explicitNormalTag ? "tag:normal" : ""
+            hasExplicitTag: tag != .normal || explicitNormalTag,
+            note: ""
         )
 
         var detailParts: [String] = []
@@ -589,7 +641,7 @@ public enum RuleBasedWorkoutParser {
         var weightUnit: WeightUnit?
         var durationSeconds: Int?
 
-        // 1. Extract tags (handle counted tag sets like "2 drop sets" or "2 warmup sets" first)
+        // 1. Extract tags (handle counted tag sets like "2 drop sets" or "2 warm ups" first)
         if let m = firstMatch(pattern: #"\b(\d{1,2})\s+(?:drop\s*sets?|dropsets?)\b"#, in: working),
            let countStr = captureGroup(1, in: m, text: working),
            let count = Int(countStr), (1...30).contains(count) {
@@ -602,7 +654,7 @@ public enum RuleBasedWorkoutParser {
             working = removingMatch(m, from: working)
         }
 
-        if let m = firstMatch(pattern: #"\b(\d{1,2})\s+(?:warm\s*up\s+sets?|warmups?)\b"#, in: working),
+        if let m = firstMatch(pattern: #"\b(\d{1,2})\s+(?:warm\s*up\s+sets?|warm\s*ups?|warmups?)\b"#, in: working),
            let countStr = captureGroup(1, in: m, text: working),
            let count = Int(countStr), (1...30).contains(count) {
             tag = .warmup

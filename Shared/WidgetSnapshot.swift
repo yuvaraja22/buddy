@@ -162,7 +162,11 @@ public struct WidgetSnapshot: Codable, Equatable, Sendable {
             adjustedStreak = 0
         }
 
-        let activeDaysThisWeek = shiftedDays.filter { $0.setCount > 0 || $0.volumeKg > 0 }.count
+        let currentWeekInterval = calendar.dateInterval(of: .weekOfYear, for: referenceDate)
+        let activeDaysThisWeek = shiftedDays.filter { day in
+            let isInCurrentWeek = currentWeekInterval?.contains(day.date) ?? true
+            return isInCurrentWeek && (day.setCount > 0 || day.volumeKg > 0)
+        }.count
 
         return WidgetSnapshot(
             updatedAt: referenceDate,

@@ -65,7 +65,11 @@ private final class MemoryWarningObserverToken: @unchecked Sendable {
 public final class LocalLLMService {
     public var isLoaded: Bool = false
     public var isLoading: Bool = false
-    public var isGenerating: Bool = false
+    public var isParsingVoice: Bool = false
+    public var isStreamingCoach: Bool = false
+    public var isGenerating: Bool {
+        isParsingVoice || isStreamingCoach
+    }
     public var loadedModelName: String?
     public var lastMemoryNotice: String?
 
@@ -206,8 +210,8 @@ public final class LocalLLMService {
             return WorkoutCommandIntent(action: .unknown, rawTranscript: trimmed, parserSource: .localLLM)
         }
 
-        isGenerating = true
-        defer { isGenerating = false }
+        isParsingVoice = true
+        defer { isParsingVoice = false }
 
         do {
             try await ensureLoaded()
@@ -231,7 +235,7 @@ public final class LocalLLMService {
                 )
             } onCancel: {
                 Task { @MainActor [weak self] in
-                    self?.stopGeneration()
+                    self?.stopVoiceParsing()
                 }
             }
 
@@ -273,8 +277,8 @@ public final class LocalLLMService {
 
         try Task.checkCancellation()
 
-        isGenerating = true
-        defer { isGenerating = false }
+        isStreamingCoach = true
+        defer { isStreamingCoach = false }
 
         try await ensureLoaded()
         try Task.checkCancellation()
@@ -308,7 +312,7 @@ public final class LocalLLMService {
             }
         } onCancel: {
             Task { @MainActor [weak self] in
-                self?.stopGeneration()
+                self?.stopCoachGeneration()
             }
         }
 
@@ -318,6 +322,16 @@ public final class LocalLLMService {
 
         let finalReply = accumulator.value.trimmingCharacters(in: .whitespacesAndNewlines)
         return finalReply
+    }
+
+    public func stopVoiceParsing() {
+        guard isParsingVoice else { return }
+        llm?.stop()
+    }
+
+    public func stopCoachGeneration() {
+        guard isStreamingCoach else { return }
+        llm?.stop()
     }
 
     public func stopGeneration() {

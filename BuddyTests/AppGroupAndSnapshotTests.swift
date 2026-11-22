@@ -228,4 +228,40 @@ final class AppGroupAndSnapshotTests: XCTestCase {
         let unchanged = WhisperTranscriptionService.prepareAudioSamplesForWhisper(longClip)
         XCTAssertEqual(unchanged.count, 32_000)
     }
+
+    func testWidgetSnapshotNormalizedResetsWorkoutsThisWeekOnNewCalendarWeek() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        calendar.firstWeekday = 2 // Monday-first calendar week
+
+        // Sunday May 10, 2026 (end of week) -> Monday May 11, 2026 (start of next week)
+        let thursday = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 5, day: 7, hour: 12)))
+        let friday = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 5, day: 8, hour: 12)))
+        let saturday = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 5, day: 9, hour: 12)))
+        let sunday = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 5, day: 10, hour: 18)))
+        let mondayMorning = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 5, day: 11, hour: 7)))
+
+        let snapshot = WidgetSnapshot(
+            updatedAt: sunday,
+            preferredUnit: .kg,
+            activeSession: nil,
+            todaySets: 8,
+            todayReps: 80,
+            todayVolumeKg: 3_200,
+            currentStreakDays: 4,
+            workoutsThisWeek: 4,
+            weeklyGoal: 4,
+            weeklyDays: [
+                DayActivitySnapshot(id: "thu", weekdayLabel: "T", date: calendar.startOfDay(for: thursday), setCount: 9, volumeKg: 3_500, isToday: false),
+                DayActivitySnapshot(id: "fri", weekdayLabel: "F", date: calendar.startOfDay(for: friday), setCount: 8, volumeKg: 3_000, isToday: false),
+                DayActivitySnapshot(id: "sat", weekdayLabel: "S", date: calendar.startOfDay(for: saturday), setCount: 10, volumeKg: 4_000, isToday: false),
+                DayActivitySnapshot(id: "sun", weekdayLabel: "S", date: calendar.startOfDay(for: sunday), setCount: 8, volumeKg: 3_200, isToday: true)
+            ]
+        )
+
+        let rolledMonday = snapshot.normalized(for: mondayMorning, calendar: calendar)
+        XCTAssertEqual(rolledMonday.workoutsThisWeek, 0)
+        XCTAssertEqual(rolledMonday.currentStreakDays, 4)
+        XCTAssertEqual(rolledMonday.todaySets, 0)
+    }
 }

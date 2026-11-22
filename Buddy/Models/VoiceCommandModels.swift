@@ -22,6 +22,7 @@ public struct ParsedSetGroupIntent: Codable, Equatable, Sendable {
     public let weightUnit: WeightUnit?
     public let durationSeconds: Int?
     public let tag: SetTag
+    public let hasExplicitTag: Bool
     public let note: String
 
     public init(
@@ -32,6 +33,7 @@ public struct ParsedSetGroupIntent: Codable, Equatable, Sendable {
         weightUnit: WeightUnit? = nil,
         durationSeconds: Int? = nil,
         tag: SetTag = .normal,
+        hasExplicitTag: Bool? = nil,
         note: String = ""
     ) {
         self.exerciseName = exerciseName
@@ -41,6 +43,7 @@ public struct ParsedSetGroupIntent: Codable, Equatable, Sendable {
         self.weightUnit = weightUnit
         self.durationSeconds = durationSeconds
         self.tag = tag
+        self.hasExplicitTag = hasExplicitTag ?? (tag != .normal)
         self.note = note
     }
 

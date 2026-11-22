@@ -8,13 +8,17 @@ struct SessionSummarySheet: View {
     let unit: WeightUnit
     let onDismiss: () -> Void
 
+    private let initialDerivedTitle: String
     @State private var editableTitle: String
+    @State private var hasCommittedTitle: Bool = false
 
     init(session: WorkoutSession, unit: WeightUnit, onDismiss: @escaping () -> Void) {
         self.session = session
         self.unit = unit
         self.onDismiss = onDismiss
-        _editableTitle = State(initialValue: session.derivedTitle)
+        let derived = session.derivedTitle
+        self.initialDerivedTitle = derived
+        _editableTitle = State(initialValue: derived)
     }
 
     var body: some View {
@@ -39,6 +43,9 @@ struct SessionSummarySheet: View {
             }
             .navigationTitle("Workout Complete")
             .navigationBarTitleDisplayMode(.inline)
+            .onDisappear {
+                commitTitleIfEdited()
+            }
         }
     }
 
@@ -67,10 +74,6 @@ struct SessionSummarySheet: View {
                         TextField("Workout Title", text: $editableTitle)
                             .font(.system(size: 22, weight: .bold, design: .rounded))
                             .multilineTextAlignment(.center)
-                            .onChange(of: editableTitle) { _, newValue in
-                                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                                session.title = trimmed.isEmpty ? "Workout" : trimmed
-                            }
 
                         Image(systemName: "pencil")
                             .font(.caption.weight(.semibold))
@@ -177,11 +180,7 @@ struct SessionSummarySheet: View {
 
     private var doneBar: some View {
         Button {
-            let trimmed = editableTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                session.title = trimmed
-            }
-            try? modelContext.save()
+            commitTitleIfEdited()
             BuddyHaptics.success()
             onDismiss()
         } label: {
@@ -203,5 +202,17 @@ struct SessionSummarySheet: View {
         .overlay(alignment: .top) {
             Divider()
         }
+    }
+
+    private func commitTitleIfEdited() {
+        guard !hasCommittedTitle else { return }
+        hasCommittedTitle = true
+
+        let trimmed = editableTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let initialTrimmed = initialDerivedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed != initialTrimmed else { return }
+
+        session.title = trimmed.isEmpty ? "Workout" : trimmed
+        try? modelContext.save()
     }
 }

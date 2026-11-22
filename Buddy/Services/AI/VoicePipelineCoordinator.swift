@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import Observation
+import UIKit
 
 public typealias PipelinePhase = VoicePipelineCoordinator.PipelinePhase
 
@@ -41,6 +42,9 @@ public final class VoicePipelineCoordinator {
     @ObservationIgnored private var isRequestingPermission: Bool = false
     @ObservationIgnored private var startRecordingTask: Task<Void, Never>?
     @ObservationIgnored private var processingTask: Task<Void, Never>?
+    @ObservationIgnored private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+    @ObservationIgnored private var pendingAudioSamples: [Float]?
+    @ObservationIgnored private var pendingTranscript: String?
     @ObservationIgnored private weak var activeStoreForAutoStop: WorkoutStore?
 
     public init(
@@ -94,7 +98,13 @@ public final class VoicePipelineCoordinator {
                 guard let self else { return }
                 let granted = await self.audioRecorder.requestPermission()
                 self.isRequestingPermission = false
-                if !granted {
+                if granted {
+                    // For tap-to-record and widget `buddy://record` deep links, begin immediately
+                    // once allowed. Hold-to-talk gestures ended when the system alert appeared.
+                    if !isHoldMode && UIApplication.shared.applicationState != .background {
+                        self.beginRecording(isHoldMode: false)
+                    }
+                } else {
                     self.phase = .error("Microphone permission is needed for offline voice logging. Enable it in iOS Settings.")
                 }
             }
@@ -109,6 +119,8 @@ public final class VoicePipelineCoordinator {
         operationToken &+= 1
         let token = operationToken
         isFinishingRecording = false
+        pendingAudioSamples = nil
+        pendingTranscript = nil
         liveTranscript = ""
         phase = .recording(isHoldMode: isHoldMode)
 
@@ -165,48 +177,95 @@ public final class VoicePipelineCoordinator {
                 return
             }
 
-            self.phase = .transcribing
-            do {
-                let transcript = try await self.whisperService.transcribe(samples: samples)
-                guard self.operationToken == token, !Task.isCancelled else { return }
-
-                let cleanedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !cleanedTranscript.isEmpty else {
-                    self.phase = .error("No speech detected. Try speaking slightly closer to the microphone.")
-                    return
-                }
-
-                self.liveTranscript = cleanedTranscript
-                self.phase = .parsing
-
-                let context = store.promptContext()
-                let intent = await self.llmService.parseVoiceTranscript(cleanedTranscript, context: context)
-                guard self.operationToken == token, !Task.isCancelled else { return }
-
-                self.applyIntent(intent, transcript: cleanedTranscript, into: store)
-            } catch is CancellationError {
-                if self.operationToken == token {
-                    self.phase = .idle
-                }
-            } catch {
-                if self.operationToken == token {
-                    self.phase = .error(error.localizedDescription)
-                }
-            }
+            await self.runTranscriptionAndParse(samples: samples, token: token, into: store)
         }
     }
 
     public func cancelRecording() {
+        let wasParsing = (phase == .parsing)
         operationToken &+= 1
         isFinishingRecording = false
         startRecordingTask?.cancel()
         startRecordingTask = nil
         processingTask?.cancel()
         processingTask = nil
-        llmService.stopGeneration()
+        pendingAudioSamples = nil
+        pendingTranscript = nil
+        if wasParsing {
+            llmService.stopVoiceParsing()
+        }
         audioRecorder.cancelRecording()
+        endBackgroundProcessingTask()
         liveTranscript = ""
         phase = .idle
+    }
+
+    /// Handles iOS scene backgrounding safely without dropping already-captured voice sets:
+    /// - Active mic capture (`.recording`, unless finalizing) is cancelled cleanly.
+    /// - `.parsing` avoids background Metal GPU work by saving immediately via the deterministic CPU parser
+    ///   (or deferring `pendingTranscript` until returning to `.active` if unmatched).
+    /// - `.transcribing` continues inside `UIBackgroundTask` and retains `pendingAudioSamples` if iOS interrupts it.
+    public func handleEnteredBackground(store: WorkoutStore) {
+        activeStoreForAutoStop = store
+
+        switch phase {
+        case .recording:
+            if !isFinishingRecording {
+                cancelRecording()
+            } else if backgroundTaskID == .invalid {
+                beginBackgroundProcessingTask(forToken: operationToken)
+            }
+        case .parsing:
+            let transcript = liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !transcript.isEmpty else {
+                cancelRecording()
+                return
+            }
+
+            operationToken &+= 1
+            isFinishingRecording = false
+            processingTask?.cancel()
+            processingTask = nil
+            pendingAudioSamples = nil
+            llmService.stopVoiceParsing()
+
+            let fallbackIntent = RuleBasedWorkoutParser.parse(transcript, context: store.promptContext())
+            if fallbackIntent.action != .unknown {
+                applyIntent(fallbackIntent, transcript: transcript, into: store)
+            } else {
+                pendingTranscript = transcript
+                liveTranscript = ""
+                phase = .idle
+            }
+            endBackgroundProcessingTask()
+        case .transcribing:
+            if backgroundTaskID == .invalid {
+                beginBackgroundProcessingTask(forToken: operationToken)
+            }
+        case .idle, .error:
+            break
+        }
+    }
+
+    /// Resumes any captured audio or transcript that was deferred while backgrounded.
+    public func resumePendingWorkIfNeeded(into store: WorkoutStore) {
+        activeStoreForAutoStop = store
+        guard phase == .idle || phase.isError else { return }
+
+        if let samples = pendingAudioSamples, samples.count >= 2_400 {
+            pendingAudioSamples = nil
+            operationToken &+= 1
+            let token = operationToken
+            liveTranscript = ""
+            processingTask?.cancel()
+            processingTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.runTranscriptionAndParse(samples: samples, token: token, into: store)
+            }
+        } else if let transcript = pendingTranscript, !transcript.isEmpty {
+            pendingTranscript = nil
+            processTypedInput(transcript, into: store)
+        }
     }
 
     public func processTypedInput(_ text: String, into store: WorkoutStore) {
@@ -219,10 +278,16 @@ public final class VoicePipelineCoordinator {
         let token = operationToken
         liveTranscript = trimmed
         phase = .parsing
+        beginBackgroundProcessingTask(forToken: token)
 
         processingTask?.cancel()
         processingTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            defer {
+                if self.operationToken == token {
+                    self.endBackgroundProcessingTask()
+                }
+            }
 
             let context = store.promptContext()
             let intent = await self.llmService.parseVoiceTranscript(trimmed, context: context)
@@ -240,6 +305,122 @@ public final class VoicePipelineCoordinator {
 
     // MARK: - Private Helpers
 
+    private func runTranscriptionAndParse(
+        samples: [Float],
+        token: UInt64,
+        into store: WorkoutStore
+    ) async {
+        pendingAudioSamples = samples
+        beginBackgroundProcessingTask(forToken: token)
+        defer {
+            if operationToken == token {
+                endBackgroundProcessingTask()
+            }
+        }
+
+        phase = .transcribing
+        do {
+            let transcript = try await whisperService.transcribe(samples: samples)
+            guard operationToken == token, !Task.isCancelled else { return }
+
+            pendingAudioSamples = nil
+            let cleanedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanedTranscript.isEmpty else {
+                phase = .error("No speech detected. Try speaking slightly closer to the microphone.")
+                return
+            }
+
+            liveTranscript = cleanedTranscript
+
+            // Avoid launching Metal GPU LLM inference while backgrounded; finish via CPU parser
+            // so sets and Live Activities update immediately, or defer unmatched text to foreground.
+            if UIApplication.shared.applicationState == .background {
+                let cpuIntent = RuleBasedWorkoutParser.parse(cleanedTranscript, context: store.promptContext())
+                if cpuIntent.action != .unknown {
+                    applyIntent(cpuIntent, transcript: cleanedTranscript, into: store)
+                } else {
+                    pendingTranscript = cleanedTranscript
+                    liveTranscript = ""
+                    phase = .idle
+                }
+                return
+            }
+
+            phase = .parsing
+            let context = store.promptContext()
+            let intent = await llmService.parseVoiceTranscript(cleanedTranscript, context: context)
+            guard operationToken == token, !Task.isCancelled else { return }
+
+            applyIntent(intent, transcript: cleanedTranscript, into: store)
+        } catch is CancellationError {
+            if operationToken == token {
+                phase = .idle
+            }
+        } catch {
+            guard operationToken == token else { return }
+            if UIApplication.shared.applicationState == .background {
+                // Keep `pendingAudioSamples` so `.active` resumes transcription when unlocked.
+                phase = .idle
+            } else {
+                pendingAudioSamples = nil
+                phase = .error(error.localizedDescription)
+            }
+        }
+    }
+
+    private func beginBackgroundProcessingTask(forToken token: UInt64) {
+        endBackgroundProcessingTask()
+        backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "BuddyVoiceProcessing") { [weak self] in
+            self?.handleBackgroundTaskExpiration(forToken: token)
+        }
+    }
+
+    private func endBackgroundProcessingTask() {
+        let taskID = backgroundTaskID
+        guard taskID != .invalid else { return }
+        backgroundTaskID = .invalid
+        UIApplication.shared.endBackgroundTask(taskID)
+    }
+
+    private func handleBackgroundTaskExpiration(forToken token: UInt64) {
+        defer { endBackgroundProcessingTask() }
+        guard operationToken == token else { return }
+
+        if phase == .parsing, !liveTranscript.isEmpty, let store = activeStoreForAutoStop {
+            let transcript = liveTranscript
+            operationToken &+= 1
+            isFinishingRecording = false
+            processingTask?.cancel()
+            processingTask = nil
+            pendingAudioSamples = nil
+            llmService.stopVoiceParsing()
+
+            let cpuIntent = RuleBasedWorkoutParser.parse(transcript, context: store.promptContext())
+            if cpuIntent.action != .unknown {
+                applyIntent(cpuIntent, transcript: transcript, into: store)
+            } else {
+                pendingTranscript = transcript
+                liveTranscript = ""
+                phase = .idle
+            }
+            return
+        }
+
+        // Preserve any pending audio samples so returning to foreground finishes logging.
+        let preservedSamples = pendingAudioSamples
+        let wasParsing = (phase == .parsing)
+        operationToken &+= 1
+        isFinishingRecording = false
+        processingTask?.cancel()
+        processingTask = nil
+        if wasParsing {
+            llmService.stopVoiceParsing()
+        }
+        pendingAudioSamples = preservedSamples
+        liveTranscript = ""
+        phase = .idle
+    }
+
     private func applyIntent(_ intent: WorkoutCommandIntent, transcript: String, into store: WorkoutStore) {
         if intent.action == .unknown {
             phase = .error("Couldn't match a workout set from \"\(transcript)\". Try \"Leg extension 3 sets 15 reps\".")
@@ -250,7 +431,11 @@ public final class VoicePipelineCoordinator {
         if result == nil {
             switch intent.action {
             case .updateLastSet:
-                phase = .error("No active set found to update.")
+                if (store.activeSession?.totalSets ?? 0) > 0 {
+                    phase = .error("No changes detected for the last set.")
+                } else {
+                    phase = .error("No active set found to update.")
+                }
             case .deleteLastSet:
                 phase = .error("No active set found to delete.")
             case .deleteLastExercise:

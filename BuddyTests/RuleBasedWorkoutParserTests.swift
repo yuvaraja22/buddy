@@ -157,4 +157,66 @@ final class RuleBasedWorkoutParserTests: XCTestCase {
         XCTAssertEqual(compound.items[0].reps, 5)
         XCTAssertEqual(compound.items[0].weightValue ?? -1, 60, accuracy: 0.01)
     }
+
+    func testParsesColloquialThreeDigitWeightsWithoutBreakingSetRepPairs() {
+        let lbsContext = ActiveSessionPromptContext(preferredUnit: .lbs)
+
+        let bench135 = RuleBasedWorkoutParser.parse("bench press one thirty five for eight", context: lbsContext)
+        XCTAssertEqual(bench135.action, .logSets)
+        XCTAssertEqual(bench135.items.first?.exerciseName, "Bench Press")
+        XCTAssertEqual(bench135.items.first?.weightValue ?? -1, 135, accuracy: 0.01)
+        XCTAssertEqual(bench135.items.first?.reps, 8)
+
+        let squat225 = RuleBasedWorkoutParser.parse("squat two twenty five for five", context: lbsContext)
+        XCTAssertEqual(squat225.action, .logSets)
+        XCTAssertEqual(squat225.items.first?.exerciseName, "Squat")
+        XCTAssertEqual(squat225.items.first?.weightValue ?? -1, 225, accuracy: 0.01)
+        XCTAssertEqual(squat225.items.first?.reps, 5)
+
+        let deadlift405 = RuleBasedWorkoutParser.parse("deadlift four oh five for three", context: lbsContext)
+        XCTAssertEqual(deadlift405.action, .logSets)
+        XCTAssertEqual(deadlift405.items.first?.exerciseName, "Deadlift")
+        XCTAssertEqual(deadlift405.items.first?.weightValue ?? -1, 405, accuracy: 0.01)
+        XCTAssertEqual(deadlift405.items.first?.reps, 3)
+
+        let deadlift315 = RuleBasedWorkoutParser.parse("deadlift three fifteen for five", context: lbsContext)
+        XCTAssertEqual(deadlift315.action, .logSets)
+        XCTAssertEqual(deadlift315.items.first?.exerciseName, "Deadlift")
+        XCTAssertEqual(deadlift315.items.first?.weightValue ?? -1, 315, accuracy: 0.01)
+        XCTAssertEqual(deadlift315.items.first?.reps, 5)
+
+        // Bare "three fifteen" without weight/rep connectors still parses as 3 sets x 15 reps.
+        let bareSetReps = RuleBasedWorkoutParser.parse("leg extension three fifteen", context: defaultContext)
+        XCTAssertEqual(bareSetReps.action, .logSets)
+        XCTAssertEqual(bareSetReps.items.first?.exerciseName, "Leg Extension")
+        XCTAssertEqual(bareSetReps.items.first?.setCount, 3)
+        XCTAssertEqual(bareSetReps.items.first?.reps, 15)
+        XCTAssertNil(bareSetReps.items.first?.weightValue)
+    }
+
+    func testParsesCountedSpacedWarmUpsWithoutLeakingCountIntoExerciseName() {
+        let intent = RuleBasedWorkoutParser.parse("bench press two warm ups 60 kg 10 reps", context: defaultContext)
+
+        XCTAssertEqual(intent.action, .logSets)
+        XCTAssertEqual(intent.items.count, 1)
+        guard let item = intent.items.first else {
+            return XCTFail("Expected a parsed warmup item")
+        }
+        XCTAssertEqual(item.exerciseName, "Bench Press")
+        XCTAssertEqual(item.setCount, 2)
+        XCTAssertEqual(item.tag, .warmup)
+        XCTAssertTrue(item.hasExplicitTag)
+        XCTAssertEqual(item.weightValue ?? -1, 60, accuracy: 0.01)
+        XCTAssertEqual(item.reps, 10)
+    }
+
+    func testRuleBasedWorkingTagResetUsesExplicitTagFlagInsteadOfNoteSentinel() {
+        let activeCtx = ActiveSessionPromptContext(preferredUnit: .kg, lastExerciseName: "Bench Press", isSessionActive: true)
+        let intent = RuleBasedWorkoutParser.parse("mark last set as working", context: activeCtx)
+
+        XCTAssertEqual(intent.action, .updateLastSet)
+        XCTAssertEqual(intent.items.first?.tag, .normal)
+        XCTAssertEqual(intent.items.first?.hasExplicitTag, true)
+        XCTAssertEqual(intent.items.first?.note, "")
+    }
 }

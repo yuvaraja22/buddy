@@ -7,11 +7,7 @@ struct CalendarHeatmapView: View {
 
     var body: some View {
         let weeks = buildWeekColumns()
-        let activeDaysCount = weeks
-            .flatMap { $0 }
-            .compactMap { $0 }
-            .filter { $0.setCount > 0 }
-            .count
+        let activeDaysCount = days.filter { $0.setCount > 0 }.count
 
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 6) {
@@ -120,8 +116,9 @@ struct CalendarHeatmapView: View {
         }
         columns.append(currentWeek)
 
-        if columns.count > 12 {
-            return Array(columns.suffix(12))
+        // 84 days span 12 calendar weeks when today is Saturday and 13 weeks on Sunday–Friday.
+        if columns.count > 13 {
+            return Array(columns.suffix(13))
         }
         return columns
     }

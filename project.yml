@@ -20,10 +20,10 @@ settings:
 packages:
   ArgmaxOSS:
     url: https://github.com/argmaxinc/argmax-oss-swift.git
-    from: 1.1.1
+    exactVersion: 1.1.1
   LLM:
     url: https://github.com/eastriverlee/LLM.swift.git
-    from: 3.0.3
+    exactVersion: 3.0.3
 
 targets:
   Buddy:

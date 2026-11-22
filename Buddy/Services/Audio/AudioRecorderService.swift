@@ -50,6 +50,13 @@ private final class LockedSampleBuffer: @unchecked Sendable {
         lock.unlock()
     }
 
+    var count: Int {
+        lock.lock()
+        let current = samples.count
+        lock.unlock()
+        return current
+    }
+
     func drain() -> [Float] {
         lock.lock()
         let copy = samples
@@ -103,10 +110,11 @@ public final class AudioRecorderService {
     @ObservationIgnored private var durationTask: Task<Void, Never>?
     @ObservationIgnored private var interruptionObserver: AudioNotificationObserverToken?
     @ObservationIgnored private var configChangeObserver: AudioNotificationObserverToken?
+    @ObservationIgnored private var configRecoveryAttempts: Int = 0
 
     public init() {
         refreshPermissionStatus()
-        installAudioSessionObservers()
+        installInterruptionObserver()
     }
 
     public func requestPermission() async -> Bool {
@@ -137,6 +145,7 @@ public final class AudioRecorderService {
         // Clean up any stale engine session before starting a fresh capture.
         teardownEngine(deactivateSession: false)
         sampleBuffer.reset()
+        configRecoveryAttempts = 0
 
         let session = AVAudioSession.sharedInstance()
         do {
@@ -151,11 +160,40 @@ public final class AudioRecorderService {
         }
 
         let engine = AVAudioEngine()
+        do {
+            try configureAndStartEngine(engine)
+        } catch {
+            deactivateAudioSession()
+            throw error
+        }
+
+        audioEngine = engine
+        installConfigChangeObserver(for: engine)
+        isRecording = true
+        recordingDuration = 0
+        recordingStartDate = Date()
+        audioLevels = Array(repeating: 0.05, count: Self.visualizerBarCount)
+        startDurationTimer()
+    }
+
+    public func stopRecording() -> [Float] {
+        teardownEngine(deactivateSession: true)
+        return sampleBuffer.drain()
+    }
+
+    public func cancelRecording() {
+        teardownEngine(deactivateSession: true)
+        sampleBuffer.reset()
+    }
+
+    // MARK: - Private Helpers
+
+    private func configureAndStartEngine(_ engine: AVAudioEngine) throws {
         let inputNode = engine.inputNode
+        inputNode.removeTap(onBus: 0)
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
-            deactivateAudioSession()
             throw AudioRecorderError.invalidInputFormat
         }
 
@@ -165,12 +203,10 @@ public final class AudioRecorderService {
             channels: 1,
             interleaved: false
         ) else {
-            deactivateAudioSession()
             throw AudioRecorderError.converterCreationFailed
         }
 
         guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
-            deactivateAudioSession()
             throw AudioRecorderError.converterCreationFailed
         }
 
@@ -191,31 +227,11 @@ public final class AudioRecorderService {
             try engine.start()
         } catch {
             inputNode.removeTap(onBus: 0)
-            deactivateAudioSession()
             throw AudioRecorderError.engineStartFailed(error.localizedDescription)
         }
-
-        audioEngine = engine
-        isRecording = true
-        recordingDuration = 0
-        recordingStartDate = Date()
-        audioLevels = Array(repeating: 0.05, count: Self.visualizerBarCount)
-        startDurationTimer()
     }
 
-    public func stopRecording() -> [Float] {
-        teardownEngine(deactivateSession: true)
-        return sampleBuffer.drain()
-    }
-
-    public func cancelRecording() {
-        teardownEngine(deactivateSession: true)
-        sampleBuffer.reset()
-    }
-
-    // MARK: - Private Helpers
-
-    private func installAudioSessionObservers() {
+    private func installInterruptionObserver() {
         interruptionObserver = AudioNotificationObserverToken(
             name: AVAudioSession.interruptionNotification,
             object: AVAudioSession.sharedInstance()
@@ -232,17 +248,49 @@ public final class AudioRecorderService {
                 self.onAudioInterrupted?("Recording paused due to an audio interruption.")
             }
         }
+    }
 
+    private func installConfigChangeObserver(for engine: AVAudioEngine) {
+        let expectedEngineID = ObjectIdentifier(engine)
         configChangeObserver = AudioNotificationObserverToken(
             name: .AVAudioEngineConfigurationChange,
-            object: nil
-        ) { [weak self] _ in
+            object: engine
+        ) { [weak self] notification in
+            let postedEngineID = (notification.object as? AVAudioEngine).map(ObjectIdentifier.init)
+            guard postedEngineID == expectedEngineID else { return }
             Task { @MainActor [weak self] in
-                guard let self, self.isRecording else { return }
-                // Audio route changed mid-recording (e.g. AirPods connected/disconnected);
-                // cleanly finalize captured speech rather than leaving a dead engine.
-                self.onMaxDurationReached?()
+                guard let self,
+                      self.isRecording,
+                      let currentEngine = self.audioEngine,
+                      ObjectIdentifier(currentEngine) == expectedEngineID else {
+                    return
+                }
+                self.handleEngineConfigurationChange(currentEngine)
             }
+        }
+    }
+
+    private func handleEngineConfigurationChange(_ engine: AVAudioEngine) {
+        let elapsed = recordingStartDate.map { Date().timeIntervalSince($0) } ?? 0
+        let bufferedSamples = sampleBuffer.count
+
+        // AirPods / Bluetooth headsets negotiate A2DP -> HFP ~50–250ms after engine.start().
+        // Re-install the tap on the new hardware format instead of aborting as "too short".
+        if configRecoveryAttempts < 2 && (elapsed < 1.0 || bufferedSamples < 4_800) {
+            configRecoveryAttempts += 1
+            do {
+                try configureAndStartEngine(engine)
+                return
+            } catch {
+                // Fall through to finalize/interrupt cleanly if restart fails.
+            }
+        }
+
+        if bufferedSamples >= 2_400 {
+            onMaxDurationReached?()
+        } else {
+            cancelRecording()
+            onAudioInterrupted?("Audio route changed while starting recording. Please tap to try again.")
         }
     }
 
@@ -282,6 +330,7 @@ public final class AudioRecorderService {
     private func teardownEngine(deactivateSession: Bool) {
         durationTask?.cancel()
         durationTask = nil
+        configChangeObserver = nil
 
         if let engine = audioEngine {
             engine.inputNode.removeTap(onBus: 0)

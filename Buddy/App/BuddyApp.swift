@@ -56,13 +56,12 @@ struct BuddyApp: App {
         .onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
             case .background:
-                if pipeline.phase != .idle {
-                    pipeline.cancelRecording()
-                }
-                llmService.stopGeneration()
+                pipeline.handleEnteredBackground(store: workoutStore)
+                llmService.stopCoachGeneration()
                 WidgetRefreshHelper.sync(store: workoutStore)
             case .active:
                 modelManager.refreshDownloadState()
+                pipeline.resumePendingWorkIfNeeded(into: workoutStore)
             case .inactive:
                 break
             @unknown default:

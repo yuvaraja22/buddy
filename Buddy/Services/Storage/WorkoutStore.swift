@@ -666,23 +666,35 @@ public final class WorkoutStore {
         let set = target.set
         let entry = target.entry
         let previous = snapshot(of: set)
+        var didMutate = false
 
-        if let reps = item.reps {
+        if let reps = item.reps, set.reps != reps {
             set.reps = reps
+            didMutate = true
         }
         if let weightKg = item.resolvedWeightKg(defaultUnit: preferredUnit) {
-            set.weightKg = weightKg
+            let changed = set.weightKg.map { abs($0 - weightKg) > 0.0001 } ?? true
+            if changed {
+                set.weightKg = weightKg
+                didMutate = true
+            }
         }
-        if let duration = item.durationSeconds {
+        if let duration = item.durationSeconds, set.durationSeconds != duration {
             set.durationSeconds = duration
+            didMutate = true
         }
-        if item.tag != .normal {
+        if item.hasExplicitTag, set.tag != item.tag {
             set.tag = item.tag
-        } else if item.note == "tag:normal" {
-            set.tag = .normal
+            didMutate = true
         }
-        if !item.note.isEmpty && item.note != "tag:normal" {
-            set.notes = item.note
+        let cleanedNote = item.note.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanedNote.isEmpty, set.notes != cleanedNote {
+            set.notes = cleanedNote
+            didMutate = true
+        }
+
+        guard didMutate else {
+            return nil
         }
 
         undoStack.append(.updatedSet(setID: set.id, previous: previous))

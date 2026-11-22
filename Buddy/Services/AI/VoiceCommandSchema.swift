@@ -102,6 +102,7 @@ public extension LLMParsedVoiceCommand {
                 weightUnit: cleanedUnit,
                 durationSeconds: cleanedDuration,
                 tag: mappedTag,
+                hasExplicitTag: group.tag != nil,
                 note: cleanedNote
             )
         }

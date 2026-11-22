@@ -12,12 +12,17 @@ struct CoachView: View {
 
     @State private var inputText: String = ""
     @State private var streamingReply: String = ""
+    @State private var isAwaitingCoachReply: Bool = false
     @State private var coachError: String?
     @State private var generationTask: Task<Void, Never>?
     @State private var conversationEpoch: Int = 0
     @State private var lastStreamScrollAt: Date = .distantPast
     @State private var showClearConfirmation: Bool = false
     @FocusState private var isInputFocused: Bool
+
+    private var isCoachStreaming: Bool {
+        isAwaitingCoachReply || llmService.isStreamingCoach
+    }
 
     private let starterPrompts: [String] = [
         "Review today's session",
@@ -53,7 +58,7 @@ struct CoachView: View {
                             Image(systemName: "trash")
                                 .font(.subheadline.weight(.medium))
                         }
-                        .disabled(llmService.isGenerating)
+                        .disabled(isCoachStreaming)
                         .accessibilityLabel("Clear conversation")
                     }
                 }
@@ -74,7 +79,7 @@ struct CoachView: View {
                 Button("Cancel", role: .cancel) {}
             }
             .onDisappear {
-                if llmService.isGenerating {
+                if isCoachStreaming {
                     stopGenerating()
                 }
             }
@@ -173,7 +178,7 @@ struct CoachView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 12) {
-                    if messages.isEmpty && !llmService.isGenerating && streamingReply.isEmpty {
+                    if messages.isEmpty && !isCoachStreaming && streamingReply.isEmpty {
                         starterPromptsSection
                             .padding(.top, 8)
                     } else {
@@ -187,12 +192,12 @@ struct CoachView: View {
                             .id(message.id)
                         }
 
-                        if llmService.isGenerating || !streamingReply.isEmpty {
+                        if isCoachStreaming || !streamingReply.isEmpty {
                             CoachBubbleView(
                                 role: .assistant,
                                 content: streamingReply.isEmpty ? "Thinking locally…" : streamingReply,
                                 timestamp: Date(),
-                                isStreaming: llmService.isGenerating
+                                isStreaming: isCoachStreaming
                             )
                             .id("coach-streaming-anchor")
                         }
@@ -227,8 +232,8 @@ struct CoachView: View {
                     scrollToBottom(proxy, animated: true)
                 }
             }
-            .onChange(of: llmService.isGenerating) { _, isGenerating in
-                if isGenerating {
+            .onChange(of: isCoachStreaming) { _, isStreaming in
+                if isStreaming {
                     scrollToBottom(proxy, animated: true)
                 }
             }
@@ -329,7 +334,7 @@ struct CoachView: View {
                 .padding(.vertical, 8)
                 .padding(.leading, 6)
 
-            if llmService.isGenerating {
+            if isCoachStreaming {
                 Button {
                     BuddyHaptics.lightImpact()
                     stopGenerating()
@@ -378,7 +383,7 @@ struct CoachView: View {
 
     private func sendMessage(_ rawText: String) {
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !llmService.isGenerating else { return }
+        guard !trimmed.isEmpty, !isCoachStreaming else { return }
 
         let priorHistory: [(role: CoachRole, content: String)] = messages
             .suffix(6)
@@ -392,6 +397,7 @@ struct CoachView: View {
         isInputFocused = false
         coachError = nil
         streamingReply = ""
+        isAwaitingCoachReply = true
 
         let activeEpoch = conversationEpoch
         let workoutContext = StatsCalculator.buildCoachContext(
@@ -401,6 +407,11 @@ struct CoachView: View {
 
         generationTask?.cancel()
         generationTask = Task { @MainActor in
+            defer {
+                if conversationEpoch == activeEpoch {
+                    isAwaitingCoachReply = false
+                }
+            }
             do {
                 let reply = try await llmService.streamCoachReply(
                     userMessage: trimmed,
@@ -440,7 +451,8 @@ struct CoachView: View {
     }
 
     private func stopGenerating() {
-        llmService.stopGeneration()
+        isAwaitingCoachReply = false
+        llmService.stopCoachGeneration()
         generationTask?.cancel()
         generationTask = nil
     }

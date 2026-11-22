@@ -10,12 +10,15 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-test-package:
     name: Test, Archive & Package IPA
     runs-on: macos-15
+    outputs:
+      ipa_bytes: ${{ steps.verify.outputs.ipa_bytes }}
+      ipa_mb: ${{ steps.verify.outputs.ipa_mb }}
 
     steps:
       - name: Checkout repository
@@ -42,7 +45,7 @@ jobs:
           path: |
             ~/Library/Caches/org.swift.swiftpm
             DerivedData/SourcePackages
-          key: spm-${{ runner.os }}-${{ hashFiles('project.yml', 'Buddy.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          key: spm-${{ runner.os }}-${{ hashFiles('project.yml') }}
           restore-keys: |
             spm-${{ runner.os }}-
 
@@ -215,16 +218,49 @@ jobs:
           path: build/Buddy.ipa
           if-no-files-found: error
 
+  release:
+    name: Publish SideStore Release
+    needs: build-test-package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Buddy.ipa artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Buddy-IPA
+          path: build
+
+      - name: Fetch previous apps.json from latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          test -f build/Buddy.ipa
+          if gh release download --repo "$REPO_SLUG" --pattern "apps.json" --output build/base-apps.json; then
+            echo "Loaded previous release apps.json as base feed."
+          else
+            echo "No prior release apps.json found; falling back to repository apps.json."
+            cp apps.json build/base-apps.json
+          fi
+
       - name: Update apps.json metadata for tag release
         id: release_meta
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
-          IPA_BYTES: ${{ steps.verify.outputs.ipa_bytes }}
+          IPA_BYTES: ${{ needs.build-test-package.outputs.ipa_bytes }}
           TAG_NAME: ${{ github.ref_name }}
           REPO_SLUG: ${{ github.repository }}
         run: |
           python3 - <<'PY'
-          import datetime, json, os, pathlib
+          import datetime, json, os, pathlib, subprocess
 
           tag = os.environ["TAG_NAME"]
           version = tag[1:] if tag.startswith("v") else tag
@@ -233,12 +269,34 @@ jobs:
           now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
           download_url = f"https://github.com/{repo}/releases/download/{tag}/Buddy.ipa"
 
-          source_path = pathlib.Path("apps.json")
+          source_path = pathlib.Path("build/base-apps.json")
           data = json.loads(source_path.read_text(encoding="utf-8"))
 
+          tag_message = ""
+          try:
+              tag_type = subprocess.check_output(
+                  ["git", "cat-file", "-t", f"refs/tags/{tag}"],
+                  text=True,
+              ).strip()
+              if tag_type == "tag":
+                  tag_message = subprocess.check_output(
+                      ["git", "for-each-ref", f"refs/tags/{tag}", "--format=%(contents)"],
+                      text=True,
+                  ).strip()
+          except Exception:
+              tag_message = ""
+
           app = data["apps"][0]
+          if tag_message:
+              release_description = tag_message
+          elif version == "1.0.0" and app.get("versionDescription"):
+              release_description = app["versionDescription"]
+          else:
+              release_description = f"Buddy {version} release."
+
           app["version"] = version
           app["versionDate"] = now_iso
+          app["versionDescription"] = release_description
           app["size"] = size
           app["downloadURL"] = download_url
           app["iconURL"] = f"https://raw.githubusercontent.com/{repo}/main/docs/icon.png"
@@ -246,17 +304,16 @@ jobs:
           new_entry = {
               "version": version,
               "date": now_iso,
-              "localizedDescription": app.get(
-                  "versionDescription",
-                  f"Buddy {version} release."
-              ),
+              "localizedDescription": release_description,
               "downloadURL": download_url,
               "size": size,
               "minOSVersion": "17.0",
           }
 
+          # Preserve prior shipped versions while stripping unshipped template placeholders.
           existing_versions = [
-              v for v in app.get("versions", []) if v.get("version") != version
+              v for v in app.get("versions", [])
+              if v.get("version") != version and v.get("date") != "2026-01-01T00:00:00Z"
           ]
           app["versions"] = [new_entry] + existing_versions
 
@@ -276,7 +333,6 @@ jobs:
           PY
 
       - name: Upload updated apps.json artifact
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
           name: SideStore-Source-apps-json
@@ -284,13 +340,12 @@ jobs:
           if-no-files-found: error
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           body: |
             ### Buddy ${{ steps.release_meta.outputs.version }}
-            - **IPA Size:** ${{ steps.verify.outputs.ipa_mb }} MB (`${{ steps.verify.outputs.ipa_bytes }}` bytes)
+            - **IPA Size:** ${{ needs.build-test-package.outputs.ipa_mb }} MB (`${{ needs.build-test-package.outputs.ipa_bytes }}` bytes)
             - **Download URL:** `${{ steps.release_meta.outputs.download_url }}`
             - **SideStore Source:** Updated `apps.json` is attached to this release and workflow artifacts.
           files: |

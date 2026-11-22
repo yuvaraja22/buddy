@@ -712,7 +712,6 @@ public final class ModelManager {
             whisperBaseDirectory
                 .appendingPathComponent("models", isDirectory: true)
                 .appendingPathComponent(tokenizerRepoName, isDirectory: true),
-            whisperBaseDirectory,
             modelFolder
         ]
         return candidateFolders.contains { folder in

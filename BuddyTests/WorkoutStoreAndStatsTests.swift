@@ -436,6 +436,54 @@ final class WorkoutStoreAndStatsTests: XCTestCase {
         XCTAssertEqual(snapshot.todaySets, 6)
     }
 
+    func testLLMUpdateLastSetResetsWarmupTagToNormalAndSkipsNoOpUpdates() throws {
+        let store = try makeInMemoryStore()
+
+        _ = store.apply(RuleBasedWorkoutParser.parse(
+            "bench press 1 warmup set 40 kg 10 reps",
+            context: ActiveSessionPromptContext(preferredUnit: .kg)
+        ))
+        XCTAssertEqual(store.activeSession?.sortedEntries.first?.sortedSets.first?.tag, .warmup)
+
+        // 1. Qwen outputs explicit tag: .normal to reset warmup -> working set.
+        let llmResetCommand = LLMParsedVoiceCommand(
+            action: .updateLastSet,
+            items: [
+                LLMParsedExerciseGroup(
+                    exercise: "Bench Press",
+                    sets: 1,
+                    tag: .normal
+                )
+            ],
+            summary: "Mark last set as working"
+        )
+        let resetIntent = llmResetCommand.toDomainIntent(rawTranscript: "mark last set as working")
+        XCTAssertEqual(resetIntent.items.first?.hasExplicitTag, true)
+
+        let resetBanner = store.apply(resetIntent)
+        XCTAssertNotNil(resetBanner)
+        XCTAssertEqual(store.activeSession?.sortedEntries.first?.sortedSets.first?.tag, .normal)
+
+        // 2. A no-op update (no fields changed) must return nil and NOT push to undoStack.
+        let noOpCommand = LLMParsedVoiceCommand(
+            action: .updateLastSet,
+            items: [
+                LLMParsedExerciseGroup(
+                    exercise: "Bench Press",
+                    sets: 1
+                )
+            ],
+            summary: "No changes"
+        )
+        let noOpIntent = noOpCommand.toDomainIntent(rawTranscript: "update last set")
+        XCTAssertEqual(noOpIntent.items.first?.hasExplicitTag, false)
+        XCTAssertNil(store.apply(noOpIntent))
+
+        // Undo should immediately revert the warmup -> normal reset (not a phantom no-op entry).
+        store.undoLastMutation()
+        XCTAssertEqual(store.activeSession?.sortedEntries.first?.sortedSets.first?.tag, .warmup)
+    }
+
     // MARK: - Fixture Helper
 
     private func makeSession(
