@@ -523,7 +523,7 @@ struct VoiceRecordDock: View {
 
 // MARK: - Monochrome Waveform Strip
 
-private struct VoiceWaveformStrip: View {
+struct VoiceWaveformStrip: View {
     let levels: [Float]
     let barCount: Int
 
