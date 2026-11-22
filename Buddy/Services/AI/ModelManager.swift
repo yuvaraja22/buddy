@@ -142,71 +142,153 @@ private final class LLMDownloadDelegate: NSObject, URLSessionDownloadDelegate, @
     }
 }
 
+public typealias SpeechEngine = ModelManager.SpeechEngine
+public typealias AppleSpeechLocaleOption = ModelManager.AppleSpeechLocaleOption
 public typealias WhisperPreset = ModelManager.WhisperPreset
 public typealias LLMPreset = ModelManager.LLMPreset
 
 @Observable
 @MainActor
 public final class ModelManager {
-    public enum WhisperPreset: String, CaseIterable, Identifiable, Codable, Sendable {
-        case baseEn = "openai_whisper-base.en"
-        case tinyEn = "openai_whisper-tiny.en"
-        case baseMultilingual = "openai_whisper-base"
+    public enum SpeechEngine: String, CaseIterable, Identifiable, Codable, Sendable {
+        case appleOnDevice = "apple-on-device"
+        case whisperKit = "whisperkit"
 
         public var id: String { rawValue }
 
-        public var variantGlob: String {
+        public var displayName: String {
             switch self {
-            case .baseEn: return "base.en"
-            case .tinyEn: return "tiny.en"
-            case .baseMultilingual: return "base"
+            case .appleOnDevice: return "Apple On-Device"
+            case .whisperKit: return "WhisperKit (CoreML)"
             }
         }
 
-        public var displayName: String {
+        public var shortName: String {
             switch self {
-            case .baseEn: return "Whisper Base (English)"
-            case .tinyEn: return "Whisper Tiny (English)"
-            case .baseMultilingual: return "Whisper Base (Multilingual)"
+            case .appleOnDevice: return "Apple Speech"
+            case .whisperKit: return "WhisperKit"
             }
         }
 
         public var subtitle: String {
             switch self {
-            case .baseEn: return "Balanced speed & gym noise accuracy"
+            case .appleOnDevice:
+                return "Instant live captions, 0 MB download, strong accent support & zero extra RAM"
+            case .whisperKit:
+                return "OpenAI Whisper running offline via CoreML + Apple Neural Engine"
+            }
+        }
+    }
+
+    public enum AppleSpeechLocaleOption: String, CaseIterable, Identifiable, Codable, Sendable {
+        case auto = "auto"
+        case enIN = "en-IN"
+        case enUS = "en-US"
+        case enGB = "en-GB"
+        case enAU = "en-AU"
+        case enCA = "en-CA"
+
+        public var id: String { rawValue }
+
+        public var displayName: String {
+            switch self {
+            case .auto: return "Auto (iPhone Region)"
+            case .enIN: return "English (India)"
+            case .enUS: return "English (US)"
+            case .enGB: return "English (UK)"
+            case .enAU: return "English (Australia)"
+            case .enCA: return "English (Canada)"
+            }
+        }
+
+        public var explicitLocale: Locale? {
+            switch self {
+            case .auto: return nil
+            case .enIN, .enUS, .enGB, .enAU, .enCA:
+                return Locale(identifier: rawValue)
+            }
+        }
+
+        public var locale: Locale {
+            explicitLocale ?? Locale.current
+        }
+    }
+
+    public enum WhisperPreset: String, CaseIterable, Identifiable, Codable, Sendable {
+        case largeV3Turbo = "openai_whisper-large-v3-v20240930_626MB"
+        case small = "openai_whisper-small_216MB"
+        case baseEn = "openai_whisper-base.en"
+        case baseMultilingual = "openai_whisper-base"
+        case tinyEn = "openai_whisper-tiny.en"
+
+        public var id: String { rawValue }
+
+        public var variantGlob: String {
+            switch self {
+            case .largeV3Turbo: return "large-v3-v20240930_626MB"
+            case .small: return "small_216MB"
+            case .baseEn: return "base.en"
+            case .baseMultilingual: return "base"
+            case .tinyEn: return "tiny.en"
+            }
+        }
+
+        public var displayName: String {
+            switch self {
+            case .largeV3Turbo: return "Whisper Large v3 Turbo"
+            case .small: return "Whisper Small"
+            case .baseEn: return "Whisper Base (English)"
+            case .baseMultilingual: return "Whisper Base (Multilingual)"
+            case .tinyEn: return "Whisper Tiny (English)"
+            }
+        }
+
+        public var subtitle: String {
+            switch self {
+            case .largeV3Turbo: return "Best Whisper accuracy & global accents (~626 MB)"
+            case .small: return "High accuracy with smaller footprint (~216 MB)"
+            case .baseEn: return "Balanced speed & size (English-only)"
+            case .baseMultilingual: return "Lightweight multilingual Whisper"
             case .tinyEn: return "Fastest transcription & lowest RAM"
-            case .baseMultilingual: return "Supports English + other languages"
             }
         }
 
         public var approximateSizeMB: Int {
             switch self {
+            case .largeV3Turbo: return 626
+            case .small: return 216
             case .baseEn: return 145
-            case .tinyEn: return 75
             case .baseMultilingual: return 145
+            case .tinyEn: return 75
             }
         }
 
         public var languageCode: String? {
             switch self {
-            case .baseEn, .tinyEn: return "en"
-            case .baseMultilingual: return nil
+            case .largeV3Turbo, .small, .baseEn, .tinyEn:
+                return "en"
+            case .baseMultilingual:
+                return nil
             }
         }
 
         var whisperModelVariant: ModelVariant {
             switch self {
+            case .largeV3Turbo: return .largev3
+            case .small: return .small
             case .baseEn: return .baseEn
-            case .tinyEn: return .tinyEn
             case .baseMultilingual: return .base
+            case .tinyEn: return .tinyEn
             }
         }
 
         public var tokenizerRepoName: String {
             switch self {
+            case .largeV3Turbo: return "openai/whisper-large-v3"
+            case .small: return "openai/whisper-small"
             case .baseEn: return "openai/whisper-base.en"
-            case .tinyEn: return "openai/whisper-tiny.en"
             case .baseMultilingual: return "openai/whisper-base"
+            case .tinyEn: return "openai/whisper-tiny.en"
             }
         }
     }
@@ -263,6 +345,8 @@ public final class ModelManager {
     }
 
     private enum DefaultsKey {
+        static let selectedSpeechEngine = "buddy.models.speechEngine"
+        static let selectedAppleSpeechLocale = "buddy.models.appleSpeechLocale"
         static let selectedWhisperPreset = "buddy.models.selectedWhisperPreset"
         static let selectedLLMPreset = "buddy.models.selectedLLMPreset"
         static let customLLMFileName = "buddy.models.customLLMFileName"
@@ -275,7 +359,21 @@ public final class ModelManager {
 
     @ObservationIgnored private var isInitializing: Bool = true
 
-    public var selectedWhisperPreset: WhisperPreset = .baseEn {
+    public var selectedSpeechEngine: SpeechEngine = .appleOnDevice {
+        didSet {
+            guard !isInitializing else { return }
+            defaults.set(selectedSpeechEngine.rawValue, forKey: DefaultsKey.selectedSpeechEngine)
+        }
+    }
+
+    public var selectedAppleSpeechLocale: AppleSpeechLocaleOption = .auto {
+        didSet {
+            guard !isInitializing else { return }
+            defaults.set(selectedAppleSpeechLocale.rawValue, forKey: DefaultsKey.selectedAppleSpeechLocale)
+        }
+    }
+
+    public var selectedWhisperPreset: WhisperPreset = .largeV3Turbo {
         didSet {
             guard !isInitializing else { return }
             defaults.set(selectedWhisperPreset.rawValue, forKey: DefaultsKey.selectedWhisperPreset)
@@ -315,8 +413,30 @@ public final class ModelManager {
     public var activeLLMFileURL: URL?
     public var totalStorageUsedDescription: String = "0 MB"
 
+    /// Evaluates whether voice logging is actually usable given Apple On-Device Speech permission
+    /// and offline dictation availability (or local WhisperKit files when WhisperKit is selected).
+    public func isVoiceReady(appleSpeechReady: Bool) -> Bool {
+        switch selectedSpeechEngine {
+        case .appleOnDevice:
+            return appleSpeechReady
+        case .whisperKit:
+            return isWhisperDownloaded
+        }
+    }
+
+    /// Returns `true` only when both the active voice engine and the local LLM are ready offline.
+    public func isAllReady(appleSpeechReady: Bool) -> Bool {
+        isVoiceReady(appleSpeechReady: appleSpeechReady) && isLLMDownloaded
+    }
+
+    /// Returns whether all required *downloadable* model files for the selected engine are on disk.
     public var isAllDownloaded: Bool {
-        isWhisperDownloaded && isLLMDownloaded
+        switch selectedSpeechEngine {
+        case .appleOnDevice:
+            return isLLMDownloaded
+        case .whisperKit:
+            return isWhisperDownloaded && isLLMDownloaded
+        }
     }
 
     private let defaults: UserDefaults
@@ -332,6 +452,16 @@ public final class ModelManager {
         self.modelsRootDirectory = appSupport.appendingPathComponent("BuddyModels", isDirectory: true)
         self.whisperBaseDirectory = modelsRootDirectory.appendingPathComponent("Whisper", isDirectory: true)
         self.llmBaseDirectory = modelsRootDirectory.appendingPathComponent("LLM", isDirectory: true)
+
+        if let storedEngine = defaults.string(forKey: DefaultsKey.selectedSpeechEngine),
+           let parsedEngine = SpeechEngine(rawValue: storedEngine) {
+            self.selectedSpeechEngine = parsedEngine
+        }
+
+        if let storedLocale = defaults.string(forKey: DefaultsKey.selectedAppleSpeechLocale),
+           let parsedLocale = AppleSpeechLocaleOption(rawValue: storedLocale) {
+            self.selectedAppleSpeechLocale = parsedLocale
+        }
 
         if let storedWhisper = defaults.string(forKey: DefaultsKey.selectedWhisperPreset),
            let parsedWhisper = WhisperPreset(rawValue: storedWhisper) {
@@ -523,10 +653,11 @@ public final class ModelManager {
 
     public func downloadRecommendedPack() async {
         downloadError = nil
-        if !isDownloaded(.baseEn) {
-            await downloadWhisperModel(.baseEn)
-        } else if selectedWhisperPreset != .baseEn {
-            selectedWhisperPreset = .baseEn
+        if selectedSpeechEngine == .whisperKit {
+            let targetWhisper = selectedWhisperPreset
+            if !isDownloaded(targetWhisper) {
+                await downloadWhisperModel(targetWhisper)
+            }
         }
 
         if !isDownloaded(.qwen25_1_5B) {

@@ -4,6 +4,7 @@ struct WorkoutHomeView: View {
     let store: WorkoutStore
     let pipeline: VoicePipelineCoordinator
     let modelManager: ModelManager
+    let appleSpeechService: AppleSpeechService
     let whisperService: WhisperTranscriptionService
     let llmService: LocalLLMService
     var dismissSheetsToken: Int = 0
@@ -111,6 +112,7 @@ struct WorkoutHomeView: View {
                 SettingsView(
                     store: store,
                     modelManager: modelManager,
+                    appleSpeechService: appleSpeechService,
                     whisperService: whisperService,
                     llmService: llmService
                 )

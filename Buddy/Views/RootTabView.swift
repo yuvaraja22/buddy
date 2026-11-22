@@ -10,6 +10,7 @@ struct RootTabView: View {
     let store: WorkoutStore
     let pipeline: VoicePipelineCoordinator
     let modelManager: ModelManager
+    let appleSpeechService: AppleSpeechService
     let whisperService: WhisperTranscriptionService
     let llmService: LocalLLMService
 
@@ -25,6 +26,7 @@ struct RootTabView: View {
                 store: store,
                 pipeline: pipeline,
                 modelManager: modelManager,
+                appleSpeechService: appleSpeechService,
                 whisperService: whisperService,
                 llmService: llmService,
                 dismissSheetsToken: dismissWorkoutSheetsToken
@@ -57,15 +59,20 @@ struct RootTabView: View {
         }
         .task {
             modelManager.refreshDownloadState()
-            if !didHandleDeepLinkOnLaunch && !hasSeenOnboarding && !modelManager.isAllDownloaded {
+            appleSpeechService.refreshAuthorizationStatus()
+            let appleSpeechReady = appleSpeechService.isReadyForOfflineVoice(for: modelManager.selectedAppleSpeechLocale)
+            if !didHandleDeepLinkOnLaunch && !hasSeenOnboarding && !modelManager.isAllReady(appleSpeechReady: appleSpeechReady) {
                 hasSeenOnboarding = true
                 showModelSetup = true
             }
         }
         .sheet(isPresented: $showModelSetup) {
-            ModelSetupSheet(modelManager: modelManager)
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
+            ModelSetupSheet(
+                modelManager: modelManager,
+                appleSpeechService: appleSpeechService
+            )
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
         }
     }
 

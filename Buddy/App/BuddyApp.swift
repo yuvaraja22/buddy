@@ -8,6 +8,7 @@ struct BuddyApp: App {
 
     @State private var modelManager: ModelManager
     @State private var audioRecorder: AudioRecorderService
+    @State private var appleSpeechService: AppleSpeechService
     @State private var whisperService: WhisperTranscriptionService
     @State private var llmService: LocalLLMService
     @State private var pipeline: VoicePipelineCoordinator
@@ -22,10 +23,12 @@ struct BuddyApp: App {
 
         let manager = ModelManager()
         let recorder = AudioRecorderService()
+        let appleSpeech = AppleSpeechService()
         let whisper = WhisperTranscriptionService(modelManager: manager)
         let llm = LocalLLMService(modelManager: manager)
         let coordinator = VoicePipelineCoordinator(
             audioRecorder: recorder,
+            appleSpeechService: appleSpeech,
             whisperService: whisper,
             llmService: llm,
             modelManager: manager
@@ -35,6 +38,7 @@ struct BuddyApp: App {
 
         _modelManager = State(initialValue: manager)
         _audioRecorder = State(initialValue: recorder)
+        _appleSpeechService = State(initialValue: appleSpeech)
         _whisperService = State(initialValue: whisper)
         _llmService = State(initialValue: llm)
         _pipeline = State(initialValue: coordinator)
@@ -47,6 +51,7 @@ struct BuddyApp: App {
                 store: workoutStore,
                 pipeline: pipeline,
                 modelManager: modelManager,
+                appleSpeechService: appleSpeechService,
                 whisperService: whisperService,
                 llmService: llmService
             )

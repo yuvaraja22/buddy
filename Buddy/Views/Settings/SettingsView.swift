@@ -4,9 +4,11 @@ import WidgetKit
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
 
     let store: WorkoutStore
     let modelManager: ModelManager
+    let appleSpeechService: AppleSpeechService
     let whisperService: WhisperTranscriptionService
     let llmService: LocalLLMService
 
@@ -14,15 +16,23 @@ struct SettingsView: View {
     @State private var importMessage: String?
     @State private var importIsError: Bool = false
     @State private var widgetRefreshNote: String?
+    @State private var sceneRefreshTick: Int = 0
 
-    private let whisperPresets: [WhisperPreset] = [.baseEn, .tinyEn, .baseMultilingual]
+    private let whisperPresets: [WhisperPreset] = [
+        .largeV3Turbo,
+        .small,
+        .baseEn,
+        .baseMultilingual,
+        .tinyEn
+    ]
     private let llmPresets: [LLMPreset] = [.qwen25_1_5B, .qwen25_0_5B, .custom]
 
     var body: some View {
+        let _ = sceneRefreshTick
         NavigationStack {
             Form {
                 preferencesSection
-                whisperSection
+                speechSection
                 llmSection
                 memoryAndRuntimeSection
                 diagnosticsSection
@@ -45,6 +55,15 @@ struct SettingsView: View {
             }
             .onAppear {
                 modelManager.refreshDownloadState()
+                appleSpeechService.refreshAuthorizationStatus()
+                sceneRefreshTick &+= 1
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                if newPhase == .active {
+                    modelManager.refreshDownloadState()
+                    appleSpeechService.refreshAuthorizationStatus()
+                    sceneRefreshTick &+= 1
+                }
             }
         }
     }
@@ -71,85 +90,172 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Speech Model (WhisperKit)
+    // MARK: - Speech Recognition (Apple On-Device + WhisperKit)
 
-    private var whisperSection: some View {
-        let selected = modelManager.selectedWhisperPreset
+    private var speechSection: some View {
+        let engine = modelManager.selectedSpeechEngine
 
         return Section {
             Picker(
-                "Whisper Variant",
+                "Speech Engine",
                 selection: Binding(
-                    get: { modelManager.selectedWhisperPreset },
-                    set: { preset in
+                    get: { modelManager.selectedSpeechEngine },
+                    set: { newEngine in
                         BuddyHaptics.selection()
-                        let changed = (modelManager.selectedWhisperPreset != preset)
-                        modelManager.selectedWhisperPreset = preset
-                        modelManager.refreshDownloadState()
-                        if changed {
+                        let changed = (modelManager.selectedSpeechEngine != newEngine)
+                        modelManager.selectedSpeechEngine = newEngine
+                        if changed && newEngine == .appleOnDevice {
                             Task { await whisperService.unload() }
                         }
                     }
                 )
             ) {
-                ForEach(whisperPresets, id: \.self) { preset in
-                    Text("\(preset.displayName) (~\(preset.approximateSizeMB) MB)")
-                        .tag(preset)
+                ForEach(SpeechEngine.allCases) { option in
+                    Text(option.displayName).tag(option)
                 }
             }
-            .disabled(modelManager.isDownloadingWhisper)
 
-            Text(selected.subtitle)
+            Text(engine.subtitle)
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            if modelManager.isDownloadingWhisper {
-                VStack(alignment: .leading, spacing: 6) {
-                    ProgressView(value: min(max(modelManager.whisperDownloadProgress, 0), 1))
-                        .tint(BuddyTheme.cobalt)
-                    HStack {
-                        Text("Downloading \(selected.displayName)…")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Text("\(Int((min(max(modelManager.whisperDownloadProgress, 0), 1) * 100).rounded()))%")
-                            .font(.caption.weight(.semibold))
-                            .buddyNumeric()
-                            .foregroundStyle(BuddyTheme.cobalt)
-                    }
-                }
-            } else if modelManager.isWhisperDownloaded {
-                HStack {
-                    Label("Downloaded & Ready", systemImage: "checkmark.circle.fill")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(BuddyTheme.emeraldLive)
-                    Spacer()
-                    Button("Delete", role: .destructive) {
-                        BuddyHaptics.warning()
-                        Task {
-                            await whisperService.unload()
-                            modelManager.deleteWhisperModel(selected)
-                        }
-                    }
-                    .font(.subheadline.weight(.semibold))
-                }
+            if engine == .appleOnDevice {
+                appleSpeechControls
             } else {
-                Button {
-                    BuddyHaptics.mediumImpact()
-                    Task {
-                        await modelManager.downloadWhisperModel(selected)
-                    }
-                } label: {
-                    Label(
-                        "Download \(selected.displayName) (~\(selected.approximateSizeMB) MB)",
-                        systemImage: "arrow.down.circle.fill"
-                    )
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(BuddyTheme.cobalt)
-                }
+                whisperKitControls
             }
         } header: {
-            Text("Speech Model (WhisperKit)")
+            Text("Speech Recognition (Offline)")
+        } footer: {
+            if engine == .appleOnDevice {
+                Text("Runs 100% on-device via iOS Speech Recognition with gym exercise hints and zero RAM impact on Qwen 2.5.")
+            } else {
+                Text("Whisper Large v3 Turbo (~626 MB) offers the strongest Whisper accuracy across accents. Audio stays 100% on-device.")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var appleSpeechControls: some View {
+        let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
+        let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
+
+        Picker(
+            "Voice Accent / Locale",
+            selection: Binding(
+                get: { modelManager.selectedAppleSpeechLocale },
+                set: { newLocale in
+                    BuddyHaptics.selection()
+                    modelManager.selectedAppleSpeechLocale = newLocale
+                }
+            )
+        ) {
+            ForEach(AppleSpeechLocaleOption.allCases) { option in
+                Text(option.displayName).tag(option)
+            }
+        }
+
+        if isDenied {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.subheadline)
+                    .foregroundStyle(BuddyTheme.amberStreak)
+                    .padding(.top, 1)
+
+                Text("Speech Recognition access is turned off. Enable it in iOS Settings → Buddy, or switch Speech Engine to WhisperKit.")
+                    .font(.caption)
+                    .foregroundStyle(BuddyTheme.amberStreak)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: availability.isReady ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .font(.subheadline)
+                    .foregroundStyle(availability.isReady ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
+                    .padding(.top, 1)
+
+                Text(availability.statusMessage)
+                    .font(.caption)
+                    .foregroundStyle(availability.isReady ? .secondary : BuddyTheme.amberStreak)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var whisperKitControls: some View {
+        let selected = modelManager.selectedWhisperPreset
+
+        Picker(
+            "Whisper Variant",
+            selection: Binding(
+                get: { modelManager.selectedWhisperPreset },
+                set: { preset in
+                    BuddyHaptics.selection()
+                    let changed = (modelManager.selectedWhisperPreset != preset)
+                    modelManager.selectedWhisperPreset = preset
+                    modelManager.refreshDownloadState()
+                    if changed {
+                        Task { await whisperService.unload() }
+                    }
+                }
+            )
+        ) {
+            ForEach(whisperPresets, id: \.self) { preset in
+                Text("\(preset.displayName) (~\(preset.approximateSizeMB) MB)")
+                    .tag(preset)
+            }
+        }
+        .disabled(modelManager.isDownloadingWhisper)
+
+        Text(selected.subtitle)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+        if modelManager.isDownloadingWhisper {
+            VStack(alignment: .leading, spacing: 6) {
+                ProgressView(value: min(max(modelManager.whisperDownloadProgress, 0), 1))
+                    .tint(BuddyTheme.cobalt)
+                HStack {
+                    Text("Downloading \(selected.displayName)…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(Int((min(max(modelManager.whisperDownloadProgress, 0), 1) * 100).rounded()))%")
+                        .font(.caption.weight(.semibold))
+                        .buddyNumeric()
+                        .foregroundStyle(BuddyTheme.cobalt)
+                }
+            }
+        } else if modelManager.isWhisperDownloaded {
+            HStack {
+                Label("Downloaded & Ready", systemImage: "checkmark.circle.fill")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(BuddyTheme.emeraldLive)
+                Spacer()
+                Button("Delete", role: .destructive) {
+                    BuddyHaptics.warning()
+                    Task {
+                        await whisperService.unload()
+                        modelManager.deleteWhisperModel(selected)
+                    }
+                }
+                .font(.subheadline.weight(.semibold))
+            }
+        } else {
+            Button {
+                BuddyHaptics.mediumImpact()
+                Task {
+                    await modelManager.downloadWhisperModel(selected)
+                }
+            } label: {
+                Label(
+                    "Download \(selected.displayName) (~\(selected.approximateSizeMB) MB)",
+                    systemImage: "arrow.down.circle.fill"
+                )
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(BuddyTheme.cobalt)
+            }
         }
     }
 
@@ -277,12 +383,42 @@ struct SettingsView: View {
 
     private var memoryAndRuntimeSection: some View {
         Section {
-            LabeledContent("Whisper Runtime") {
-                runtimeBadge(
-                    isLoaded: whisperService.isLoaded,
-                    isLoading: whisperService.isLoading,
-                    label: whisperService.loadedVariantName
-                )
+            LabeledContent("Speech Engine") {
+                if modelManager.selectedSpeechEngine == .appleOnDevice {
+                    let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
+                    let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
+                    let badgeColor: Color = (isDenied || !availability.isReady) ? BuddyTheme.amberStreak : BuddyTheme.emeraldLive
+                    let badgeLabel: String = {
+                        if isDenied { return "Permission Needed" }
+                        if !availability.isReady { return "Offline Pack Needed" }
+                        return "Apple On-Device"
+                    }()
+
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(badgeColor)
+                            .frame(width: 7, height: 7)
+                        Text(badgeLabel)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(badgeColor)
+                    }
+                } else {
+                    runtimeBadge(
+                        isLoaded: whisperService.isLoaded,
+                        isLoading: whisperService.isLoading,
+                        label: whisperService.loadedVariantName
+                    )
+                }
+            }
+
+            if modelManager.selectedSpeechEngine == .appleOnDevice && (whisperService.isLoaded || whisperService.isLoading) {
+                LabeledContent("Whisper Runtime") {
+                    runtimeBadge(
+                        isLoaded: whisperService.isLoaded,
+                        isLoading: whisperService.isLoading,
+                        label: whisperService.loadedVariantName
+                    )
+                }
             }
 
             LabeledContent("LLM Runtime") {
