@@ -12,6 +12,7 @@ struct BuddyApp: App {
     @State private var llmService: LocalLLMService
     @State private var pipeline: VoicePipelineCoordinator
     @State private var workoutStore: WorkoutStore
+    @State private var cloudSync: FirebaseSyncService
 
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("buddy.preferences.appearance") private var appearanceRaw: String = BuddyAppearance.dark.rawValue
@@ -36,6 +37,11 @@ struct BuddyApp: App {
             modelManager: manager
         )
         let store = WorkoutStore(modelContext: container.mainContext)
+        let sync = FirebaseSyncService()
+        store.onDataMutated = { [weak sync, weak store] in
+            guard let sync, let store else { return }
+            sync.scheduleAutoSync(for: store)
+        }
         coordinator.attachStore(store)
 
         _modelManager = State(initialValue: manager)
@@ -44,6 +50,7 @@ struct BuddyApp: App {
         _llmService = State(initialValue: llm)
         _pipeline = State(initialValue: coordinator)
         _workoutStore = State(initialValue: store)
+        _cloudSync = State(initialValue: sync)
     }
 
     var body: some Scene {
@@ -53,7 +60,8 @@ struct BuddyApp: App {
                 pipeline: pipeline,
                 modelManager: modelManager,
                 appleSpeechService: appleSpeechService,
-                llmService: llmService
+                llmService: llmService,
+                cloudSync: cloudSync
             )
             .tint(BuddyTheme.inkPrimary)
             .preferredColorScheme(preferredAppearance.colorScheme)
@@ -76,6 +84,7 @@ struct BuddyApp: App {
                 modelManager.refreshDownloadState()
                 appleSpeechService.refreshAuthorizationStatus()
                 pipeline.resumePendingWorkIfNeeded(into: workoutStore)
+                cloudSync.syncOnForegroundIfNeeded(store: workoutStore)
             case .inactive:
                 break
             @unknown default:

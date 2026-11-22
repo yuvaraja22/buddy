@@ -12,6 +12,10 @@ import ActivityKit
 @MainActor
 public final class WorkoutStore {
     private static let preferredUnitDefaultsKey = "buddy.preferredUnit"
+    private static let weeklyGoalDefaultsKey = "buddy.profile.weeklyGoal"
+    private static let displayNameDefaultsKey = "buddy.profile.displayName"
+    private static let deletedSessionIDsDefaultsKey = "buddy.sync.deletedSessionIDs"
+    private static let lastMutationDefaultsKey = "buddy.sync.lastLocalMutationAt"
 
     @ObservationIgnored
     private let modelContext: ModelContext
@@ -21,6 +25,14 @@ public final class WorkoutStore {
     private let enableSystemSync: Bool
     @ObservationIgnored
     private var liveActivitySyncTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var isBootstrapping: Bool = true
+    @ObservationIgnored
+    private var isApplyingCloudMerge: Bool = false
+
+    /// Invoked whenever local workouts or profile preferences change so cloud sync can auto-push.
+    @ObservationIgnored
+    public var onDataMutated: (@MainActor () -> Void)?
 
     private var undoStack: [UndoAction] = []
 
@@ -37,6 +49,31 @@ public final class WorkoutStore {
                     forKey: Self.preferredUnitDefaultsKey
                 )
                 syncWidgetsAndLiveActivity()
+                recordLocalMutationAndNotify()
+            }
+        }
+    }
+
+    public var weeklyGoal: Int {
+        didSet {
+            let clamped = min(7, max(1, weeklyGoal))
+            if weeklyGoal != clamped {
+                weeklyGoal = clamped
+                return
+            }
+            if oldValue != weeklyGoal {
+                defaults.set(weeklyGoal, forKey: Self.weeklyGoalDefaultsKey)
+                syncWidgetsAndLiveActivity()
+                recordLocalMutationAndNotify()
+            }
+        }
+    }
+
+    public var displayName: String {
+        didSet {
+            if oldValue != displayName {
+                defaults.set(displayName, forKey: Self.displayNameDefaultsKey)
+                recordLocalMutationAndNotify()
             }
         }
     }
@@ -55,8 +92,13 @@ public final class WorkoutStore {
         } else {
             self.preferredUnit = .kg
         }
+        let savedGoal = defaults.integer(forKey: Self.weeklyGoalDefaultsKey)
+        self.weeklyGoal = (1...7).contains(savedGoal) ? savedGoal : 4
+        self.displayName = defaults.string(forKey: Self.displayNameDefaultsKey) ?? ""
+
         reload()
         syncWidgetsAndLiveActivity()
+        isBootstrapping = false
     }
 
     // MARK: - Persistence & Reload
@@ -709,8 +751,9 @@ public final class WorkoutStore {
     }
 
     public func deleteSession(_ session: WorkoutSession) {
-        let wasActive = activeSession?.id == session.id
-        if recentlyEndedSession?.id == session.id {
+        let deletedID = session.id
+        let wasActive = activeSession?.id == deletedID
+        if recentlyEndedSession?.id == deletedID {
             recentlyEndedSession = nil
         }
         if wasActive {
@@ -719,6 +762,7 @@ public final class WorkoutStore {
             latestBanner = nil
         }
 
+        recordDeletedSessionID(deletedID)
         modelContext.delete(session)
         saveContext()
         reload()
@@ -771,7 +815,8 @@ public final class WorkoutStore {
 
         let snapshot = StatsCalculator.buildWidgetSnapshot(
             sessions: sessions,
-            preferredUnit: preferredUnit
+            preferredUnit: preferredUnit,
+            weeklyGoal: weeklyGoal
         )
         WidgetSnapshot.save(snapshot)
 
@@ -782,6 +827,333 @@ public final class WorkoutStore {
         #if canImport(ActivityKit)
         syncLiveActivity()
         #endif
+    }
+
+    // MARK: - Cloud Sync & Portable JSON Backup
+
+    public func exportCloudBackup() -> BuddyCloudBackup {
+        let exportedSessions: [WorkoutSessionBackup] = sessions
+            .filter { $0.isActive || $0.countsAsWorkout }
+            .map { session in
+                let exportedEntries: [ExerciseEntryBackup] = session.sortedEntries.map { entry in
+                    let exportedSets: [LoggedSetBackup] = entry.sortedSets.map { set in
+                        LoggedSetBackup(
+                            id: set.id,
+                            setNumber: set.setNumber,
+                            reps: set.reps,
+                            weightKg: set.weightKg,
+                            durationSeconds: set.durationSeconds,
+                            tag: set.tag,
+                            notes: set.notes,
+                            rawTranscript: set.rawTranscript,
+                            loggedAt: set.loggedAt
+                        )
+                    }
+                    return ExerciseEntryBackup(
+                        id: entry.id,
+                        exerciseName: entry.exerciseName,
+                        canonicalName: entry.canonicalName,
+                        muscleGroup: entry.muscleGroup,
+                        orderIndex: entry.orderIndex,
+                        createdAt: entry.createdAt,
+                        sets: exportedSets
+                    )
+                }
+                return WorkoutSessionBackup(
+                    id: session.id,
+                    startedAt: session.startedAt,
+                    endedAt: session.endedAt,
+                    title: session.title,
+                    notes: session.notes,
+                    isActive: session.isActive,
+                    isManualCheckIn: session.isManualCheckInDay,
+                    entries: exportedEntries
+                )
+            }
+
+        return BuddyCloudBackup(
+            schemaVersion: BuddyCloudBackup.currentSchemaVersion,
+            updatedAt: lastLocalMutationDate ?? Date(),
+            profile: BuddyProfileBackup(
+                displayName: displayName,
+                weeklyGoal: weeklyGoal,
+                preferredUnit: preferredUnit
+            ),
+            sessions: exportedSessions,
+            deletedSessionIDs: loadDeletedSessionIDs()
+        )
+    }
+
+    @discardableResult
+    public func mergeCloudBackup(
+        _ backup: BuddyCloudBackup,
+        isManualImport: Bool = false
+    ) -> CloudMergeReport {
+        isApplyingCloudMerge = true
+        defer { isApplyingCloudMerge = false }
+
+        let hadZeroLocalSessions = sessions.filter { $0.isActive || $0.countsAsWorkout }.isEmpty
+        let previousLocalMutation = lastLocalMutationDate ?? .distantPast
+
+        var localTombstones = Set(loadDeletedSessionIDs())
+        let remoteTombstones = Set(backup.deletedSessionIDs)
+
+        if isManualImport {
+            for session in backup.sessions {
+                localTombstones.remove(session.id)
+            }
+        } else {
+            localTombstones.formUnion(remoteTombstones)
+        }
+
+        var deletedCount = 0
+        if !isManualImport && !remoteTombstones.isEmpty {
+            for session in sessions where remoteTombstones.contains(session.id) {
+                if activeSession?.id == session.id {
+                    activeSession = nil
+                }
+                if recentlyEndedSession?.id == session.id {
+                    recentlyEndedSession = nil
+                }
+                modelContext.delete(session)
+                deletedCount += 1
+            }
+            if deletedCount > 0 {
+                try? modelContext.save()
+                reload()
+            }
+        }
+
+        var localByID: [UUID: WorkoutSession] = Dictionary(
+            uniqueKeysWithValues: sessions.map { ($0.id, $0) }
+        )
+        let remoteIDs = Set(backup.sessions.map(\.id))
+
+        var importedCount = 0
+        var updatedCount = 0
+        var localHasNewerData = false
+
+        for remote in backup.sessions {
+            if !isManualImport && localTombstones.contains(remote.id) {
+                continue
+            }
+
+            if let existing = localByID[remote.id] {
+                let localLatest = sessionLatestMutationDate(existing)
+                let remoteLatest = remote.latestMutationDate
+                let remoteHasMoreData = remote.totalSetCount > existing.totalSets
+                    || (existing.totalSets == 0 && existing.isManualCheckInDay && remote.totalSetCount > 0)
+                let remoteIsNewer = remote.totalSetCount == existing.totalSets
+                    && remoteLatest > localLatest.addingTimeInterval(0.5)
+
+                if remoteHasMoreData || remoteIsNewer {
+                    replaceSessionContents(existing, with: remote)
+                    updatedCount += 1
+                } else if existing.totalSets > remote.totalSetCount || localLatest > remoteLatest.addingTimeInterval(0.5) {
+                    localHasNewerData = true
+                }
+            } else {
+                let inserted = insertSessionFromBackup(remote)
+                localByID[inserted.id] = inserted
+                importedCount += 1
+            }
+        }
+
+        for session in sessions where session.isActive || session.countsAsWorkout {
+            if !remoteIDs.contains(session.id) {
+                localHasNewerData = true
+                break
+            }
+        }
+        if !localTombstones.isSubset(of: remoteTombstones) {
+            localHasNewerData = true
+        }
+
+        var restoredProfile = false
+        if hadZeroLocalSessions || isManualImport || backup.updatedAt > previousLocalMutation {
+            let clampedGoal = min(7, max(1, backup.profile.weeklyGoal))
+            if weeklyGoal != clampedGoal {
+                weeklyGoal = clampedGoal
+                defaults.set(clampedGoal, forKey: Self.weeklyGoalDefaultsKey)
+                restoredProfile = true
+            }
+            if preferredUnit != backup.profile.preferredUnit {
+                preferredUnit = backup.profile.preferredUnit
+                defaults.set(backup.profile.preferredUnit.rawValue, forKey: Self.preferredUnitDefaultsKey)
+                restoredProfile = true
+            }
+            let cleanedName = backup.profile.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !cleanedName.isEmpty && displayName != cleanedName {
+                displayName = cleanedName
+                defaults.set(cleanedName, forKey: Self.displayNameDefaultsKey)
+                restoredProfile = true
+            }
+        }
+
+        saveDeletedSessionIDs(Array(localTombstones))
+        if backup.updatedAt > previousLocalMutation {
+            defaults.set(backup.updatedAt.timeIntervalSince1970, forKey: Self.lastMutationDefaultsKey)
+        }
+
+        try? modelContext.save()
+        reload()
+        syncWidgetsAndLiveActivity()
+
+        return CloudMergeReport(
+            importedSessions: importedCount,
+            updatedSessions: updatedCount,
+            deletedSessions: deletedCount,
+            restoredProfile: restoredProfile,
+            needsPushToCloud: localHasNewerData
+        )
+    }
+
+    private func insertSessionFromBackup(_ remote: WorkoutSessionBackup) -> WorkoutSession {
+        let shouldBeActive = remote.isActive && activeSession == nil
+        let session = WorkoutSession(
+            id: remote.id,
+            startedAt: remote.startedAt,
+            endedAt: shouldBeActive ? remote.endedAt : (remote.endedAt ?? remote.latestMutationDate),
+            title: remote.title,
+            notes: remote.notes,
+            isActive: shouldBeActive,
+            isManualCheckIn: remote.isManualCheckIn
+        )
+        modelContext.insert(session)
+
+        for entryBackup in remote.entries.sorted(by: { $0.orderIndex < $1.orderIndex }) {
+            let entry = ExerciseEntry(
+                id: entryBackup.id,
+                exerciseName: entryBackup.exerciseName,
+                canonicalName: entryBackup.canonicalName,
+                muscleGroup: entryBackup.muscleGroup,
+                orderIndex: entryBackup.orderIndex,
+                createdAt: entryBackup.createdAt,
+                session: nil
+            )
+            modelContext.insert(entry)
+            entry.session = session
+            if !session.entries.contains(where: { $0.id == entry.id }) {
+                session.entries.append(entry)
+            }
+
+            for setBackup in entryBackup.sets.sorted(by: { $0.setNumber < $1.setNumber }) {
+                let set = LoggedSet(
+                    id: setBackup.id,
+                    setNumber: setBackup.setNumber,
+                    reps: setBackup.reps,
+                    weightKg: setBackup.weightKg,
+                    durationSeconds: setBackup.durationSeconds,
+                    tag: setBackup.tag,
+                    notes: setBackup.notes,
+                    rawTranscript: setBackup.rawTranscript,
+                    loggedAt: setBackup.loggedAt,
+                    entry: nil
+                )
+                modelContext.insert(set)
+                set.entry = entry
+                if !entry.sets.contains(where: { $0.id == set.id }) {
+                    entry.sets.append(set)
+                }
+            }
+        }
+
+        return session
+    }
+
+    private func replaceSessionContents(_ local: WorkoutSession, with remote: WorkoutSessionBackup) {
+        local.startedAt = remote.startedAt
+        local.endedAt = remote.endedAt
+        local.title = remote.title
+        local.notes = remote.notes
+        local.isManualCheckIn = remote.isManualCheckIn ? true : nil
+        if !remote.isActive && local.isActive {
+            local.isActive = false
+        }
+
+        let oldEntries = local.entries
+        local.entries.removeAll()
+        for entry in oldEntries {
+            entry.session = nil
+            modelContext.delete(entry)
+        }
+
+        for entryBackup in remote.entries.sorted(by: { $0.orderIndex < $1.orderIndex }) {
+            let entry = ExerciseEntry(
+                id: entryBackup.id,
+                exerciseName: entryBackup.exerciseName,
+                canonicalName: entryBackup.canonicalName,
+                muscleGroup: entryBackup.muscleGroup,
+                orderIndex: entryBackup.orderIndex,
+                createdAt: entryBackup.createdAt,
+                session: nil
+            )
+            modelContext.insert(entry)
+            entry.session = local
+            if !local.entries.contains(where: { $0.id == entry.id }) {
+                local.entries.append(entry)
+            }
+
+            for setBackup in entryBackup.sets.sorted(by: { $0.setNumber < $1.setNumber }) {
+                let set = LoggedSet(
+                    id: setBackup.id,
+                    setNumber: setBackup.setNumber,
+                    reps: setBackup.reps,
+                    weightKg: setBackup.weightKg,
+                    durationSeconds: setBackup.durationSeconds,
+                    tag: setBackup.tag,
+                    notes: setBackup.notes,
+                    rawTranscript: setBackup.rawTranscript,
+                    loggedAt: setBackup.loggedAt,
+                    entry: nil
+                )
+                modelContext.insert(set)
+                set.entry = entry
+                if !entry.sets.contains(where: { $0.id == set.id }) {
+                    entry.sets.append(set)
+                }
+            }
+        }
+    }
+
+    private func sessionLatestMutationDate(_ session: WorkoutSession) -> Date {
+        let latestSet = session.entries.flatMap(\.sets).map(\.loggedAt).max()
+        let latestEntry = session.entries.map(\.createdAt).max()
+        return [session.startedAt, session.endedAt, latestEntry, latestSet].compactMap { $0 }.max() ?? session.startedAt
+    }
+
+    private var lastLocalMutationDate: Date? {
+        let ts = defaults.double(forKey: Self.lastMutationDefaultsKey)
+        return ts > 0 ? Date(timeIntervalSince1970: ts) : nil
+    }
+
+    private func recordLocalMutationAndNotify() {
+        guard !isBootstrapping && !isApplyingCloudMerge else { return }
+        defaults.set(Date().timeIntervalSince1970, forKey: Self.lastMutationDefaultsKey)
+        onDataMutated?()
+    }
+
+    private func loadDeletedSessionIDs() -> [UUID] {
+        guard let rawStrings = defaults.stringArray(forKey: Self.deletedSessionIDsDefaultsKey) else {
+            return []
+        }
+        return rawStrings.compactMap(UUID.init(uuidString:))
+    }
+
+    private func recordDeletedSessionID(_ id: UUID) {
+        var existing = loadDeletedSessionIDs()
+        if !existing.contains(id) {
+            existing.append(id)
+            if existing.count > 250 {
+                existing = Array(existing.suffix(250))
+            }
+            saveDeletedSessionIDs(existing)
+        }
+    }
+
+    private func saveDeletedSessionIDs(_ ids: [UUID]) {
+        let trimmed = ids.count > 250 ? Array(ids.suffix(250)) : ids
+        defaults.set(trimmed.map(\.uuidString), forKey: Self.deletedSessionIDsDefaultsKey)
     }
 
     // MARK: - Private Command Handlers
@@ -1075,6 +1447,7 @@ public final class WorkoutStore {
 
     private func saveContext() {
         try? modelContext.save()
+        recordLocalMutationAndNotify()
     }
 
     private func findSession(id: UUID) -> WorkoutSession? {

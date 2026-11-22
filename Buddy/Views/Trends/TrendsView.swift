@@ -24,7 +24,7 @@ struct TrendsView: View {
         let consistency = StatsCalculator.consistency(
             sessions: sessions,
             referenceDate: Date(),
-            weeklyGoal: 4
+            weeklyGoal: store.weeklyGoal
         )
         let heatmapDays = StatsCalculator.heatmapDays(
             sessions: sessions,

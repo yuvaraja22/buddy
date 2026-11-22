@@ -41,6 +41,8 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         SUPPORTS_MACCATALYST: NO
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        BUDDY_FIREBASE_PROJECT_ID: ""
+        BUDDY_FIREBASE_API_KEY: ""
     info:
       path: Buddy/Resources/Info.plist
       properties:
@@ -56,6 +58,8 @@ targets:
         NSMicrophoneUsageDescription: "Buddy uses your microphone offline in the gym to transcribe and log your workout sets locally. Audio never leaves your iPhone."
         NSSpeechRecognitionUsageDescription: "Buddy uses Apple on-device speech recognition offline in the gym to transcribe your spoken workout sets locally. Audio never leaves your iPhone."
         ITSAppUsesNonExemptEncryption: false
+        BUDDY_FIREBASE_PROJECT_ID: $(BUDDY_FIREBASE_PROJECT_ID)
+        BUDDY_FIREBASE_API_KEY: $(BUDDY_FIREBASE_API_KEY)
         ALTAppGroups:
           - group.com.yuvaraja.buddy
         CFBundleURLTypes:

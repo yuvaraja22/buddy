@@ -62,7 +62,7 @@ struct CalendarView: View {
 
     var body: some View {
         let cal = gregorianCalendar
-        let consistency = StatsCalculator.consistency(sessions: store.sessions, referenceDate: Date(), weeklyGoal: 4)
+        let consistency = StatsCalculator.consistency(sessions: store.sessions, referenceDate: Date(), weeklyGoal: store.weeklyGoal)
         let monthSummary = buildMonthSummary(for: displayedMonth, calendar: cal)
         let daySessions = store.sessions(on: selectedDate, calendar: cal)
         let sessionsByDay = buildSessionsByDayMap(calendar: cal)

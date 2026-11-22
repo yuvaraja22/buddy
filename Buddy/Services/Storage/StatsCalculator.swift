@@ -420,11 +420,12 @@ public enum StatsCalculator {
     public static func buildWidgetSnapshot(
         sessions: [WorkoutSession],
         preferredUnit: WeightUnit,
-        referenceDate: Date = Date()
+        referenceDate: Date = Date(),
+        weeklyGoal: Int = 4
     ) -> WidgetSnapshot {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: referenceDate)
-        let stats = consistency(sessions: sessions, referenceDate: referenceDate)
+        let stats = consistency(sessions: sessions, referenceDate: referenceDate, weeklyGoal: weeklyGoal)
 
         // Active session snapshot (deterministically pick newest if multiple exist)
         let activeSnapshot: ActiveSessionSnapshot?
@@ -522,17 +523,18 @@ public enum StatsCalculator {
 
     public static func buildCoachContext(
         sessions: [WorkoutSession],
-        preferredUnit: WeightUnit
+        preferredUnit: WeightUnit,
+        weeklyGoal: Int = 4
     ) -> String {
         let loggedSessions = sessions
             .filter { $0.countsAsWorkout }
             .sorted { $0.startedAt > $1.startedAt }
 
         guard !loggedSessions.isEmpty || sessions.contains(where: { $0.isActive }) else {
-            return "User unit: \(preferredUnit.rawValue). No workouts logged yet. Streak: 0d."
+            return "User unit: \(preferredUnit.rawValue). Weekly goal: \(max(1, weeklyGoal)) days. No workouts logged yet. Streak: 0d."
         }
 
-        let stats = consistency(sessions: sessions)
+        let stats = consistency(sessions: sessions, weeklyGoal: weeklyGoal)
         var lines: [String] = []
         lines.append(
             "User unit: \(preferredUnit.rawValue). Total workouts: \(stats.totalWorkouts). " +

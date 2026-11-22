@@ -19,6 +19,7 @@ struct RootTabView: View {
     let modelManager: ModelManager
     let appleSpeechService: AppleSpeechService
     let llmService: LocalLLMService
+    let cloudSync: FirebaseSyncService
 
     @State private var selectedTab: BuddyTab = .workout
     @State private var showModelSetup: Bool = false
@@ -42,6 +43,7 @@ struct RootTabView: View {
                     modelManager: modelManager,
                     appleSpeechService: appleSpeechService,
                     llmService: llmService,
+                    cloudSync: cloudSync,
                     isTabActive: selectedTab == .workout,
                     dockClearance: voiceDockHeight,
                     dismissSheetsToken: dismissWorkoutSheetsToken,

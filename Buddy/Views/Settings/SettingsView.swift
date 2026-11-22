@@ -2,8 +2,9 @@ import SwiftUI
 import UniformTypeIdentifiers
 import WidgetKit
 
-/// Pure OLED monochrome Settings sheet matching Buddy's YouTube/Uber aesthetic
-/// (zero default grey iOS Form chrome).
+/// Organized Uber/YouTube-style OLED monochrome Settings hub:
+/// 1. Profile & Preferences directly on the root screen (Display Name, Weekly Goal 1–7d, Appearance, Weight Unit)
+/// 2. App Settings drill-down rows for Cloud Sync & Backup, Voice & Local AI, and SideStore Diagnostics.
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
@@ -12,16 +13,10 @@ struct SettingsView: View {
     let modelManager: ModelManager
     let appleSpeechService: AppleSpeechService
     let llmService: LocalLLMService
+    let cloudSync: FirebaseSyncService
 
     @AppStorage("buddy.preferences.appearance") private var appearanceRaw: String = BuddyAppearance.dark.rawValue
-    @State private var showFileImporter: Bool = false
-    @State private var importMessage: String?
-    @State private var importIsError: Bool = false
-    @State private var widgetRefreshNote: String?
-    @State private var showDiagnostics: Bool = false
     @State private var sceneRefreshTick: Int = 0
-
-    private let llmPresets: [LLMPreset] = [.qwen25_1_5B, .qwen25_0_5B, .custom]
 
     private var currentAppearance: BuddyAppearance {
         BuddyAppearance(rawValue: appearanceRaw) ?? .dark
@@ -29,41 +24,48 @@ struct SettingsView: View {
 
     var body: some View {
         let _ = sceneRefreshTick
-        VStack(spacing: 0) {
-            settingsHeader
+        let consistency = StatsCalculator.consistency(
+            sessions: store.sessions,
+            referenceDate: Date(),
+            weeklyGoal: store.weeklyGoal
+        )
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    preferencesCard
-                    speechCard
-                    localLLMCard
-                    runtimeCard
-                    diagnosticsAccordionCard
+        NavigationStack {
+            VStack(spacing: 0) {
+                settingsHeader
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        profileCard(consistency: consistency)
+
+                        weeklyGoalCard(consistency: consistency)
+
+                        quickPreferencesCard
+
+                        appSettingsSection
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 28)
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-                .padding(.bottom, 28)
+                .scrollDismissesKeyboard(.interactively)
             }
-        }
-        .background(BuddyTheme.canvasBackground.ignoresSafeArea())
-        .fileImporter(
-            isPresented: $showFileImporter,
-            allowedContentTypes: [.data]
-        ) { result in
-            handleGGUFImport(result)
-        }
-        .onAppear {
-            modelManager.refreshDownloadState()
-            appleSpeechService.refreshAuthorizationStatus()
-            sceneRefreshTick &+= 1
-        }
-        .onChange(of: scenePhase) { _, newPhase in
-            if newPhase == .active {
+            .background(BuddyTheme.canvasBackground.ignoresSafeArea())
+            .toolbar(.hidden, for: .navigationBar)
+            .onAppear {
                 modelManager.refreshDownloadState()
                 appleSpeechService.refreshAuthorizationStatus()
                 sceneRefreshTick &+= 1
             }
+            .onChange(of: scenePhase) { _, newPhase in
+                if newPhase == .active {
+                    modelManager.refreshDownloadState()
+                    appleSpeechService.refreshAuthorizationStatus()
+                    sceneRefreshTick &+= 1
+                }
+            }
         }
+        .tint(BuddyTheme.inkPrimary)
     }
 
     // MARK: - Top Header
@@ -94,14 +96,110 @@ struct SettingsView: View {
         .padding(.bottom, 10)
     }
 
-    // MARK: - Appearance & Weight Units
+    // MARK: - Profile Card
 
-    private var preferencesCard: some View {
+    private func profileCard(consistency: ConsistencyStats) -> some View {
+        let trimmedName = store.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let avatarInitials = initials(from: trimmedName)
+
+        return NativeCard(padding: 15, cornerRadius: 14) {
+            VStack(alignment: .leading, spacing: 12) {
+                sectionEyebrow("PROFILE")
+
+                HStack(spacing: 12) {
+                    ZStack {
+                        Circle()
+                            .fill(BuddyTheme.inkPrimary)
+                            .frame(width: 46, height: 46)
+                        Text(avatarInitials)
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundStyle(BuddyTheme.inkInverse)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        TextField(
+                            "Your Name",
+                            text: Binding(
+                                get: { store.displayName },
+                                set: { store.displayName = $0 }
+                            )
+                        )
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundStyle(Color.primary)
+                        .submitLabel(.done)
+
+                        HStack(spacing: 6) {
+                            Text("\(consistency.totalWorkouts) \(consistency.totalWorkouts == 1 ? "workout" : "workouts")")
+                                .monospacedDigit()
+                            Text("·")
+                            Text("\(consistency.currentStreakDays)d streak")
+                                .monospacedDigit()
+                            Text("·")
+                            Text("\(store.weeklyGoal)d/wk goal")
+                                .monospacedDigit()
+                        }
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(BuddyTheme.mutedText)
+                        .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 4)
+                }
+            }
+        }
+    }
+
+    // MARK: - Settable Weekly Goal Card (1–7 days/week)
+
+    private func weeklyGoalCard(consistency: ConsistencyStats) -> some View {
+        NativeCard(padding: 15, cornerRadius: 14) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .firstTextBaseline) {
+                    sectionEyebrow("WEEKLY GOAL")
+                    Spacer()
+                    Text("\(store.weeklyGoal) \(store.weeklyGoal == 1 ? "day" : "days") / week")
+                        .font(.system(size: 13.5, weight: .bold))
+                        .monospacedDigit()
+                        .foregroundStyle(Color.primary)
+                }
+
+                HStack(spacing: 6) {
+                    ForEach(1...7, id: \.self) { days in
+                        let selected = (store.weeklyGoal == days)
+                        Button {
+                            BuddyHaptics.selection()
+                            store.weeklyGoal = days
+                        } label: {
+                            Text("\(days)")
+                                .font(.system(size: 14, weight: .bold))
+                                .monospacedDigit()
+                                .foregroundStyle(selected ? BuddyTheme.inkInverse : Color.primary)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 38)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                        .fill(selected ? BuddyTheme.inkPrimary : BuddyTheme.chipSurface)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("\(days) workouts per week")
+                    }
+                }
+
+                Text("This week: \(consistency.workoutsThisWeek) of \(store.weeklyGoal) completed. Updates Home, Calendar, Trends, and Widgets.")
+                    .font(.caption)
+                    .foregroundStyle(BuddyTheme.mutedText)
+            }
+        }
+    }
+
+    // MARK: - Quick Preferences (Appearance & Weight Unit)
+
+    private var quickPreferencesCard: some View {
         NativeCard(padding: 15, cornerRadius: 14) {
             VStack(alignment: .leading, spacing: 14) {
                 sectionEyebrow("PREFERENCES")
 
-                // Appearance inline segmented pills
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Appearance")
                         .font(.system(size: 14, weight: .semibold))
@@ -132,7 +230,6 @@ struct SettingsView: View {
 
                 Divider().overlay(BuddyTheme.hairlineBorder)
 
-                // Weight unit inline segmented pills
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Weight Unit")
                         .font(.system(size: 14, weight: .semibold))
@@ -164,7 +261,215 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Apple On-Device Speech
+    // MARK: - App Settings Navigation Rows
+
+    private var appSettingsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("App Settings")
+                .font(BuddyTheme.sectionTitleFont)
+                .foregroundStyle(Color.primary)
+                .padding(.horizontal, 2)
+
+            NativeCard(padding: 0, cornerRadius: 14) {
+                VStack(spacing: 0) {
+                    NavigationLink {
+                        CloudSyncSettingsView(store: store, cloudSync: cloudSync)
+                    } label: {
+                        settingsNavRow(
+                            icon: "icloud",
+                            title: "Cloud Sync & Backup",
+                            subtitle: cloudSyncRowSubtitle,
+                            statusColor: cloudSyncRowDotColor
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    Divider()
+                        .overlay(BuddyTheme.hairlineBorder)
+                        .padding(.leading, 56)
+
+                    NavigationLink {
+                        VoiceAndAISettingsView(
+                            modelManager: modelManager,
+                            appleSpeechService: appleSpeechService,
+                            llmService: llmService
+                        )
+                    } label: {
+                        settingsNavRow(
+                            icon: "waveform",
+                            title: "Voice & Local AI",
+                            subtitle: voiceAndAIRowSubtitle,
+                            statusColor: voiceAndAIRowDotColor
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    Divider()
+                        .overlay(BuddyTheme.hairlineBorder)
+                        .padding(.leading, 56)
+
+                    NavigationLink {
+                        DiagnosticsSettingsView(store: store)
+                    } label: {
+                        settingsNavRow(
+                            icon: "wrench.and.screwdriver",
+                            title: "SideStore & Diagnostics",
+                            subtitle: "Widgets, App Group & Bundle ID",
+                            statusColor: nil
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func settingsNavRow(
+        icon: String,
+        title: String,
+        subtitle: String,
+        statusColor: Color?
+    ) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(BuddyTheme.elevatedSurface)
+                    .frame(width: 36, height: 36)
+                Image(systemName: icon)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Color.primary)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Color.primary)
+
+                HStack(spacing: 5) {
+                    if let statusColor {
+                        Circle()
+                            .fill(statusColor)
+                            .frame(width: 6, height: 6)
+                    }
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(BuddyTheme.mutedText)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer(minLength: 6)
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(BuddyTheme.mutedText)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 13)
+        .contentShape(Rectangle())
+    }
+
+    // MARK: - Live Row Status Subtitles
+
+    private var cloudSyncRowSubtitle: String {
+        if cloudSync.isSignedIn {
+            if cloudSync.syncState == .syncing {
+                return "Firebase · Syncing…"
+            }
+            if case .error = cloudSync.syncState {
+                return "Firebase · Sync issue"
+            }
+            if let synced = cloudSync.lastSyncedAt {
+                return "Firebase · Synced \(synced.formatted(date: .omitted, time: .shortened))"
+            }
+            return "Firebase · \(cloudSync.userEmail ?? "Connected")"
+        }
+        if cloudSync.isConfigured {
+            return "Firebase · Tap to sign in"
+        }
+        return "Firebase & JSON Export"
+    }
+
+    private var cloudSyncRowDotColor: Color? {
+        if cloudSync.isSignedIn {
+            if case .error = cloudSync.syncState { return BuddyTheme.destructive }
+            return BuddyTheme.emeraldLive
+        }
+        return BuddyTheme.mutedText
+    }
+
+    private var voiceAndAIRowSubtitle: String {
+        let aiLabel = modelManager.isLLMDownloaded
+            ? modelManager.selectedLLMPreset.displayName
+            : "Instant Parser"
+        return "Apple Speech · \(aiLabel)"
+    }
+
+    private var voiceAndAIRowDotColor: Color {
+        let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
+        let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
+        return (isDenied || !availability.isReady) ? BuddyTheme.amberStreak : BuddyTheme.emeraldLive
+    }
+
+    // MARK: - Helpers
+
+    private func sectionEyebrow(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 10.5, weight: .bold))
+            .tracking(0.6)
+            .foregroundStyle(BuddyTheme.mutedText)
+    }
+
+    private func shortAppearanceLabel(_ option: BuddyAppearance) -> String {
+        switch option {
+        case .dark: return "OLED Dark"
+        case .light: return "Light"
+        case .system: return "System"
+        }
+    }
+
+    private func initials(from name: String) -> String {
+        let words = name.split(whereSeparator: \.isWhitespace).prefix(2)
+        let letters = words.compactMap(\.first).map { String($0).uppercased() }.joined()
+        return letters.isEmpty ? "B" : letters
+    }
+}
+
+// MARK: - Sub-Page: Voice & Local AI Settings
+
+private struct VoiceAndAISettingsView: View {
+    let modelManager: ModelManager
+    let appleSpeechService: AppleSpeechService
+    let llmService: LocalLLMService
+
+    @State private var showFileImporter: Bool = false
+    @State private var importMessage: String?
+    @State private var importIsError: Bool = false
+
+    private let llmPresets: [LLMPreset] = [.qwen25_1_5B, .qwen25_0_5B, .custom]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                speechCard
+                localLLMCard
+                runtimeCard
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 28)
+        }
+        .background(BuddyTheme.canvasBackground.ignoresSafeArea())
+        .navigationTitle("Voice & Local AI")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
+        .fileImporter(
+            isPresented: $showFileImporter,
+            allowedContentTypes: [.data]
+        ) { result in
+            handleGGUFImport(result)
+        }
+    }
 
     private var speechCard: some View {
         let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
@@ -234,8 +539,6 @@ struct SettingsView: View {
             }
         }
     }
-
-    // MARK: - Local LLM (llama.cpp)
 
     private var localLLMCard: some View {
         let selected = modelManager.selectedLLMPreset
@@ -313,7 +616,6 @@ struct SettingsView: View {
                     keyValueRow(title: "Custom GGUF", value: customName)
                 }
 
-                // Download / Progress / Delete CTA
                 if modelManager.isDownloadingLLM {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
@@ -436,8 +738,6 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Memory & Runtime
-
     private var runtimeCard: some View {
         let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
         let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
@@ -502,74 +802,6 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Collapsible Diagnostics & Widgets Accordion
-
-    private var diagnosticsAccordionCard: some View {
-        NativeCard(padding: 15, cornerRadius: 14) {
-            VStack(alignment: .leading, spacing: 12) {
-                Button {
-                    BuddyHaptics.lightImpact()
-                    withAnimation(.snappy(duration: 0.22)) {
-                        showDiagnostics.toggle()
-                    }
-                } label: {
-                    HStack {
-                        HStack(spacing: 8) {
-                            Image(systemName: "wrench.and.screwdriver")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(BuddyTheme.mutedText)
-                            Text("SideStore & Widget Diagnostics")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(Color.primary)
-                        }
-                        Spacer()
-                        Image(systemName: showDiagnostics ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(BuddyTheme.mutedText)
-                    }
-                }
-                .buttonStyle(.plain)
-
-                if showDiagnostics {
-                    Divider().overlay(BuddyTheme.hairlineBorder)
-
-                    keyValueRow(title: "App Group", value: AppGroupResolver.diagnosticSummary)
-                    keyValueRow(title: "Bundle ID", value: Bundle.main.bundleIdentifier ?? "com.yuvaraja.buddy")
-
-                    Button {
-                        BuddyHaptics.success()
-                        WidgetRefreshHelper.sync(store: store)
-                        widgetRefreshNote = "Widgets refreshed at \(Date().formatted(date: .omitted, time: .standard))"
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 12.5, weight: .bold))
-                            Text("Refresh Widgets Now")
-                                .font(.system(size: 13.5, weight: .semibold))
-                        }
-                        .foregroundStyle(Color.primary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(Capsule().fill(BuddyTheme.chipSurface))
-                    }
-                    .buttonStyle(.plain)
-
-                    if let widgetRefreshNote {
-                        Text(widgetRefreshNote)
-                            .font(.caption)
-                            .foregroundStyle(BuddyTheme.emeraldLive)
-                    }
-
-                    Text("App Groups resolve dynamically from embedded provisioning metadata so widgets stay synced after SideStore re-signing.")
-                        .font(.caption2)
-                        .foregroundStyle(BuddyTheme.mutedText)
-                }
-            }
-        }
-    }
-
-    // MARK: - Helpers
-
     private func sectionEyebrow(_ title: String) -> some View {
         Text(title)
             .font(.system(size: 10.5, weight: .bold))
@@ -579,9 +811,7 @@ struct SettingsView: View {
 
     private func statusDotPill(text: String, color: Color) -> some View {
         HStack(spacing: 5) {
-            Circle()
-                .fill(color)
-                .frame(width: 6.5, height: 6.5)
+            Circle().fill(color).frame(width: 6.5, height: 6.5)
             Text(text)
                 .font(.system(size: 11.5, weight: .semibold))
                 .foregroundStyle(color)
@@ -603,31 +833,17 @@ struct SettingsView: View {
         }
     }
 
-    private func shortAppearanceLabel(_ option: BuddyAppearance) -> String {
-        switch option {
-        case .dark: return "OLED Dark"
-        case .light: return "Light"
-        case .system: return "System"
-        }
-    }
-
     @ViewBuilder
     private func runtimeBadge(isLoaded: Bool, isLoading: Bool, label: String?) -> some View {
         if isLoading {
             HStack(spacing: 6) {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(BuddyTheme.inkPrimary)
-                Text("Loading…")
-                    .font(.caption)
-                    .foregroundStyle(BuddyTheme.mutedText)
+                ProgressView().controlSize(.small).tint(BuddyTheme.inkPrimary)
+                Text("Loading…").font(.caption).foregroundStyle(BuddyTheme.mutedText)
             }
         } else if isLoaded {
             statusDotPill(text: label ?? "Loaded", color: BuddyTheme.emeraldLive)
         } else {
-            Text("Standby")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(BuddyTheme.mutedText)
+            Text("Standby").font(.caption.weight(.medium)).foregroundStyle(BuddyTheme.mutedText)
         }
     }
 
@@ -636,9 +852,7 @@ struct SettingsView: View {
         case .success(let url):
             let hasAccess = url.startAccessingSecurityScopedResource()
             defer {
-                if hasAccess {
-                    url.stopAccessingSecurityScopedResource()
-                }
+                if hasAccess { url.stopAccessingSecurityScopedResource() }
             }
             do {
                 llmService.unload()
@@ -664,5 +878,83 @@ struct SettingsView: View {
             return String(format: "~%.2f GB", Double(mb) / 1000.0)
         }
         return "~\(mb) MB"
+    }
+}
+
+// MARK: - Sub-Page: SideStore & Diagnostics
+
+private struct DiagnosticsSettingsView: View {
+    let store: WorkoutStore
+    @State private var widgetRefreshNote: String?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                NativeCard(padding: 15, cornerRadius: 14) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("SIDESTORE & WIDGET SYNC")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .tracking(0.6)
+                            .foregroundStyle(BuddyTheme.mutedText)
+
+                        keyValueRow(title: "App Group", value: AppGroupResolver.diagnosticSummary)
+                        Divider().overlay(BuddyTheme.hairlineBorder)
+                        keyValueRow(title: "Bundle ID", value: Bundle.main.bundleIdentifier ?? "com.yuvaraja.buddy")
+                        Divider().overlay(BuddyTheme.hairlineBorder)
+                        keyValueRow(title: "Active App IDs", value: "2 (App + Widgets)")
+
+                        Button {
+                            BuddyHaptics.success()
+                            WidgetRefreshHelper.sync(store: store)
+                            widgetRefreshNote = "Widgets refreshed at \(Date().formatted(date: .omitted, time: .standard))"
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 12.5, weight: .bold))
+                                Text("Refresh Widgets Now")
+                                    .font(.system(size: 13.5, weight: .bold))
+                            }
+                            .foregroundStyle(BuddyTheme.inkInverse)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(Capsule().fill(BuddyTheme.inkPrimary))
+                        }
+                        .buttonStyle(.plain)
+
+                        if let widgetRefreshNote {
+                            Text(widgetRefreshNote)
+                                .font(.caption)
+                                .foregroundStyle(BuddyTheme.emeraldLive)
+                        }
+
+                        Text("App Groups resolve dynamically from embedded provisioning metadata so widgets stay synced after SideStore re-signing.")
+                            .font(.caption)
+                            .foregroundStyle(BuddyTheme.mutedText)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 28)
+        }
+        .background(BuddyTheme.canvasBackground.ignoresSafeArea())
+        .navigationTitle("SideStore & Diagnostics")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
+    }
+
+    private func keyValueRow(title: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(title)
+                .font(.system(size: 13.5, weight: .medium))
+                .foregroundStyle(Color.primary)
+            Spacer()
+            Text(value)
+                .font(.system(size: 12.5, weight: .medium))
+                .monospacedDigit()
+                .foregroundStyle(BuddyTheme.mutedText)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
     }
 }
