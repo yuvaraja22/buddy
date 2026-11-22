@@ -484,6 +484,41 @@ final class WorkoutStoreAndStatsTests: XCTestCase {
         XCTAssertEqual(store.activeSession?.sortedEntries.first?.sortedSets.first?.tag, .warmup)
     }
 
+    func testRapidConsecutiveSetLogsMaintainMonotonicTimestamps() throws {
+        let store = try makeInMemoryStore()
+
+        // Log 5 sets manually (pushes timestamps out by +4ms) then immediately log 5 sets via voice intent.
+        store.addManualExercise(
+            name: "Bench Press",
+            sets: 5,
+            reps: 8,
+            weightKg: 80,
+            durationSeconds: nil
+        )
+        _ = store.apply(RuleBasedWorkoutParser.parse(
+            "lat pulldown 5 sets 10 reps 60 kg",
+            context: ActiveSessionPromptContext(preferredUnit: .kg, isSessionActive: true)
+        ))
+
+        guard let session = store.activeSession,
+              let bench = session.sortedEntries.first(where: { $0.canonicalName == "Bench Press" }),
+              let pulldown = session.sortedEntries.first(where: { $0.canonicalName == "Lat Pulldown" }) else {
+            return XCTFail("Expected both Bench Press and Lat Pulldown entries")
+        }
+
+        let benchLastBefore = try XCTUnwrap(bench.sortedSets.last?.loggedAt)
+        let pulldownFirst = try XCTUnwrap(pulldown.sortedSets.first?.loggedAt)
+        let pulldownLast = try XCTUnwrap(pulldown.sortedSets.last?.loggedAt)
+        XCTAssertGreaterThan(pulldownFirst, benchLastBefore)
+        XCTAssertGreaterThan(pulldownLast, pulldownFirst)
+        XCTAssertEqual(session.recentlyActiveEntries.first?.canonicalName, "Lat Pulldown")
+
+        // Immediately add a 6th set back to Bench Press (supersetting) and verify it strictly outranks Pulldown set 5.
+        let benchSet6 = store.addSet(to: bench, reps: 6, weightKg: 85)
+        XCTAssertGreaterThan(benchSet6.loggedAt, pulldownLast)
+        XCTAssertEqual(store.activeSession?.recentlyActiveEntries.first?.canonicalName, "Bench Press")
+    }
+
     // MARK: - Fixture Helper
 
     private func makeSession(
