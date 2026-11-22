@@ -1,0 +1,55 @@
+{
+  "name": "Buddy",
+  "identifier": "com.yuvaraja.buddy.source",
+  "subtitle": "Offline voice workout tracker & local AI gym coach",
+  "description": "Log sets hands-free in the gym with 100% on-device WhisperKit transcription and Qwen2.5-1.5B workout parsing & coaching. Includes Home Screen widgets, Lock Screen quick log, and Dynamic Island Live Activities.",
+  "iconURL": "https://raw.githubusercontent.com/yuvaraja22/buddy/main/docs/icon.png",
+  "website": "https://github.com/yuvaraja22/buddy",
+  "tintColor": "#0A66FF",
+  "apps": [
+    {
+      "name": "Buddy",
+      "bundleIdentifier": "com.yuvaraja.buddy",
+      "developerName": "Yuvaraja",
+      "subtitle": "Offline voice-first gym log & AI coach",
+      "localizedDescription": "Buddy is an iPhone-native, fully offline workout logger built for fast hands-free set tracking between sets.\n\n• 1-tap voice logging from the app, Home Screen, Lock Screen, or Dynamic Island\n• On-device WhisperKit speech recognition + Qwen2.5-1.5B intent parser (plus instant zero-latency rule-based parsing)\n• Automatic multi-set expansion, undo, and quick inline editing\n• Consistency streaks, 7-day volume charts, heatmaps, and per-exercise progression trends\n• Local AI Gym Coach grounded in your workout history\n• Dynamic SideStore App Group resolution so widgets stay synced after free Apple ID re-signing",
+      "iconURL": "https://raw.githubusercontent.com/yuvaraja22/buddy/main/docs/icon.png",
+      "tintColor": "#0A66FF",
+      "category": "health-and-fitness",
+      "version": "1.0.0",
+      "versionDate": "2026-01-01T00:00:00Z",
+      "versionDescription": "Initial release with offline WhisperKit voice logging, Qwen2.5-1.5B intent parsing and coaching, Home & Lock Screen widgets, and Dynamic Island Live Activities.",
+      "downloadURL": "https://github.com/yuvaraja22/buddy/releases/download/v1.0.0/Buddy.ipa",
+      "size": 7839073,
+      "versions": [
+        {
+          "version": "1.0.0",
+          "date": "2026-01-01T00:00:00Z",
+          "localizedDescription": "Initial release with offline WhisperKit voice logging, Qwen2.5-1.5B intent parsing and coaching, Home & Lock Screen widgets, and Dynamic Island Live Activities.",
+          "downloadURL": "https://github.com/yuvaraja22/buddy/releases/download/v1.0.0/Buddy.ipa",
+          "size": 7839073,
+          "minOSVersion": "17.0"
+        }
+      ],
+      "appPermissions": {
+        "entitlements": [
+          "com.apple.security.application-groups"
+        ],
+        "privacy": {
+          "NSMicrophoneUsageDescription": "Buddy uses your microphone offline in the gym to transcribe and log your workout sets locally. Audio never leaves your iPhone."
+        }
+      }
+    }
+  ],
+  "news": [
+    {
+      "title": "Welcome to Buddy 1.0",
+      "identifier": "buddy-release-1-0-0",
+      "caption": "Offline voice workout logging with WhisperKit, Qwen2.5-1.5B, Widgets, and Dynamic Island Live Activities.",
+      "date": "2026-01-01T00:00:00Z",
+      "tintColor": "#0A66FF",
+      "appID": "com.yuvaraja.buddy",
+      "notify": false
+    }
+  ]
+}

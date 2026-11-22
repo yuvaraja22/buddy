@@ -1,0 +1,10 @@
+# Xcode & Build Artifacts
+Buddy.xcodeproj/
+build/
+DerivedData/
+*.ipa
+*.xcarchive
+*.xcuserstate
+*.DS_Store
+.swiftpm/
+xcuserdata/
