@@ -1014,7 +1014,7 @@ public enum RuleBasedWorkoutParser {
 
         // Hours
         let hourMatches = allMatches(
-            pattern: #"(?:(?:for)\s+)?(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b"#,
+            pattern: #"(?:\bfor\s+)?(?<![a-z0-9])(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b"#,
             in: working
         )
         for m in hourMatches.reversed() {
@@ -1028,7 +1028,7 @@ public enum RuleBasedWorkoutParser {
 
         // "1 minute 30" (implicit seconds immediately following minutes)
         let minImplicitSecMatches = allMatches(
-            pattern: #"(?:(?:for)\s+)?(\d+)\s*(?:minutes?|mins?)\s+(?:and\s+)?(\d{1,2})\b(?!\s*(?:kg|kgs|kilos?|kilograms?|lbs?|pounds?|reps?|sets?|x|by|seconds?|secs?|minutes?|mins?))"#,
+            pattern: #"(?:\bfor\s+)?(?<![a-z0-9])(\d+)\s*(?:minutes?|mins?)\s+(?:and\s+)?(\d{1,2})\b(?!\s*(?:kg|kgs|kilos?|kilograms?|lbs?|pounds?|reps?|sets?|x|by|seconds?|secs?|minutes?|mins?))"#,
             in: working
         )
         for m in minImplicitSecMatches.reversed() {
@@ -1043,7 +1043,7 @@ public enum RuleBasedWorkoutParser {
 
         // Minutes
         let minMatches = allMatches(
-            pattern: #"(?:(?:for)\s+)?(\d+(?:\.\d+)?)\s*(?:minutes?|mins?)\b"#,
+            pattern: #"(?:\bfor\s+)?(?<![a-z0-9])(\d+(?:\.\d+)?)\s*(?:minutes?|mins?)\b"#,
             in: working
         )
         for m in minMatches.reversed() {
@@ -1057,7 +1057,7 @@ public enum RuleBasedWorkoutParser {
 
         // Seconds
         let secMatches = allMatches(
-            pattern: #"(?:(?:for|and)\s+)?(\d+(?:\.\d+)?)\s*(?:seconds?|secs?)\b"#,
+            pattern: #"(?:\b(?:for|and)\s+)?(?<![a-z0-9])(\d+(?:\.\d+)?)\s*(?:seconds?|secs?)\b"#,
             in: working
         )
         for m in secMatches.reversed() {
@@ -1075,7 +1075,7 @@ public enum RuleBasedWorkoutParser {
     private static func extractWeight(
         from input: String
     ) -> (value: Double?, unit: WeightUnit?, remaining: String) {
-        let pattern = #"(?:(?:at|@|with|for)\s+)?(?<![a-z0-9])(\d+(?:\.\d+)?)\s*(kg|kgs|kilos?|kilograms?|lbs?|pounds?)\b"#
+        let pattern = #"(?:(?:\b(?:at|with|for)|@)\s+)?(?<![a-z0-9])(\d+(?:\.\d+)?)\s*(kg|kgs|kilos?|kilograms?|lbs?|pounds?)\b"#
         guard let m = firstMatch(pattern: pattern, in: input),
               let numStr = captureGroup(1, in: m, text: input),
               let unitStr = captureGroup(2, in: m, text: input),
