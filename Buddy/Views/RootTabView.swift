@@ -10,6 +10,7 @@ struct RootTabView: View {
     let store: WorkoutStore
     let pipeline: VoicePipelineCoordinator
     let modelManager: ModelManager
+    let appleSpeechService: AppleSpeechService
     let whisperService: WhisperTranscriptionService
     let llmService: LocalLLMService
 
@@ -25,6 +26,7 @@ struct RootTabView: View {
                 store: store,
                 pipeline: pipeline,
                 modelManager: modelManager,
+                appleSpeechService: appleSpeechService,
                 whisperService: whisperService,
                 llmService: llmService,
                 dismissSheetsToken: dismissWorkoutSheetsToken
@@ -63,9 +65,12 @@ struct RootTabView: View {
             }
         }
         .sheet(isPresented: $showModelSetup) {
-            ModelSetupSheet(modelManager: modelManager)
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
+            ModelSetupSheet(
+                modelManager: modelManager,
+                appleSpeechService: appleSpeechService
+            )
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
         }
     }
 

@@ -145,9 +145,18 @@ struct VoiceRecordDock: View {
             }
 
         case .recording(let isHoldMode):
-            VStack(alignment: .leading, spacing: 6) {
+            let streamingText = pipeline.liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+            VStack(alignment: .leading, spacing: streamingText.isEmpty ? 6 : 4) {
+                if !streamingText.isEmpty {
+                    Text("“\(streamingText)”")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                }
+
                 VoiceWaveformStrip(levels: pipeline.audioLevels, barCount: 28)
-                    .frame(height: 24)
+                    .frame(height: streamingText.isEmpty ? 24 : 16)
 
                 HStack(spacing: 6) {
                     PulsingLiveDot(color: isHoldMode ? BuddyTheme.cobalt : BuddyTheme.destructive, size: 6)
@@ -170,13 +179,13 @@ struct VoiceRecordDock: View {
 
         case .transcribing:
             processingStatusView(
-                stageTitle: "Whisper transcribing…",
+                stageTitle: pipeline.transcribingStageTitle,
                 transcript: pipeline.liveTranscript
             )
 
         case .parsing:
             processingStatusView(
-                stageTitle: "Qwen parsing sets…",
+                stageTitle: pipeline.parsingStageTitle,
                 transcript: pipeline.liveTranscript
             )
         }

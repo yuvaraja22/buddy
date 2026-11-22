@@ -164,6 +164,14 @@ public final class WhisperTranscriptionService {
 
         let paddedSamples = Self.prepareAudioSamplesForWhisper(samples)
 
+        // Bias Whisper's decoder toward common gym exercises, set/rep phrasing, and weight units.
+        // Leading space matches Whisper BPE prompt tokenization conventions; TextDecoder automatically
+        // trims length and filters special tokens when `usePrefillPrompt` is true.
+        let promptTokens: [Int]? = pipe.tokenizer.flatMap { tokenizer in
+            let encoded = tokenizer.encode(text: " " + Self.gymBiasPrompt)
+            return encoded.isEmpty ? nil : encoded
+        }
+
         // Setting windowClipTime = 0.0 prevents WhisperKit's default 1.0s end-padding
         // from skipping single-window decoding on short gym commands (< 1.0s).
         let options = DecodingOptions(
@@ -176,7 +184,8 @@ public final class WhisperTranscriptionService {
             skipSpecialTokens: true,
             withoutTimestamps: true,
             wordTimestamps: false,
-            windowClipTime: 0.0
+            windowClipTime: 0.0,
+            promptTokens: promptTokens
         )
 
         do {
@@ -190,6 +199,10 @@ public final class WhisperTranscriptionService {
             throw WhisperServiceError.transcriptionFailed(error.localizedDescription)
         }
     }
+
+    /// Concise workout vocabulary prompt used to bias WhisperKit decoding toward gym terms.
+    public nonisolated static let gymBiasPrompt: String =
+        "Gym workout sets and reps: leg extension, leg press, squat, Bulgarian split squat, leg curl, Romanian deadlift, hip thrust, calf raise, bench press, incline dumbbell press, cable fly, lat pulldown, barbell row, pull up, shoulder press, lateral raise, bicep curl, tricep pushdown, plank. 3 sets 15 reps, 60 kg, 135 lbs, warmup, drop set, to failure, delete last set, finish workout."
 
     /// Ensures ultra-short clips (0.15s–1.25s) have clean trailing silence so WhisperKit's
     /// mel spectrogram + single-window decoder never drops short spoken commands like "Undo".

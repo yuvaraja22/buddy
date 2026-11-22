@@ -4,6 +4,7 @@ struct ModelSetupSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     let modelManager: ModelManager
+    let appleSpeechService: AppleSpeechService
 
     var body: some View {
         NavigationStack {
@@ -12,18 +13,7 @@ struct ModelSetupSheet: View {
                     heroHeader
 
                     VStack(spacing: 12) {
-                        modelRowCard(
-                            icon: "waveform",
-                            title: WhisperPreset.baseEn.displayName,
-                            subtitle: WhisperPreset.baseEn.subtitle,
-                            sizeText: "~\(WhisperPreset.baseEn.approximateSizeMB) MB",
-                            isDownloaded: modelManager.isDownloaded(.baseEn),
-                            isDownloading: modelManager.isDownloadingWhisper,
-                            progress: modelManager.whisperDownloadProgress,
-                            onDownload: {
-                                Task { await modelManager.downloadWhisperModel(.baseEn) }
-                            }
-                        )
+                        speechCard
 
                         modelRowCard(
                             icon: "sparkles",
@@ -72,6 +62,72 @@ struct ModelSetupSheet: View {
         }
     }
 
+    @ViewBuilder
+    private var speechCard: some View {
+        if modelManager.selectedSpeechEngine == .appleOnDevice {
+            let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
+            NativeCard(padding: 16, cornerRadius: 18) {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .top, spacing: 12) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(availability.isReady ? BuddyTheme.emeraldLive.opacity(0.14) : BuddyTheme.amberStreak.opacity(0.14))
+                                .frame(width: 42, height: 42)
+
+                            Image(systemName: availability.isReady ? "checkmark.circle.fill" : "waveform")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundStyle(availability.isReady ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
+                        }
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text("Apple On-Device Speech")
+                                    .font(.headline)
+                                    .foregroundStyle(.primary)
+
+                                Spacer()
+
+                                Text("0 MB")
+                                    .font(.caption.weight(.semibold))
+                                    .buddyNumeric()
+                                    .foregroundStyle(BuddyTheme.emeraldLive)
+                            }
+
+                            Text("Instant live speech-to-text tuned for 105 gym exercises & your accent. WhisperKit Large v3 Turbo is also available in Settings.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    HStack(spacing: 6) {
+                        Image(systemName: availability.isReady ? "checkmark.seal.fill" : "exclamationmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(availability.isReady ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
+                        Text(availability.statusMessage)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(availability.isReady ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        } else {
+            let preset = modelManager.selectedWhisperPreset
+            modelRowCard(
+                icon: "waveform",
+                title: preset.displayName,
+                subtitle: preset.subtitle,
+                sizeText: "~\(preset.approximateSizeMB) MB",
+                isDownloaded: modelManager.isDownloaded(preset),
+                isDownloading: modelManager.isDownloadingWhisper,
+                progress: modelManager.whisperDownloadProgress,
+                onDownload: {
+                    Task { await modelManager.downloadWhisperModel(preset) }
+                }
+            )
+        }
+    }
+
     private var heroHeader: some View {
         VStack(spacing: 12) {
             ZStack {
@@ -96,7 +152,7 @@ struct ModelSetupSheet: View {
                     .font(.system(size: 26, weight: .bold, design: .rounded))
                     .multilineTextAlignment(.center)
 
-                Text("Download once over Wi-Fi so voice logging and your Gym Coach run completely offline on your iPhone 15 Plus — even in airplane mode.")
+                Text("Voice logging works right away with Apple On-Device Speech. Download Qwen 2.5 once over Wi-Fi for your offline Gym Coach and natural-language parsing.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -207,7 +263,7 @@ struct ModelSetupSheet: View {
                 .foregroundStyle(BuddyTheme.cobalt)
                 .padding(.top, 2)
 
-            Text("Recommended on Wi-Fi. You can switch to lighter models or import your own .gguf file anytime in Settings.")
+            Text("Recommended on Wi-Fi. You can switch between Apple On-Device Speech, WhisperKit Large v3 Turbo, or import your own .gguf anytime in Settings.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -238,6 +294,15 @@ struct ModelSetupSheet: View {
                 .buttonStyle(.plain)
             } else {
                 let isBusy = modelManager.isDownloadingWhisper || modelManager.isDownloadingLLM
+                let downloadLabel: String = {
+                    if isBusy { return "Downloading Offline AI…" }
+                    if modelManager.selectedSpeechEngine == .appleOnDevice {
+                        return "Download Qwen 2.5 Coach (~1.05 GB)"
+                    }
+                    let totalMB = modelManager.selectedWhisperPreset.approximateSizeMB + LLMPreset.qwen25_1_5B.approximateSizeMB
+                    return "Download Offline AI Pack (\(formatSizeMB(totalMB)))"
+                }()
+
                 Button {
                     BuddyHaptics.mediumImpact()
                     Task {
@@ -251,7 +316,7 @@ struct ModelSetupSheet: View {
                         } else {
                             Image(systemName: "arrow.down.circle.fill")
                         }
-                        Text(isBusy ? "Downloading Offline Pack…" : "Download Offline AI Pack (~1.2 GB)")
+                        Text(downloadLabel)
                     }
                     .font(.headline)
                     .foregroundStyle(.white)
@@ -276,7 +341,7 @@ struct ModelSetupSheet: View {
                     BuddyHaptics.lightImpact()
                     dismiss()
                 } label: {
-                    Text("Skip for now (Use Instant Parser)")
+                    Text("Start Now (Voice + Instant Parser Ready)")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity)

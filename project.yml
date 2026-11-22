@@ -57,6 +57,7 @@ targets:
           - UIInterfaceOrientationPortrait
         NSSupportsLiveActivities: true
         NSMicrophoneUsageDescription: "Buddy uses your microphone offline in the gym to transcribe and log your workout sets locally. Audio never leaves your iPhone."
+        NSSpeechRecognitionUsageDescription: "Buddy uses Apple on-device speech recognition offline in the gym to transcribe your spoken workout sets locally. Audio never leaves your iPhone."
         ITSAppUsesNonExemptEncryption: false
         ALTAppGroups:
           - group.com.yuvaraja.buddy
