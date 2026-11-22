@@ -59,7 +59,9 @@ struct RootTabView: View {
         }
         .task {
             modelManager.refreshDownloadState()
-            if !didHandleDeepLinkOnLaunch && !hasSeenOnboarding && !modelManager.isAllDownloaded {
+            appleSpeechService.refreshAuthorizationStatus()
+            let appleSpeechReady = appleSpeechService.isReadyForOfflineVoice(for: modelManager.selectedAppleSpeechLocale)
+            if !didHandleDeepLinkOnLaunch && !hasSeenOnboarding && !modelManager.isAllReady(appleSpeechReady: appleSpeechReady) {
                 hasSeenOnboarding = true
                 showModelSetup = true
             }

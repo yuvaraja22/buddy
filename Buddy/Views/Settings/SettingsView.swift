@@ -4,6 +4,7 @@ import WidgetKit
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
 
     let store: WorkoutStore
     let modelManager: ModelManager
@@ -15,6 +16,7 @@ struct SettingsView: View {
     @State private var importMessage: String?
     @State private var importIsError: Bool = false
     @State private var widgetRefreshNote: String?
+    @State private var sceneRefreshTick: Int = 0
 
     private let whisperPresets: [WhisperPreset] = [
         .largeV3Turbo,
@@ -26,6 +28,7 @@ struct SettingsView: View {
     private let llmPresets: [LLMPreset] = [.qwen25_1_5B, .qwen25_0_5B, .custom]
 
     var body: some View {
+        let _ = sceneRefreshTick
         NavigationStack {
             Form {
                 preferencesSection
@@ -53,6 +56,14 @@ struct SettingsView: View {
             .onAppear {
                 modelManager.refreshDownloadState()
                 appleSpeechService.refreshAuthorizationStatus()
+                sceneRefreshTick &+= 1
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                if newPhase == .active {
+                    modelManager.refreshDownloadState()
+                    appleSpeechService.refreshAuthorizationStatus()
+                    sceneRefreshTick &+= 1
+                }
             }
         }
     }
@@ -374,13 +385,22 @@ struct SettingsView: View {
         Section {
             LabeledContent("Speech Engine") {
                 if modelManager.selectedSpeechEngine == .appleOnDevice {
+                    let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
+                    let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
+                    let badgeColor: Color = (isDenied || !availability.isReady) ? BuddyTheme.amberStreak : BuddyTheme.emeraldLive
+                    let badgeLabel: String = {
+                        if isDenied { return "Permission Needed" }
+                        if !availability.isReady { return "Offline Pack Needed" }
+                        return "Apple On-Device"
+                    }()
+
                     HStack(spacing: 5) {
                         Circle()
-                            .fill(BuddyTheme.emeraldLive)
+                            .fill(badgeColor)
                             .frame(width: 7, height: 7)
-                        Text("Apple On-Device")
+                        Text(badgeLabel)
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(BuddyTheme.emeraldLive)
+                            .foregroundStyle(badgeColor)
                     }
                 } else {
                     runtimeBadge(

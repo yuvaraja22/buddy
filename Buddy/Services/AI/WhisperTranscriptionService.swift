@@ -174,6 +174,7 @@ public final class WhisperTranscriptionService {
 
         // Setting windowClipTime = 0.0 prevents WhisperKit's default 1.0s end-padding
         // from skipping single-window decoding on short gym commands (< 1.0s).
+        // Explicit noSpeechThreshold = 0.6 suppresses hallucinations on breath/clank silence clips.
         let options = DecodingOptions(
             verbose: false,
             task: .transcribe,
@@ -185,7 +186,8 @@ public final class WhisperTranscriptionService {
             withoutTimestamps: true,
             wordTimestamps: false,
             windowClipTime: 0.0,
-            promptTokens: promptTokens
+            promptTokens: promptTokens,
+            noSpeechThreshold: 0.6
         )
 
         do {
@@ -200,9 +202,11 @@ public final class WhisperTranscriptionService {
         }
     }
 
-    /// Concise workout vocabulary prompt used to bias WhisperKit decoding toward gym terms.
+    /// Concise workout vocabulary prompt used to bias WhisperKit decoding toward exercise names
+    /// and units. Intentionally excludes destructive commands (delete/finish workout) so prompt
+    /// continuation hallucinations on noisy clips can never mutate or end an active session.
     public nonisolated static let gymBiasPrompt: String =
-        "Gym workout sets and reps: leg extension, leg press, squat, Bulgarian split squat, leg curl, Romanian deadlift, hip thrust, calf raise, bench press, incline dumbbell press, cable fly, lat pulldown, barbell row, pull up, shoulder press, lateral raise, bicep curl, tricep pushdown, plank. 3 sets 15 reps, 60 kg, 135 lbs, warmup, drop set, to failure, delete last set, finish workout."
+        "Gym workout log: leg extension, leg press, squat, Bulgarian split squat, leg curl, Romanian deadlift, hip thrust, calf raise, bench press, incline dumbbell press, cable fly, lat pulldown, barbell row, pull up, shoulder press, lateral raise, bicep curl, tricep pushdown, plank. 3 sets 15 reps, 60 kg, 135 lbs, warmup, drop set."
 
     /// Ensures ultra-short clips (0.15s–1.25s) have clean trailing silence so WhisperKit's
     /// mel spectrogram + single-window decoder never drops short spoken commands like "Undo".

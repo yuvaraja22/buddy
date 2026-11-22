@@ -2,15 +2,23 @@ import SwiftUI
 
 struct ModelSetupSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
 
     let modelManager: ModelManager
     let appleSpeechService: AppleSpeechService
 
+    @State private var sceneRefreshTick: Int = 0
+
     var body: some View {
+        let _ = sceneRefreshTick
+        let isAppleSpeechReady = appleSpeechService.isReadyForOfflineVoice(for: modelManager.selectedAppleSpeechLocale)
+        let isVoiceReady = modelManager.isVoiceReady(appleSpeechReady: isAppleSpeechReady)
+        let isAllReady = modelManager.isAllReady(appleSpeechReady: isAppleSpeechReady)
+
         NavigationStack {
             ScrollView {
                 VStack(spacing: 20) {
-                    heroHeader
+                    heroHeader(isVoiceReady: isVoiceReady)
 
                     VStack(spacing: 12) {
                         speechCard
@@ -49,7 +57,7 @@ struct ModelSetupSheet: View {
             }
             .background(BuddyTheme.canvasBackground.ignoresSafeArea())
             .safeAreaInset(edge: .bottom) {
-                bottomActionBar
+                bottomActionBar(isVoiceReady: isVoiceReady, isAllReady: isAllReady)
             }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -59,24 +67,42 @@ struct ModelSetupSheet: View {
                     .fontWeight(.medium)
                 }
             }
+            .onAppear {
+                modelManager.refreshDownloadState()
+                appleSpeechService.refreshAuthorizationStatus()
+                sceneRefreshTick &+= 1
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                if newPhase == .active {
+                    modelManager.refreshDownloadState()
+                    appleSpeechService.refreshAuthorizationStatus()
+                    sceneRefreshTick &+= 1
+                }
+            }
         }
     }
 
     @ViewBuilder
     private var speechCard: some View {
         if modelManager.selectedSpeechEngine == .appleOnDevice {
+            let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
             let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
+            let ready = !isDenied && availability.isReady
+            let statusText = isDenied
+                ? "Speech Recognition permission is turned off. Enable it in iOS Settings → Buddy, or switch to WhisperKit in Settings."
+                : availability.statusMessage
+
             NativeCard(padding: 16, cornerRadius: 18) {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(alignment: .top, spacing: 12) {
                         ZStack {
                             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(availability.isReady ? BuddyTheme.emeraldLive.opacity(0.14) : BuddyTheme.amberStreak.opacity(0.14))
+                                .fill(ready ? BuddyTheme.emeraldLive.opacity(0.14) : BuddyTheme.amberStreak.opacity(0.14))
                                 .frame(width: 42, height: 42)
 
-                            Image(systemName: availability.isReady ? "checkmark.circle.fill" : "waveform")
+                            Image(systemName: ready ? "checkmark.circle.fill" : "waveform")
                                 .font(.system(size: 18, weight: .semibold))
-                                .foregroundStyle(availability.isReady ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
+                                .foregroundStyle(ready ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
                         }
 
                         VStack(alignment: .leading, spacing: 3) {
@@ -90,7 +116,7 @@ struct ModelSetupSheet: View {
                                 Text("0 MB")
                                     .font(.caption.weight(.semibold))
                                     .buddyNumeric()
-                                    .foregroundStyle(BuddyTheme.emeraldLive)
+                                    .foregroundStyle(ready ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
                             }
 
                             Text("Instant live speech-to-text tuned for 105 gym exercises & your accent. WhisperKit Large v3 Turbo is also available in Settings.")
@@ -101,12 +127,12 @@ struct ModelSetupSheet: View {
                     }
 
                     HStack(spacing: 6) {
-                        Image(systemName: availability.isReady ? "checkmark.seal.fill" : "exclamationmark.circle.fill")
+                        Image(systemName: ready ? "checkmark.seal.fill" : "exclamationmark.circle.fill")
                             .font(.caption)
-                            .foregroundStyle(availability.isReady ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
-                        Text(availability.statusMessage)
+                            .foregroundStyle(ready ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
+                        Text(statusText)
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(availability.isReady ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
+                            .foregroundStyle(ready ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -128,7 +154,7 @@ struct ModelSetupSheet: View {
         }
     }
 
-    private var heroHeader: some View {
+    private func heroHeader(isVoiceReady: Bool) -> some View {
         VStack(spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
@@ -152,11 +178,15 @@ struct ModelSetupSheet: View {
                     .font(.system(size: 26, weight: .bold, design: .rounded))
                     .multilineTextAlignment(.center)
 
-                Text("Voice logging works right away with Apple On-Device Speech. Download Qwen 2.5 once over Wi-Fi for your offline Gym Coach and natural-language parsing.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
+                Text(
+                    isVoiceReady
+                        ? "Voice logging works right away with Apple On-Device Speech. Download Qwen 2.5 once over Wi-Fi for your offline Gym Coach and natural-language parsing."
+                        : "Set up offline speech in iOS Settings (or switch to WhisperKit in Buddy Settings) and download Qwen 2.5 once over Wi-Fi for your offline Gym Coach."
+                )
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
             }
 
             StatusPill(
@@ -271,9 +301,16 @@ struct ModelSetupSheet: View {
         .padding(.horizontal, 4)
     }
 
-    private var bottomActionBar: some View {
-        VStack(spacing: 10) {
-            if modelManager.isAllDownloaded {
+    private func bottomActionBar(isVoiceReady: Bool, isAllReady: Bool) -> some View {
+        let needsWhisper = (modelManager.selectedSpeechEngine == .whisperKit)
+            && !modelManager.isDownloaded(modelManager.selectedWhisperPreset)
+        let needsLLM = !modelManager.isDownloaded(.qwen25_1_5B)
+        let hasPendingDownloads = needsWhisper || needsLLM
+        let missingMB = (needsWhisper ? modelManager.selectedWhisperPreset.approximateSizeMB : 0)
+            + (needsLLM ? LLMPreset.qwen25_1_5B.approximateSizeMB : 0)
+
+        return VStack(spacing: 10) {
+            if isAllReady {
                 Button {
                     BuddyHaptics.success()
                     dismiss()
@@ -292,15 +329,17 @@ struct ModelSetupSheet: View {
                     )
                 }
                 .buttonStyle(.plain)
-            } else {
+            } else if hasPendingDownloads {
                 let isBusy = modelManager.isDownloadingWhisper || modelManager.isDownloadingLLM
                 let downloadLabel: String = {
                     if isBusy { return "Downloading Offline AI…" }
-                    if modelManager.selectedSpeechEngine == .appleOnDevice {
-                        return "Download Qwen 2.5 Coach (~1.05 GB)"
+                    if needsWhisper && needsLLM {
+                        return "Download Offline AI Pack (\(formatSizeMB(missingMB)))"
                     }
-                    let totalMB = modelManager.selectedWhisperPreset.approximateSizeMB + LLMPreset.qwen25_1_5B.approximateSizeMB
-                    return "Download Offline AI Pack (\(formatSizeMB(totalMB)))"
+                    if needsWhisper {
+                        return "Download \(modelManager.selectedWhisperPreset.displayName) (\(formatSizeMB(missingMB)))"
+                    }
+                    return "Download Qwen 2.5 Coach (\(formatSizeMB(missingMB)))"
                 }()
 
                 Button {
@@ -341,11 +380,35 @@ struct ModelSetupSheet: View {
                     BuddyHaptics.lightImpact()
                     dismiss()
                 } label: {
-                    Text("Start Now (Voice + Instant Parser Ready)")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
+                    Text(
+                        isVoiceReady
+                            ? "Start Now (Voice + Instant Parser Ready)"
+                            : "Skip for now (Use Typed & Manual Logging)"
+                    )
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                }
+                .buttonStyle(.plain)
+            } else {
+                // Qwen 2.5 is already cached, but Apple On-Device Speech still needs setup in iOS Settings.
+                Button {
+                    BuddyHaptics.lightImpact()
+                    dismiss()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle")
+                        Text("Continue (Typed & Manual Logging)")
+                    }
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 15)
+                    .background(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(BuddyTheme.cobalt)
+                    )
                 }
                 .buttonStyle(.plain)
             }

@@ -413,17 +413,30 @@ public final class ModelManager {
     public var activeLLMFileURL: URL?
     public var totalStorageUsedDescription: String = "0 MB"
 
-    public var isVoiceReady: Bool {
+    /// Evaluates whether voice logging is actually usable given Apple On-Device Speech permission
+    /// and offline dictation availability (or local WhisperKit files when WhisperKit is selected).
+    public func isVoiceReady(appleSpeechReady: Bool) -> Bool {
         switch selectedSpeechEngine {
         case .appleOnDevice:
-            return true
+            return appleSpeechReady
         case .whisperKit:
             return isWhisperDownloaded
         }
     }
 
+    /// Returns `true` only when both the active voice engine and the local LLM are ready offline.
+    public func isAllReady(appleSpeechReady: Bool) -> Bool {
+        isVoiceReady(appleSpeechReady: appleSpeechReady) && isLLMDownloaded
+    }
+
+    /// Returns whether all required *downloadable* model files for the selected engine are on disk.
     public var isAllDownloaded: Bool {
-        isVoiceReady && isLLMDownloaded
+        switch selectedSpeechEngine {
+        case .appleOnDevice:
+            return isLLMDownloaded
+        case .whisperKit:
+            return isWhisperDownloaded && isLLMDownloaded
+        }
     }
 
     private let defaults: UserDefaults

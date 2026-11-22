@@ -189,26 +189,31 @@ public final class VoicePipelineCoordinator {
         startRecordingTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
+                let onSessionActivated: (@MainActor () throws -> Void)?
                 if engine == .appleOnDevice {
                     let localeOption = self.modelManager.selectedAppleSpeechLocale
                     let recentExercises = self.activeStoreForAutoStop?.activeSession?.sortedEntries.map(\.canonicalName) ?? []
                     let contextualStrings = AppleSpeechService.buildGymContextualStrings(recentExercises: recentExercises)
 
-                    try self.startAppleSpeechSession(
-                        token: token,
-                        localeOption: localeOption,
-                        contextualStrings: contextualStrings
-                    )
-
                     self.audioRecorder.setAudioBufferHandler { [weak speech = self.appleSpeechService] buffer in
                         speech?.appendBuffer(buffer)
                     }
 
-                    // If AirPods renegotiate sample rate (48 kHz -> 16 kHz HFP) in the first ~250ms,
-                    // start a fresh SFSpeechAudioBufferRecognitionRequest matching the updated format.
+                    // AudioRecorderService removes the old bus-0 tap and stops the engine BEFORE
+                    // invoking onEngineRestarted, so starting a fresh SFSpeechAudioBufferRecognitionRequest
+                    // here safely adopts the new HFP hardware format and surfaces any recognizer error.
                     self.audioRecorder.onEngineRestarted = { [weak self] in
                         guard let self, self.operationToken == token else { return }
-                        try? self.startAppleSpeechSession(
+                        try self.startAppleSpeechSession(
+                            token: token,
+                            localeOption: localeOption,
+                            contextualStrings: contextualStrings
+                        )
+                    }
+
+                    onSessionActivated = { [weak self] in
+                        guard let self, self.operationToken == token else { return }
+                        try self.startAppleSpeechSession(
                             token: token,
                             localeOption: localeOption,
                             contextualStrings: contextualStrings
@@ -217,9 +222,13 @@ public final class VoicePipelineCoordinator {
                 } else {
                     self.audioRecorder.setAudioBufferHandler(nil)
                     self.audioRecorder.onEngineRestarted = nil
+                    onSessionActivated = nil
                 }
 
-                try await self.audioRecorder.startRecording()
+                try await self.audioRecorder.startRecording(
+                    captureRawSamples: engine == .whisperKit,
+                    onSessionActivated: onSessionActivated
+                )
 
                 if self.operationToken != token || Task.isCancelled {
                     self.audioRecorder.setAudioBufferHandler(nil)
@@ -474,6 +483,8 @@ public final class VoicePipelineCoordinator {
             let partialFallback = liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
             if !partialFallback.isEmpty {
                 await parseAndApplyTranscript(partialFallback, token: token, into: store)
+            } else if UIApplication.shared.applicationState == .background {
+                phase = .idle
             } else {
                 phase = .error(error.localizedDescription)
             }

@@ -46,8 +46,9 @@ public struct AppleSpeechAvailability: Equatable, Sendable {
     }
 }
 
-/// Thread-safe holder for the active `SFSpeechAudioBufferRecognitionRequest` so CoreAudio's
-/// realtime tap can append buffers safely without racing against `endAudio()` on MainActor.
+/// Thread-safe holder for the active `SFSpeechAudioBufferRecognitionRequest`.
+/// Keeps the critical section tiny (pointer swap only) and invokes `endAudio()` strictly
+/// outside the lock to prevent priority inversion / XPC contention on CoreAudio's realtime IO thread.
 private final class LockedSpeechRequestBox: @unchecked Sendable {
     private let lock = NSLock()
     private var request: SFSpeechAudioBufferRecognitionRequest?
@@ -58,19 +59,27 @@ private final class LockedSpeechRequestBox: @unchecked Sendable {
         lock.unlock()
     }
 
+    func swap(_ newRequest: SFSpeechAudioBufferRecognitionRequest?) -> SFSpeechAudioBufferRecognitionRequest? {
+        lock.lock()
+        let previous = request
+        request = newRequest
+        lock.unlock()
+        return previous
+    }
+
     func append(_ buffer: AVAudioPCMBuffer) {
         lock.lock()
         let current = request
-        current?.append(buffer)
         lock.unlock()
+        current?.append(buffer)
     }
 
     func endAudioAndClear() {
         lock.lock()
         let current = request
         request = nil
-        current?.endAudio()
         lock.unlock()
+        current?.endAudio()
     }
 
     func clearWithoutEnding() {
@@ -83,6 +92,8 @@ private final class LockedSpeechRequestBox: @unchecked Sendable {
 @Observable
 @MainActor
 public final class AppleSpeechService {
+    private static let maxMidRecordingRollovers: Int = 12
+
     public var authorizationStatus: SFSpeechRecognizerAuthorizationStatus = SFSpeechRecognizer.authorizationStatus()
     public var isListening: Bool = false
 
@@ -90,8 +101,15 @@ public final class AppleSpeechService {
     @ObservationIgnored private var activeRecognizer: SFSpeechRecognizer?
     @ObservationIgnored private var activeTask: SFSpeechRecognitionTask?
     @ObservationIgnored private var activeSessionID: UUID?
-    @ObservationIgnored private var latestNonEmptyTranscript: String = ""
+    @ObservationIgnored private var activeLocaleOption: AppleSpeechLocaleOption = .auto
+    @ObservationIgnored private var activeContextualStrings: [String] = []
+    @ObservationIgnored private var activePartialHandler: (@MainActor (String) -> Void)?
+    @ObservationIgnored private var committedSegments: [String] = []
+    @ObservationIgnored private var currentSegmentTranscript: String = ""
+    @ObservationIgnored private var isStopping: Bool = false
     @ObservationIgnored private var didReceiveFinalResult: Bool = false
+    @ObservationIgnored private var rolloverCount: Int = 0
+    @ObservationIgnored private var pendingFatalError: AppleSpeechError?
     @ObservationIgnored private var finishContinuation: CheckedContinuation<String, Error>?
     @ObservationIgnored private var finishTimeoutTask: Task<Void, Never>?
 
@@ -123,6 +141,16 @@ public final class AppleSpeechService {
         @unknown default:
             return false
         }
+    }
+
+    /// Returns `true` only when Speech Recognition is not denied/restricted AND an on-device
+    /// offline recognizer is installed for the chosen locale option.
+    public func isReadyForOfflineVoice(for option: AppleSpeechLocaleOption) -> Bool {
+        let status = authorizationStatus
+        guard status != .denied && status != .restricted else {
+            return false
+        }
+        return checkAvailability(for: option).isReady
     }
 
     /// Evaluates whether Apple's 100% offline on-device recognizer is available for the chosen
@@ -192,63 +220,19 @@ public final class AppleSpeechService {
             throw AppleSpeechError.recognizerUnavailable
         }
 
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.requiresOnDeviceRecognition = true
-        request.shouldReportPartialResults = true
-        request.taskHint = .dictation
-        request.addsPunctuation = false
-        request.contextualStrings = contextualStrings
-
-        let sessionID = UUID()
-        activeSessionID = sessionID
         activeRecognizer = recognizer
-        latestNonEmptyTranscript = ""
+        activeLocaleOption = localeOption
+        activeContextualStrings = contextualStrings
+        activePartialHandler = onPartialTranscript
+        committedSegments = []
+        currentSegmentTranscript = ""
+        isStopping = false
         didReceiveFinalResult = false
+        rolloverCount = 0
+        pendingFatalError = nil
         isListening = true
-        activeRequestBox.set(request)
 
-        activeTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            let formatted = result?.bestTranscription.formattedString
-            let isFinal = result?.isFinal ?? false
-            let errorInfo: (domain: String, code: Int, description: String)? = error.map {
-                let nsError = $0 as NSError
-                return (nsError.domain, nsError.code, $0.localizedDescription)
-            }
-
-            Task { @MainActor [weak self] in
-                guard let self, self.activeSessionID == sessionID else { return }
-
-                if let formatted {
-                    let trimmed = formatted.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !trimmed.isEmpty {
-                        self.latestNonEmptyTranscript = trimmed
-                        onPartialTranscript(trimmed)
-                    }
-                }
-
-                if isFinal {
-                    self.didReceiveFinalResult = true
-                    self.isListening = false
-                    let best = self.latestNonEmptyTranscript
-                    self.resolvePendingFinish(with: .success(best))
-                    return
-                }
-
-                if let errorInfo {
-                    self.isListening = false
-                    // iOS Speech frequently reports benign stop/cancellation/no-speech errors
-                    // (kAFAssistantErrorDomain 203, 209, 216, 1110) even after delivering a valid
-                    // partial transcript. Never throw away words we already captured!
-                    if !self.latestNonEmptyTranscript.isEmpty {
-                        self.resolvePendingFinish(with: .success(self.latestNonEmptyTranscript))
-                    } else if Self.isBenignNoSpeechOrCancelError(domain: errorInfo.domain, code: errorInfo.code) {
-                        self.resolvePendingFinish(with: .success(""))
-                    } else {
-                        self.resolvePendingFinish(with: .failure(AppleSpeechError.recognitionFailed(errorInfo.description)))
-                    }
-                }
-            }
-        }
+        beginRecognitionTask(on: recognizer)
     }
 
     /// Thread-safe audio buffer entry point invoked from CoreAudio's realtime tap.
@@ -257,26 +241,40 @@ public final class AppleSpeechService {
     }
 
     /// Signals end-of-audio and awaits Apple's final transcription pass (up to `timeoutSeconds`),
-    /// always falling back cleanly to the latest captured live partial transcript on timeout.
+    /// always returning immediately if the task already terminated and preserving all committed
+    /// segments captured before any mid-recording pause or rollover.
     public func finishStreaming(timeoutSeconds: TimeInterval = 1.2) async throws -> String {
+        isStopping = true
         activeRequestBox.endAudioAndClear()
         isListening = false
 
         if didReceiveFinalResult || activeTask == nil {
-            let finalText = latestNonEmptyTranscript
+            let combined = currentCombinedTranscript()
+            let fatalError = pendingFatalError
             cleanupTaskState()
-            return finalText
+            if !combined.isEmpty {
+                return combined
+            }
+            if let fatalError {
+                throw fatalError
+            }
+            return ""
         }
 
         let currentSessionID = activeSessionID
         let transcript = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+            // Defensive guard: never overwrite or leak a prior pending CheckedContinuation.
+            if let prior = self.finishContinuation {
+                self.finishContinuation = nil
+                prior.resume(returning: self.currentCombinedTranscript())
+            }
             self.finishContinuation = continuation
             self.finishTimeoutTask?.cancel()
             self.finishTimeoutTask = Task { @MainActor [weak self] in
                 let delayNs = UInt64(max(0.2, timeoutSeconds) * 1_000_000_000)
                 try? await Task.sleep(nanoseconds: delayNs)
                 guard let self, self.activeSessionID == currentSessionID else { return }
-                let best = self.latestNonEmptyTranscript
+                let best = self.currentCombinedTranscript()
                 self.resolvePendingFinish(with: .success(best))
             }
         }
@@ -287,6 +285,7 @@ public final class AppleSpeechService {
 
     public func cancelStreaming() {
         activeSessionID = nil
+        isStopping = false
         activeRequestBox.clearWithoutEnding()
         finishTimeoutTask?.cancel()
         finishTimeoutTask = nil
@@ -299,9 +298,67 @@ public final class AppleSpeechService {
         activeTask?.cancel()
         activeTask = nil
         activeRecognizer = nil
-        latestNonEmptyTranscript = ""
+        activePartialHandler = nil
+        committedSegments = []
+        currentSegmentTranscript = ""
         didReceiveFinalResult = false
+        rolloverCount = 0
+        pendingFatalError = nil
         isListening = false
+    }
+
+    /// Merges committed pre-pause/pre-rollover speech segments with the active segment cleanly.
+    public nonisolated static func mergeTranscriptSegments(
+        committed: [String],
+        current: String
+    ) -> String {
+        var parts: [String] = []
+        for segment in committed {
+            let trimmed = segment.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                parts.append(trimmed)
+            }
+        }
+        let currentTrimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !currentTrimmed.isEmpty {
+            if let last = parts.last, last.caseInsensitiveCompare(currentTrimmed) == .orderedSame {
+                // Skip exact duplicate segment
+            } else {
+                parts.append(currentTrimmed)
+            }
+        }
+        return parts.joined(separator: " ")
+    }
+
+    /// Detects when Apple's on-device recognizer resets `bestTranscription.formattedString` to a
+    /// brand-new post-pause utterance (dropping pre-pause words) while ignoring normal in-place
+    /// word refinements like `"dead lift 100 kg"` -> `"deadlift 100 kg"`.
+    public nonisolated static func didResetAfterPause(
+        previous: String,
+        updated: String
+    ) -> Bool {
+        let prevTrimmed = previous.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newTrimmed = updated.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prevTrimmed.isEmpty, !newTrimmed.isEmpty else { return false }
+
+        let prevWords = prevTrimmed.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
+        let newWords = newTrimmed.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
+
+        // Require at least 2 previously captured words and a clear shrinkage or disjoint restart.
+        guard prevWords.count >= 2, newWords.count < prevWords.count else { return false }
+
+        let prevLower = prevTrimmed.lowercased()
+        let newLower = newTrimmed.lowercased()
+        if prevLower.hasPrefix(newLower) || newLower.hasPrefix(prevLower) || prevLower.contains(newLower) {
+            return false
+        }
+
+        if let prevFirst = prevWords.first, let newFirst = newWords.first,
+           (prevFirst.hasPrefix(newFirst) || newFirst.hasPrefix(prevFirst)) {
+            return false
+        }
+
+        return Set(prevWords).isDisjoint(with: Set(newWords))
     }
 
     /// Builds a prioritized list of gym phrases and canonical exercise names to bias Apple's
@@ -346,6 +403,118 @@ public final class AppleSpeechService {
     }
 
     // MARK: - Private Helpers
+
+    private func beginRecognitionTask(on recognizer: SFSpeechRecognizer) {
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.requiresOnDeviceRecognition = true
+        request.shouldReportPartialResults = true
+        request.taskHint = .dictation
+        request.addsPunctuation = false
+        request.contextualStrings = activeContextualStrings
+
+        let sessionID = UUID()
+        activeSessionID = sessionID
+        didReceiveFinalResult = false
+
+        // Swap the active request pointer atomically and end any previous request outside the lock.
+        let previousRequest = activeRequestBox.swap(request)
+        previousRequest?.endAudio()
+
+        activeTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
+            let formatted = result?.bestTranscription.formattedString
+            let isFinal = result?.isFinal ?? false
+            let errorInfo: (domain: String, code: Int, description: String)? = error.map {
+                let nsError = $0 as NSError
+                return (nsError.domain, nsError.code, $0.localizedDescription)
+            }
+
+            Task { @MainActor [weak self] in
+                guard let self, self.activeSessionID == sessionID else { return }
+
+                if let formatted {
+                    let trimmed = formatted.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        if Self.didResetAfterPause(previous: self.currentSegmentTranscript, updated: trimmed) {
+                            self.committedSegments.append(self.currentSegmentTranscript)
+                        }
+                        self.currentSegmentTranscript = trimmed
+                        self.activePartialHandler?(self.currentCombinedTranscript())
+                    }
+                }
+
+                if isFinal {
+                    self.handleTaskTerminated(errorInfo: nil)
+                    return
+                }
+
+                if let errorInfo {
+                    self.handleTaskTerminated(errorInfo: errorInfo)
+                }
+            }
+        }
+    }
+
+    private func handleTaskTerminated(errorInfo: (domain: String, code: Int, description: String)?) {
+        // Commit any active segment text before releasing this task.
+        let trimmedCurrent = currentSegmentTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedCurrent.isEmpty {
+            committedSegments.append(trimmedCurrent)
+            currentSegmentTranscript = ""
+        }
+
+        activeTask?.cancel()
+        activeTask = nil
+
+        let isBenign = errorInfo.map { Self.isBenignNoSpeechOrCancelError(domain: $0.domain, code: $0.code) } ?? true
+
+        // If the user is STILL actively recording (e.g. paused a few seconds in hands-free mode)
+        // and Apple Speech ended early with `isFinal` or benign `1110`/`203`, transparently roll
+        // over to a fresh recognition request while preserving all already-spoken segments.
+        if !isStopping && finishContinuation == nil {
+            if isBenign,
+               let recognizer = activeRecognizer,
+               recognizer.isAvailable,
+               rolloverCount < Self.maxMidRecordingRollovers {
+                rolloverCount += 1
+                beginRecognitionTask(on: recognizer)
+                return
+            }
+
+            // Non-benign error or rollover cap reached while still recording: mark task finished
+            // so tapping Stop resolves immediately without stalling for 1.2s.
+            didReceiveFinalResult = true
+            isListening = false
+            activeRequestBox.clearWithoutEnding()
+            if let errorInfo, !isBenign {
+                pendingFatalError = AppleSpeechError.recognitionFailed(errorInfo.description)
+            }
+            return
+        }
+
+        // Stopping / finalizing path: mark finished immediately and resolve any awaiting caller.
+        didReceiveFinalResult = true
+        isListening = false
+        let combined = currentCombinedTranscript()
+
+        if !combined.isEmpty {
+            resolvePendingFinish(with: .success(combined))
+        } else if isBenign {
+            resolvePendingFinish(with: .success(""))
+        } else if let errorInfo {
+            let failure = AppleSpeechError.recognitionFailed(errorInfo.description)
+            pendingFatalError = failure
+            resolvePendingFinish(with: .failure(failure))
+        } else {
+            resolvePendingFinish(with: .success(""))
+        }
+    }
+
+    private func currentCombinedTranscript() -> String {
+        Self.mergeTranscriptSegments(
+            committed: committedSegments,
+            current: currentSegmentTranscript
+        )
+    }
 
     private func resolveRecognizer(
         for option: AppleSpeechLocaleOption
@@ -394,12 +563,19 @@ public final class AppleSpeechService {
 
     private func cleanupTaskState() {
         activeSessionID = nil
+        isStopping = false
         finishTimeoutTask?.cancel()
         finishTimeoutTask = nil
         finishContinuation = nil
         activeTask?.cancel()
         activeTask = nil
         activeRecognizer = nil
+        activePartialHandler = nil
+        committedSegments = []
+        currentSegmentTranscript = ""
+        didReceiveFinalResult = false
+        rolloverCount = 0
+        pendingFatalError = nil
         isListening = false
     }
 

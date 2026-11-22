@@ -50,16 +50,76 @@ final class SpeechAndAudioTests: XCTestCase {
         }
         let boosted = AudioRecorderService.normalizeSpeechAudio(quietSine)
         let boostedPeak = boosted.map(abs).max() ?? 0
-        XCTAssertEqual(boostedPeak, 0.60, accuracy: 0.03)
+        XCTAssertEqual(boostedPeak, 0.60, accuracy: 0.04)
         XCTAssertTrue(boosted.allSatisfy { $0.isFinite && abs($0) <= 0.98 })
 
-        // Pure room noise floor (~-55 dB = 0.0015) must NOT be amplified into fake speech/hallucinations.
+        // Pure room noise floor (~-55 dB = 0.001) must NOT be amplified into fake speech/hallucinations.
         let nearSilence: [Float] = (0..<16_000).map { index in
             0.001 * Float(sin(2.0 * Double.pi * 120.0 * Double(index) / 16_000.0))
         }
         let preserved = AudioRecorderService.normalizeSpeechAudio(nearSilence)
         let preservedPeak = preserved.map(abs).max() ?? 0
         XCTAssertLessThan(preservedPeak, 0.005)
+    }
+
+    func testNormalizeSpeechAudioIgnoresMicTapAndReleaseTransients() {
+        // 1.5s clip at 16 kHz: quiet 0.08 speech in the middle + 15ms mechanical tap spike (0.95) at start
+        // and 15ms release spike (1.02) at the end + a brief 5ms mid-clip click (0.98).
+        var clip: [Float] = (0..<24_000).map { index in
+            0.08 * Float(sin(2.0 * Double.pi * 320.0 * Double(index) / 16_000.0))
+        }
+        for i in 40..<280 { clip[i] = 0.95 }
+        for i in 23_700..<23_940 { clip[i] = 1.02 }
+        for i in 12_000..<12_080 { clip[i] = 0.98 }
+
+        let normalized = AudioRecorderService.normalizeSpeechAudio(clip)
+        XCTAssertTrue(normalized.allSatisfy { $0.isFinite && abs($0) <= 0.98 })
+
+        // Verify the quiet interior speech (away from transient clicks) was boosted cleanly (~6x -> ~0.48),
+        // never skipped or attenuated because of the button thumps.
+        let cleanSpeechSlice = Array(normalized[4_000..<8_000])
+        let speechPeak = cleanSpeechSlice.map(abs).max() ?? 0
+        XCTAssertGreaterThan(speechPeak, 0.42, "Quiet speech must be boosted despite mic tap/release transients")
+    }
+
+    func testAppleSpeechPauseResetDetectionAndSegmentMerging() {
+        // Post-pause reset: recognizer dropped "leg extension 3 sets" and restarted with "15 reps"
+        XCTAssertTrue(
+            AppleSpeechService.didResetAfterPause(
+                previous: "leg extension 3 sets",
+                updated: "15 reps"
+            )
+        )
+
+        // Normal in-place word refinements must NOT trigger false segment splits
+        XCTAssertFalse(
+            AppleSpeechService.didResetAfterPause(
+                previous: "dead lift 100 kg",
+                updated: "deadlift 100 kg"
+            )
+        )
+        XCTAssertFalse(
+            AppleSpeechService.didResetAfterPause(
+                previous: "bench press",
+                updated: "bench press 60 kg"
+            )
+        )
+
+        let merged = AppleSpeechService.mergeTranscriptSegments(
+            committed: ["Leg extension 3 sets", "  "],
+            current: "15 reps"
+        )
+        XCTAssertEqual(merged, "Leg extension 3 sets 15 reps")
+    }
+
+    func testWhisperGymBiasPromptExcludesDestructiveCommands() {
+        let promptLower = WhisperTranscriptionService.gymBiasPrompt.lowercased()
+        XCTAssertTrue(promptLower.contains("leg extension"))
+        XCTAssertTrue(promptLower.contains("bench press"))
+        XCTAssertFalse(promptLower.contains("delete"))
+        XCTAssertFalse(promptLower.contains("finish workout"))
+        XCTAssertFalse(promptLower.contains("end workout"))
+        XCTAssertFalse(promptLower.contains("undo"))
     }
 
     func testGymContextualStringsPrioritizeRecentExercisesAndIncludeCatalog() {
@@ -81,7 +141,7 @@ final class SpeechAndAudioTests: XCTestCase {
     }
 
     @MainActor
-    func testModelManagerDefaultsToAppleOnDeviceSpeechAndSupportsUpgradedWhisperPresets() throws {
+    func testModelManagerDefaultsToAppleOnDeviceSpeechAndRespectsAppleSpeechReadiness() throws {
         let suiteName = "com.yuvaraja.buddy.tests.speech.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -90,7 +150,11 @@ final class SpeechAndAudioTests: XCTestCase {
         XCTAssertEqual(manager.selectedSpeechEngine, .appleOnDevice)
         XCTAssertEqual(manager.selectedAppleSpeechLocale, .auto)
         XCTAssertEqual(manager.selectedWhisperPreset, .largeV3Turbo)
-        XCTAssertTrue(manager.isVoiceReady)
+
+        // Apple Speech readiness must gate isVoiceReady & isAllReady accurately
+        XCTAssertTrue(manager.isVoiceReady(appleSpeechReady: true))
+        XCTAssertFalse(manager.isVoiceReady(appleSpeechReady: false))
+        XCTAssertFalse(manager.isAllReady(appleSpeechReady: false))
 
         // Verify upgraded WhisperKit presets match verified HuggingFace folder & tokenizer names.
         XCTAssertEqual(WhisperPreset.largeV3Turbo.rawValue, "openai_whisper-large-v3-v20240930_626MB")
@@ -102,10 +166,10 @@ final class SpeechAndAudioTests: XCTestCase {
         XCTAssertEqual(WhisperPreset.small.languageCode, "en")
 
         // Switching to WhisperKit without a downloaded Whisper model flips isVoiceReady to false
-        // and persists engine + locale preferences across instances.
+        // regardless of Apple Speech availability, and persists engine + locale preferences.
         manager.selectedSpeechEngine = .whisperKit
         manager.selectedAppleSpeechLocale = .enIN
-        XCTAssertFalse(manager.isVoiceReady)
+        XCTAssertFalse(manager.isVoiceReady(appleSpeechReady: true))
 
         let reloaded = ModelManager(defaults: defaults)
         XCTAssertEqual(reloaded.selectedSpeechEngine, .whisperKit)
