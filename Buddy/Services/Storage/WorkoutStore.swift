@@ -337,11 +337,42 @@ public final class WorkoutStore {
         reps: Int?,
         weightKg: Double?,
         durationSeconds: Int?,
-        tag: SetTag = .normal
+        tag: SetTag = .normal,
+        on targetDate: Date? = nil
     ) {
-        let session = activeSession ?? createActiveSession(title: "Workout", sync: false)
+        let calendar = Calendar.current
+        let session: WorkoutSession
+        let timestampNow: Date
+
+        if let targetDate {
+            let anchor = anchorDate(for: targetDate, calendar: calendar)
+            if calendar.isDateInToday(targetDate), let active = activeSession {
+                session = active
+                timestampNow = Date()
+            } else if let existingDaySession = sessions(on: targetDate, calendar: calendar).first {
+                session = existingDaySession
+                session.isManualCheckIn = nil
+                timestampNow = anchor
+            } else {
+                let created = WorkoutSession(
+                    startedAt: anchor,
+                    endedAt: anchor,
+                    title: "Workout",
+                    notes: "",
+                    isActive: false,
+                    isManualCheckIn: false
+                )
+                modelContext.insert(created)
+                session = created
+                timestampNow = anchor
+            }
+        } else {
+            session = activeSession ?? createActiveSession(title: "Workout", sync: false)
+            timestampNow = Date()
+        }
+
         let resolved = ExerciseCatalog.resolve(name)
-        let baseTime = monotonicTimestamp(in: session)
+        let baseTime = monotonicTimestamp(in: session, now: timestampNow)
         let entry: ExerciseEntry
 
         if let existing = session.entries.first(where: {
@@ -387,10 +418,220 @@ public final class WorkoutStore {
             }
         }
 
+        if session.id == activeSession?.id {
+            undoStack.removeAll()
+        }
+        saveContext()
+        reload()
+        syncWidgetsAndLiveActivity()
+    }
+
+    // MARK: - Calendar Check-Ins & Full-Session Recap Persistence
+
+    /// Returns all sessions that count as workouts (or are currently active) on the given calendar day.
+    public func sessions(on date: Date, calendar: Calendar = .current) -> [WorkoutSession] {
+        sessions
+            .filter { ($0.isActive || $0.countsAsWorkout) && calendar.isDate($0.startedAt, inSameDayAs: date) }
+            .sorted { $0.startedAt > $1.startedAt }
+    }
+
+    /// Marks any past or current calendar day as a completed workout check-in (counts toward streaks & goals).
+    @discardableResult
+    public func markDayAsTrained(
+        on date: Date,
+        title: String = "Workout",
+        notes: String = ""
+    ) -> WorkoutSession {
+        let calendar = Calendar.current
+        let anchor = anchorDate(for: date, calendar: calendar)
+        let cleanedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalTitle = cleanedTitle.isEmpty ? "Workout" : cleanedTitle
+        let cleanedNotes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let session = WorkoutSession(
+            startedAt: anchor,
+            endedAt: anchor,
+            title: finalTitle,
+            notes: cleanedNotes,
+            isActive: false,
+            isManualCheckIn: true
+        )
+        modelContext.insert(session)
+        saveContext()
+        reload()
+        syncWidgetsAndLiveActivity()
+        return session
+    }
+
+    /// Persists a reviewed multi-exercise post-gym voice recap (or past-day voice log) cleanly.
+    @discardableResult
+    public func saveReviewedSession(
+        items: [ParsedSetGroupIntent],
+        date: Date,
+        title: String,
+        notes: String = "",
+        finishImmediately: Bool,
+        rawTranscript: String,
+        parserSource: ParserSource
+    ) -> WorkoutSession? {
+        guard !items.isEmpty else { return nil }
+
+        let calendar = Calendar.current
+        let isToday = calendar.isDateInToday(date)
+        let anchor = anchorDate(for: date, calendar: calendar)
+        let cleanedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedNotes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let session: WorkoutSession
+        let timestampNow: Date
+
+        if !finishImmediately && isToday {
+            let active = activeSession ?? createActiveSession(
+                title: cleanedTitle.isEmpty ? "Workout" : cleanedTitle,
+                sync: false
+            )
+            if !cleanedTitle.isEmpty && cleanedTitle != "Workout" && active.title == "Workout" {
+                active.title = cleanedTitle
+            }
+            if !cleanedNotes.isEmpty {
+                active.notes = active.notes.isEmpty ? cleanedNotes : "\(active.notes)\n\(cleanedNotes)"
+            }
+            session = active
+            timestampNow = Date()
+        } else if finishImmediately && isToday, let active = activeSession {
+            if !cleanedTitle.isEmpty && cleanedTitle != "Workout" {
+                active.title = cleanedTitle
+            }
+            if !cleanedNotes.isEmpty {
+                active.notes = active.notes.isEmpty ? cleanedNotes : "\(active.notes)\n\(cleanedNotes)"
+            }
+            session = active
+            timestampNow = Date()
+        } else if let bareCheckIn = sessions(on: date, calendar: calendar).first(where: { $0.isManualCheckInDay && $0.totalSets == 0 }) {
+            bareCheckIn.isManualCheckIn = nil
+            if !cleanedTitle.isEmpty {
+                bareCheckIn.title = cleanedTitle
+            }
+            if !cleanedNotes.isEmpty {
+                bareCheckIn.notes = bareCheckIn.notes.isEmpty ? cleanedNotes : "\(bareCheckIn.notes)\n\(cleanedNotes)"
+            }
+            session = bareCheckIn
+            timestampNow = anchor
+        } else {
+            let created = WorkoutSession(
+                startedAt: anchor,
+                endedAt: anchor,
+                title: cleanedTitle.isEmpty ? "Workout" : cleanedTitle,
+                notes: cleanedNotes,
+                isActive: false,
+                isManualCheckIn: false
+            )
+            modelContext.insert(created)
+            session = created
+            timestampNow = anchor
+        }
+
+        let baseTime = monotonicTimestamp(in: session, now: timestampNow)
+        var sequenceOffset = 0
+        var totalAddedSets = 0
+        var lastEntry: ExerciseEntry?
+        var lastSet: LoggedSet?
+
+        for item in items {
+            let resolved = ExerciseCatalog.resolve(item.exerciseName)
+            let entry: ExerciseEntry
+
+            if let existing = session.entries.first(where: {
+                $0.canonicalName.caseInsensitiveCompare(resolved.canonicalName) == .orderedSame
+            }) {
+                entry = existing
+            } else {
+                let nextOrder = (session.entries.map(\.orderIndex).max() ?? -1) + 1
+                let newEntry = ExerciseEntry(
+                    exerciseName: resolved.displayName,
+                    canonicalName: resolved.canonicalName,
+                    muscleGroup: resolved.muscleGroup,
+                    orderIndex: nextOrder,
+                    createdAt: baseTime.addingTimeInterval(Double(sequenceOffset) * 0.001),
+                    session: nil
+                )
+                modelContext.insert(newEntry)
+                newEntry.session = session
+                if !session.entries.contains(where: { $0.id == newEntry.id }) {
+                    session.entries.append(newEntry)
+                }
+                entry = newEntry
+            }
+
+            let weightKg = item.resolvedWeightKg(defaultUnit: preferredUnit)
+            let existingCount = entry.sets.count
+            let count = max(1, item.setCount)
+
+            for offset in 0..<count {
+                let set = LoggedSet(
+                    setNumber: existingCount + offset + 1,
+                    reps: item.reps,
+                    weightKg: weightKg,
+                    durationSeconds: item.durationSeconds,
+                    tag: item.tag,
+                    notes: item.note,
+                    rawTranscript: rawTranscript,
+                    loggedAt: baseTime.addingTimeInterval(Double(sequenceOffset) * 0.001),
+                    entry: nil
+                )
+                sequenceOffset += 1
+                totalAddedSets += 1
+                modelContext.insert(set)
+                set.entry = entry
+                if !entry.sets.contains(where: { $0.id == set.id }) {
+                    entry.sets.append(set)
+                }
+                lastSet = set
+            }
+            lastEntry = entry
+        }
+
+        if finishImmediately && session.isActive {
+            session.isActive = false
+            session.endedAt = Date()
+            if activeSession?.id == session.id {
+                activeSession = nil
+            }
+            recentlyEndedSession = session
+        }
+
+        let distinctCount = Set(items.map { ExerciseCatalog.resolve($0.exerciseName).canonicalName.lowercased() }).count
+        let bannerTitle: String
+        if finishImmediately {
+            bannerTitle = isToday
+                ? "Saved \(session.derivedTitle)"
+                : "Saved \(date.formatted(.dateTime.month(.abbreviated).day())) Workout"
+        } else {
+            bannerTitle = "Logged \(distinctCount) \(distinctCount == 1 ? "Exercise" : "Exercises")"
+        }
+
+        latestBanner = WorkoutMutationBanner(
+            title: bannerTitle,
+            detail: "\(distinctCount) \(distinctCount == 1 ? "exercise" : "exercises") · \(totalAddedSets) \(totalAddedSets == 1 ? "set" : "sets")",
+            rawTranscript: rawTranscript,
+            parserSource: parserSource,
+            editableSetID: lastSet?.id,
+            editableEntryID: lastEntry?.id,
+            canUndo: false
+        )
+
         undoStack.removeAll()
         saveContext()
         reload()
         syncWidgetsAndLiveActivity()
+        return session
+    }
+
+    private func anchorDate(for date: Date, calendar: Calendar = .current) -> Date {
+        if calendar.isDateInToday(date) {
+            return Date()
+        }
+        return calendar.date(bySettingHour: 12, minute: 0, second: 0, of: date) ?? calendar.startOfDay(for: date)
     }
 
     public func updateSet(

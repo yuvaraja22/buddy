@@ -7,7 +7,7 @@ struct CalendarHeatmapView: View {
 
     var body: some View {
         let weeks = buildWeekColumns()
-        let activeDaysCount = days.filter { $0.setCount > 0 }.count
+        let activeDaysCount = days.filter { $0.intensity > 0 }.count
 
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 6) {

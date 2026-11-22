@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// Pure OLED monochrome set editor matching Buddy's YouTube/Uber card & pill style.
 struct SetEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
 
@@ -45,218 +46,380 @@ struct SetEditorSheet: View {
     }
 
     var body: some View {
-        NavigationStack {
-            Form {
-                weightSection
-                repsAndDurationSection
-                tagSection
-                notesSection
-                deleteSection
-            }
-            .navigationTitle(exerciseNameSnapshot)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        dismiss()
-                    }
+        VStack(spacing: 0) {
+            sheetHeader
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    weightCard
+                    repsAndDurationCard
+                    tagCard
+                    notesCard
+                    deleteButton
                 }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        saveChanges()
-                    }
-                    .fontWeight(.semibold)
-                }
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, 24)
             }
+            .scrollDismissesKeyboard(.interactively)
+
+            bottomSaveBar
         }
+        .background(BuddyTheme.canvasBackground.ignoresSafeArea())
     }
 
-    // MARK: - Sections
+    // MARK: - Header
 
-    private var weightSection: some View {
+    private var sheetHeader: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(exerciseNameSnapshot)
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundStyle(Color.primary)
+                    .lineLimit(1)
+
+                Text("Set #\(setNumberSnapshot)")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(BuddyTheme.mutedText)
+            }
+
+            Spacer()
+
+            Button {
+                BuddyHaptics.lightImpact()
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Color.primary)
+                    .frame(width: 32, height: 32)
+                    .background(Circle().fill(BuddyTheme.elevatedSurface))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Cancel")
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 16)
+        .padding(.bottom, 10)
+    }
+
+    // MARK: - Weight Card
+
+    private var weightCard: some View {
         let deltas: [Double] = store.preferredUnit == .kg ? [-5, -2.5, 2.5, 5] : [-10, -5, 5, 10]
 
-        return Section {
-            HStack {
-                Text("Weight (\(store.preferredUnit.label))")
-                Spacer()
-                TextField("Bodyweight", text: $weightText)
-                    .keyboardType(.decimalPad)
-                    .multilineTextAlignment(.trailing)
-                    .font(.system(size: 18, weight: .bold))
-                    .monospacedDigit()
-                    .foregroundStyle(.primary)
-                    .onChange(of: weightText) { _, newValue in
-                        let cleaned = newValue
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                            .replacingOccurrences(of: ",", with: ".")
-                        if let parsed = Double(cleaned) {
-                            weightValue = max(0, parsed)
-                        } else if cleaned.isEmpty {
-                            weightValue = 0
-                        }
-                    }
-            }
+        return NativeCard(padding: 14, cornerRadius: 14) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("WEIGHT (\(store.preferredUnit.label.uppercased()))")
+                    .font(.system(size: 10.5, weight: .bold))
+                    .tracking(0.6)
+                    .foregroundStyle(BuddyTheme.mutedText)
 
-            HStack(spacing: 8) {
-                ForEach(deltas, id: \.self) { delta in
-                    Button {
-                        adjustWeight(by: delta)
-                    } label: {
-                        Text(delta > 0 ? "+\(Self.formatNumeric(delta))" : Self.formatNumeric(delta))
-                            .font(.system(size: 13, weight: .semibold))
-                            .monospacedDigit()
-                            .foregroundStyle(delta > 0 ? BuddyTheme.inkInverse : Color.primary)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .fill(delta > 0 ? BuddyTheme.inkPrimary : BuddyTheme.chipSurface)
-                            )
+                HStack {
+                    TextField("Bodyweight", text: $weightText)
+                        .keyboardType(.decimalPad)
+                        .font(.system(size: 24, weight: .bold))
+                        .monospacedDigit()
+                        .foregroundStyle(Color.primary)
+                        .onChange(of: weightText) { _, newValue in
+                            let cleaned = newValue
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                                .replacingOccurrences(of: ",", with: ".")
+                            if let parsed = Double(cleaned) {
+                                weightValue = max(0, parsed)
+                            } else if cleaned.isEmpty {
+                                weightValue = 0
+                            }
+                        }
+
+                    if !weightText.isEmpty {
+                        Button {
+                            BuddyHaptics.lightImpact()
+                            weightValue = 0
+                            weightText = ""
+                        } label: {
+                            Text("BW")
+                                .font(.system(size: 11.5, weight: .bold))
+                                .foregroundStyle(BuddyTheme.mutedText)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 5)
+                                .background(Capsule().fill(BuddyTheme.chipSurface))
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(BuddyTheme.elevatedSurface)
+                )
+
+                HStack(spacing: 8) {
+                    ForEach(deltas, id: \.self) { delta in
+                        Button {
+                            adjustWeight(by: delta)
+                        } label: {
+                            Text(delta > 0 ? "+\(Self.formatNumeric(delta))" : Self.formatNumeric(delta))
+                                .font(.system(size: 13.5, weight: .bold))
+                                .monospacedDigit()
+                                .foregroundStyle(delta > 0 ? BuddyTheme.inkInverse : Color.primary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                        .fill(delta > 0 ? BuddyTheme.inkPrimary : BuddyTheme.chipSurface)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
             }
-            .padding(.vertical, 2)
-        } header: {
-            Text("Set \(setNumberSnapshot) · Load")
         }
     }
 
-    private var repsAndDurationSection: some View {
-        Section("Reps & Duration") {
-            Toggle("Track Reps", isOn: $hasReps)
+    // MARK: - Reps & Duration Card
 
-            if hasReps {
-                Stepper(value: $reps, in: 1...300) {
+    private var repsAndDurationCard: some View {
+        NativeCard(padding: 14, cornerRadius: 14) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("REPS & DURATION")
+                    .font(.system(size: 10.5, weight: .bold))
+                    .tracking(0.6)
+                    .foregroundStyle(BuddyTheme.mutedText)
+
+                HStack {
+                    Text("Track Reps")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Color.primary)
+                    Spacer()
+                    Toggle("", isOn: $hasReps)
+                        .labelsHidden()
+                        .tint(BuddyTheme.emeraldLive)
+                }
+
+                if hasReps {
                     HStack {
                         Text("Reps")
+                            .font(.system(size: 14.5, weight: .medium))
+                            .foregroundStyle(BuddyTheme.mutedText)
+
                         Spacer()
-                        Text("\(reps)")
-                            .font(.system(size: 18, weight: .bold))
-                            .monospacedDigit()
-                            .foregroundStyle(.primary)
+
+                        HStack(spacing: 12) {
+                            Button {
+                                if reps > 1 {
+                                    BuddyHaptics.lightImpact()
+                                    reps -= 1
+                                }
+                            } label: {
+                                Image(systemName: "minus")
+                                    .font(.system(size: 13, weight: .bold))
+                                    .foregroundStyle(reps > 1 ? Color.primary : BuddyTheme.mutedText)
+                                    .frame(width: 34, height: 34)
+                                    .background(Circle().fill(BuddyTheme.elevatedSurface))
+                            }
+                            .buttonStyle(.plain)
+
+                            Text("\(reps)")
+                                .font(.system(size: 18, weight: .bold))
+                                .monospacedDigit()
+                                .foregroundStyle(Color.primary)
+                                .frame(minWidth: 34)
+
+                            Button {
+                                if reps < 200 {
+                                    BuddyHaptics.lightImpact()
+                                    reps += 1
+                                }
+                            } label: {
+                                Image(systemName: "plus")
+                                    .font(.system(size: 13, weight: .bold))
+                                    .foregroundStyle(reps < 200 ? BuddyTheme.inkInverse : BuddyTheme.mutedText)
+                                    .frame(width: 34, height: 34)
+                                    .background(Circle().fill(reps < 200 ? BuddyTheme.inkPrimary : BuddyTheme.elevatedSurface))
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                 }
-            }
 
-            HStack {
-                Text("Duration (seconds)")
-                Spacer()
-                TextField("None", text: $durationText)
-                    .keyboardType(.numberPad)
-                    .multilineTextAlignment(.trailing)
-                    .buddyNumeric()
-            }
+                Divider().overlay(BuddyTheme.hairlineBorder)
 
-            HStack(spacing: 8) {
-                ForEach([30, 45, 60, 90], id: \.self) { seconds in
-                    let isSelected = (durationText == "\(seconds)")
-                    Button {
-                        BuddyHaptics.selection()
-                        durationText = "\(seconds)"
-                    } label: {
-                        Text("\(seconds)s")
-                            .font(.system(size: 12, weight: .semibold))
-                            .monospacedDigit()
-                            .foregroundStyle(isSelected ? BuddyTheme.inkInverse : Color.primary)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 7)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .fill(isSelected ? BuddyTheme.inkPrimary : BuddyTheme.chipSurface)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                }
-
-                if !durationText.isEmpty {
-                    Button {
-                        BuddyHaptics.selection()
-                        durationText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.vertical, 2)
-        }
-    }
-
-    private var tagSection: some View {
-        Section("Set Type") {
-            Picker("Set Type", selection: $tag) {
-                ForEach(SetTag.allCases) { item in
-                    Text(item.displayLabel).tag(item)
-                }
-            }
-            .pickerStyle(.segmented)
-        }
-    }
-
-    private var notesSection: some View {
-        Section {
-            TextField("Form cues, tempo, RPE…", text: $notes, axis: .vertical)
-                .lineLimit(2...4)
-        } header: {
-            Text("Notes")
-        } footer: {
-            if !rawTranscriptSnapshot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text("Voice transcript: “\(rawTranscriptSnapshot)”")
-            }
-        }
-    }
-
-    private var deleteSection: some View {
-        Section {
-            Button(role: .destructive) {
-                BuddyHaptics.warning()
-                dismiss()
-                let targetSet = set
-                Task { @MainActor in
-                    store.deleteSet(targetSet)
-                }
-            } label: {
                 HStack {
+                    Text("Duration (seconds)")
+                        .font(.system(size: 14.5, weight: .semibold))
+                        .foregroundStyle(Color.primary)
                     Spacer()
-                    Label("Delete Set", systemImage: "trash")
-                        .fontWeight(.semibold)
-                    Spacer()
+                    TextField("Optional", text: $durationText)
+                        .keyboardType(.numberPad)
+                        .multilineTextAlignment(.trailing)
+                        .font(.system(size: 16, weight: .bold))
+                        .monospacedDigit()
+                        .foregroundStyle(Color.primary)
+                        .frame(width: 96)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .fill(BuddyTheme.elevatedSurface)
+                        )
                 }
             }
         }
+    }
+
+    // MARK: - Tag Card
+
+    private var tagCard: some View {
+        NativeCard(padding: 14, cornerRadius: 14) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("SET TAG")
+                    .font(.system(size: 10.5, weight: .bold))
+                    .tracking(0.6)
+                    .foregroundStyle(BuddyTheme.mutedText)
+
+                HStack(spacing: 8) {
+                    ForEach(SetTag.allCases) { option in
+                        let selected = (tag == option)
+                        Button {
+                            BuddyHaptics.selection()
+                            tag = option
+                        } label: {
+                            Text(option.displayLabel)
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(selected ? BuddyTheme.inkInverse : Color.primary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 9)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                        .fill(selected ? BuddyTheme.inkPrimary : BuddyTheme.chipSurface)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Notes Card
+
+    private var notesCard: some View {
+        NativeCard(padding: 14, cornerRadius: 14) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("NOTES")
+                    .font(.system(size: 10.5, weight: .bold))
+                    .tracking(0.6)
+                    .foregroundStyle(BuddyTheme.mutedText)
+
+                TextField("Form cues, RPE, Tempo…", text: $notes, axis: .vertical)
+                    .lineLimit(2...4)
+                    .font(.system(size: 14.5, weight: .medium))
+                    .foregroundStyle(Color.primary)
+                    .padding(11)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(BuddyTheme.elevatedSurface)
+                    )
+
+                if !rawTranscriptSnapshot.isEmpty {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "waveform")
+                            .font(.caption)
+                            .foregroundStyle(BuddyTheme.mutedText)
+                            .padding(.top, 2)
+                        Text("“\(rawTranscriptSnapshot)”")
+                            .font(.caption)
+                            .foregroundStyle(BuddyTheme.mutedText)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Delete Button
+
+    private var deleteButton: some View {
+        Button {
+            BuddyHaptics.warning()
+            store.deleteSet(set)
+            dismiss()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "trash")
+                    .font(.system(size: 13.5, weight: .semibold))
+                Text("Delete Set")
+                    .font(.system(size: 14.5, weight: .semibold))
+            }
+            .foregroundStyle(BuddyTheme.destructive)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 13)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(BuddyTheme.destructive.opacity(0.12))
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Bottom Save Bar
+
+    private var bottomSaveBar: some View {
+        VStack(spacing: 0) {
+            Divider().overlay(BuddyTheme.hairlineBorder)
+
+            Button {
+                saveChanges()
+            } label: {
+                Text("Save Changes")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(BuddyTheme.inkInverse)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(Capsule().fill(BuddyTheme.inkPrimary))
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+        }
+        .background(BuddyTheme.canvasBackground)
     }
 
     // MARK: - Actions
 
     private func adjustWeight(by delta: Double) {
-        BuddyHaptics.selection()
-        let next = max(0, ((weightValue + delta) * 10).rounded() / 10)
-        weightValue = next
-        weightText = next > 0 ? Self.formatNumeric(next) : ""
+        BuddyHaptics.lightImpact()
+        let updated = max(0, ((weightValue + delta) * 10).rounded() / 10)
+        weightValue = updated
+        weightText = updated > 0 ? Self.formatNumeric(updated) : ""
     }
 
     private func saveChanges() {
-        let trimmedWeightText = weightText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedWeightKg: Double?
-        if trimmedWeightText == initialWeightText {
-            // Preserve exact underlying kg value when the user didn't edit weight.
-            resolvedWeightKg = initialWeightKg
+        let cleanedWeight = weightText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: ",", with: ".")
+
+        let finalWeightKg: Double?
+        if cleanedWeight == initialWeightText {
+            finalWeightKg = initialWeightKg
         } else {
-            let parsedWeight = Double(trimmedWeightText.replacingOccurrences(of: ",", with: "."))
-            resolvedWeightKg = parsedWeight.flatMap { $0 > 0 ? store.preferredUnit.toKg($0) : nil }
+            let parsedWeight = Double(cleanedWeight)
+            finalWeightKg = parsedWeight.flatMap { $0 > 0 ? store.preferredUnit.toKg($0) : nil }
         }
 
-        let resolvedReps: Int? = hasReps ? max(1, reps) : nil
-        let resolvedDuration: Int? = Int(durationText.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0 > 0 ? $0 : nil }
+        let cleanedDuration = durationText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalDuration = Int(cleanedDuration).flatMap { $0 > 0 ? $0 : nil }
+        let finalReps: Int? = hasReps ? reps : nil
 
         store.updateSet(
             set,
-            reps: resolvedReps,
-            weightKg: resolvedWeightKg,
-            durationSeconds: resolvedDuration,
+            reps: finalReps,
+            weightKg: finalWeightKg,
+            durationSeconds: finalDuration,
             tag: tag,
             notes: notes.trimmingCharacters(in: .whitespacesAndNewlines)
         )
@@ -265,9 +428,10 @@ struct SetEditorSheet: View {
     }
 
     private static func formatNumeric(_ value: Double) -> String {
-        if value.truncatingRemainder(dividingBy: 1) == 0 {
-            return "\(Int(value))"
+        let rounded = (value * 10).rounded() / 10
+        if rounded.truncatingRemainder(dividingBy: 1) == 0 {
+            return "\(Int(rounded))"
         }
-        return String(format: "%.1f", value)
+        return String(format: "%.1f", rounded)
     }
 }

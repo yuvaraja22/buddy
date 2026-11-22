@@ -519,6 +519,94 @@ final class WorkoutStoreAndStatsTests: XCTestCase {
         XCTAssertEqual(store.activeSession?.recentlyActiveEntries.first?.canonicalName, "Bench Press")
     }
 
+    func testManualCalendarCheckInsCountTowardStreakHeatmapAndUpgradeCleanly() throws {
+        let store = try makeInMemoryStore()
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+        let yesterday = try XCTUnwrap(cal.date(byAdding: .day, value: -1, to: today))
+        let twoDaysAgo = try XCTUnwrap(cal.date(byAdding: .day, value: -2, to: today))
+
+        // Mark 3 consecutive days manually (2 past days + today).
+        let day1 = store.markDayAsTrained(on: twoDaysAgo, title: "Push Day", notes: "Quick chest session")
+        let day2 = store.markDayAsTrained(on: yesterday, title: "Pull Day")
+        let day3 = store.markDayAsTrained(on: today, title: "Leg Day")
+
+        XCTAssertTrue(day1.isManualCheckInDay)
+        XCTAssertTrue(day1.countsAsWorkout)
+        XCTAssertEqual(day1.primaryMuscleGroup, .chest)
+        XCTAssertEqual(day2.primaryMuscleGroup, .back)
+        XCTAssertEqual(day3.primaryMuscleGroup, .quads)
+
+        let stats = StatsCalculator.consistency(sessions: store.sessions, referenceDate: Date(), weeklyGoal: 4)
+        XCTAssertEqual(stats.currentStreakDays, 3)
+        XCTAssertEqual(stats.totalWorkouts, 3)
+
+        let heatmap = StatsCalculator.heatmapDays(sessions: store.sessions, weeks: 2, referenceDate: Date())
+        let activeHeatmapDays = heatmap.filter { $0.intensity > 0 }
+        XCTAssertEqual(activeHeatmapDays.count, 3)
+
+        // Adding a real exercise to a past check-in day upgrades that session in place (no duplicate sessions).
+        store.addManualExercise(
+            name: "Bench Press",
+            sets: 3,
+            reps: 10,
+            weightKg: 60,
+            durationSeconds: nil,
+            on: twoDaysAgo
+        )
+        let twoDaysAgoSessions = store.sessions(on: twoDaysAgo, calendar: cal)
+        XCTAssertEqual(twoDaysAgoSessions.count, 1)
+        XCTAssertEqual(twoDaysAgoSessions.first?.totalSets, 3)
+        XCTAssertFalse(twoDaysAgoSessions.first?.isManualCheckInDay ?? true)
+
+        // Unmarking today drops streak from 3 -> 2 (still counts yesterday + 2 days ago).
+        store.deleteSession(day3)
+        let afterUnmark = StatsCalculator.consistency(sessions: store.sessions, referenceDate: Date(), weeklyGoal: 4)
+        XCTAssertEqual(afterUnmark.currentStreakDays, 2)
+    }
+
+    func testSaveReviewedSessionPersistsPastDateCompletedAndTodayActiveCleanly() throws {
+        let store = try makeInMemoryStore()
+        let cal = Calendar.current
+        let threeDaysAgo = try XCTUnwrap(cal.date(byAdding: .day, value: -3, to: Date()))
+
+        let parsed = RuleBasedWorkoutParser.parse(
+            "Bench press 60 kg 3 sets 10 reps, incline dumbbell press 20 kg 3 sets 12 reps, cable fly 15 kg 3 sets 15 reps",
+            context: ActiveSessionPromptContext(preferredUnit: .kg)
+        )
+        XCTAssertEqual(parsed.distinctExerciseCount, 3)
+
+        // 1. Save full recap for a past date (must be completed, not active, and anchored on threeDaysAgo).
+        let pastSession = store.saveReviewedSession(
+            items: parsed.items,
+            date: threeDaysAgo,
+            title: "Push Day",
+            finishImmediately: true,
+            rawTranscript: parsed.rawTranscript,
+            parserSource: .ruleBased
+        )
+        XCTAssertNotNil(pastSession)
+        XCTAssertFalse(pastSession?.isActive ?? true)
+        XCTAssertNil(store.activeSession)
+        XCTAssertEqual(pastSession?.exerciseCount, 3)
+        XCTAssertEqual(pastSession?.totalSets, 9)
+        XCTAssertTrue(cal.isDate(try XCTUnwrap(pastSession?.startedAt), inSameDayAs: threeDaysAgo))
+
+        // 2. Save reviewed recap for today with finishImmediately = false (creates live active session).
+        let activeRecap = store.saveReviewedSession(
+            items: parsed.items,
+            date: Date(),
+            title: "Push Day",
+            finishImmediately: false,
+            rawTranscript: parsed.rawTranscript,
+            parserSource: .ruleBased
+        )
+        XCTAssertNotNil(activeRecap)
+        XCTAssertTrue(activeRecap?.isActive ?? false)
+        XCTAssertEqual(store.activeSession?.id, activeRecap?.id)
+        XCTAssertEqual(store.activeSession?.totalSets, 9)
+    }
+
     // MARK: - Fixture Helper
 
     private func makeSession(

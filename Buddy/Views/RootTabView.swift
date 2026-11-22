@@ -3,8 +3,14 @@ import UIKit
 
 enum BuddyTab: Hashable {
     case workout
+    case calendar
     case trends
     case coach
+}
+
+private struct RecapCaptureRequest: Identifiable, Equatable {
+    let id: UUID = UUID()
+    let date: Date
 }
 
 struct RootTabView: View {
@@ -19,6 +25,7 @@ struct RootTabView: View {
     @State private var didHandleDeepLinkOnLaunch: Bool = false
     @State private var dismissWorkoutSheetsToken: Int = 0
     @State private var voiceDockHeight: CGFloat = 78
+    @State private var recapCaptureRequest: RecapCaptureRequest?
     @AppStorage("buddy.hasSeenOnboarding") private var hasSeenOnboarding: Bool = false
 
     var body: some View {
@@ -26,10 +33,8 @@ struct RootTabView: View {
             BuddyTheme.canvasBackground
                 .ignoresSafeArea()
 
-            // Keep all three tabs mounted so scroll position and chat state persist across switches,
+            // Keep all four tabs mounted so scroll position, calendar month, and chat state persist across switches,
             // while replacing iOS's dated translucent TabView with Uber's floating bottom pill bar.
-            // Tab-active state and `.onChange(of: selectedTab)` handle keyboard dismissal, Coach LLM
-            // cancellation, and pausing hidden 1 Hz timers cleanly.
             ZStack {
                 WorkoutHomeView(
                     store: store,
@@ -39,12 +44,27 @@ struct RootTabView: View {
                     llmService: llmService,
                     isTabActive: selectedTab == .workout,
                     dockClearance: voiceDockHeight,
-                    dismissSheetsToken: dismissWorkoutSheetsToken
+                    dismissSheetsToken: dismissWorkoutSheetsToken,
+                    onStartFullSessionRecap: {
+                        recapCaptureRequest = RecapCaptureRequest(date: Date())
+                    }
                 )
                 .opacity(selectedTab == .workout ? 1 : 0)
                 .allowsHitTesting(selectedTab == .workout)
                 .accessibilityHidden(selectedTab != .workout)
                 .zIndex(selectedTab == .workout ? 1 : 0)
+
+                CalendarView(
+                    store: store,
+                    dockClearance: voiceDockHeight,
+                    onVoiceLogDate: { date in
+                        recapCaptureRequest = RecapCaptureRequest(date: date)
+                    }
+                )
+                .opacity(selectedTab == .calendar ? 1 : 0)
+                .allowsHitTesting(selectedTab == .calendar)
+                .accessibilityHidden(selectedTab != .calendar)
+                .zIndex(selectedTab == .calendar ? 1 : 0)
 
                 TrendsView(
                     store: store,
@@ -78,7 +98,7 @@ struct RootTabView: View {
                     pipeline: pipeline,
                     store: store,
                     onVoiceRecordingBegan: {
-                        if selectedTab != .workout {
+                        if recapCaptureRequest == nil && selectedTab != .workout {
                             selectedTab = .workout
                         }
                     }
@@ -101,7 +121,7 @@ struct RootTabView: View {
         }
         .onChange(of: selectedTab) { oldTab, newTab in
             guard oldTab != newTab else { return }
-            // Resign any active TextField keyboard when switching tabs so it never lingers over Trends.
+            // Resign any active TextField keyboard when switching tabs so it never lingers.
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
             // Free LocalLLMService's exclusive lock immediately if leaving Coach mid-generation.
             if oldTab == .coach {
@@ -130,6 +150,45 @@ struct RootTabView: View {
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
         }
+        .sheet(
+            item: $recapCaptureRequest,
+            onDismiss: {
+                if case .recording = pipeline.phase {
+                    pipeline.cancelRecording()
+                }
+            }
+        ) { request in
+            VoiceRecapCaptureSheet(
+                pipeline: pipeline,
+                store: store,
+                targetDate: request.date
+            )
+            .buddyAppearance()
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        }
+        .sheet(
+            item: Binding(
+                get: { pipeline.pendingRecap },
+                set: { newValue in
+                    if newValue == nil {
+                        pipeline.dismissPendingRecap()
+                    }
+                }
+            )
+        ) { recap in
+            SessionRecapReviewSheet(
+                recap: recap,
+                store: store,
+                pipeline: pipeline,
+                onComplete: {
+                    pipeline.dismissPendingRecap()
+                }
+            )
+            .buddyAppearance()
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+        }
     }
 
     private func handleDeepLink(_ url: URL) {
@@ -139,6 +198,7 @@ struct RootTabView: View {
         switch deepLink {
         case .record:
             showModelSetup = false
+            recapCaptureRequest = nil
             dismissWorkoutSheetsToken &+= 1
             selectedTab = .workout
             Task { @MainActor in

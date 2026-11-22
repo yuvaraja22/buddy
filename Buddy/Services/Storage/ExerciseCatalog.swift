@@ -763,6 +763,35 @@ public enum ExerciseCatalog {
         return all.prefix(count).map(\.canonicalName).joined(separator: ", ")
     }
 
+    /// Precomputed normalized catalog names and unambiguous aliases sorted longest-first,
+    /// used by `RuleBasedWorkoutParser` to split unpunctuated run-on post-gym voice dumps
+    /// (e.g. "bench press 60 kg 3 sets 10 reps incline dumbbell press 20 kg 3 sets 12 reps").
+    public static let longestFirstKnownPhrases: [String] = {
+        let ambiguousSingleTokens: Set<String> = [
+            "press", "row", "rows", "curl", "curls", "fly", "flys", "flies",
+            "raise", "raises", "extension", "extensions", "pull", "push",
+            "walk", "run", "bike", "cycle", "jump", "hold", "twist", "crunch"
+        ]
+        var seen = Set<String>()
+        var phrases: [String] = []
+
+        for variant in indexedVariants {
+            let norm = variant.normalized
+            guard norm.count >= 3 else { continue }
+            if !norm.contains(" ") && ambiguousSingleTokens.contains(norm) {
+                continue
+            }
+            if seen.insert(norm).inserted {
+                phrases.append(norm)
+            }
+        }
+
+        return phrases.sorted { lhs, rhs in
+            if lhs.count != rhs.count { return lhs.count > rhs.count }
+            return lhs < rhs
+        }
+    }()
+
     // MARK: - Normalization & Inference Helpers
 
     private static func cleanRawName(_ raw: String) -> String {

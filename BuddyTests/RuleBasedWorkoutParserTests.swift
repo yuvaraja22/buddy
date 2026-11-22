@@ -219,4 +219,79 @@ final class RuleBasedWorkoutParserTests: XCTestCase {
         XCTAssertEqual(intent.items.first?.hasExplicitTag, true)
         XCTAssertEqual(intent.items.first?.note, "")
     }
+
+    func testParsesFullPostGymSessionRecapWithPastTenseLeadInAndPunctuation() {
+        let transcript = """
+        I finished my workout. Today I did bench press 60 kg 3 sets 10 reps, \
+        incline dumbbell press 20 kg 3 sets 12 reps, \
+        cable fly 15 kg 3 sets 15 reps, and tricep pushdown 25 kg 3 sets 12 reps.
+        """
+        let intent = RuleBasedWorkoutParser.parse(transcript, context: defaultContext)
+
+        XCTAssertEqual(intent.action, .logSets)
+        XCTAssertEqual(intent.distinctExerciseCount, 4)
+        XCTAssertEqual(intent.items.count, 4)
+        XCTAssertEqual(intent.items.map(\.exerciseName), [
+            "Bench Press",
+            "Incline Dumbbell Press",
+            "Cable Fly",
+            "Tricep Pushdown"
+        ])
+        XCTAssertEqual(intent.items[0].setCount, 3)
+        XCTAssertEqual(intent.items[0].reps, 10)
+        XCTAssertEqual(intent.items[0].weightValue ?? -1, 60, accuracy: 0.01)
+        XCTAssertEqual(intent.items[3].weightValue ?? -1, 25, accuracy: 0.01)
+        XCTAssertEqual(intent.suggestedSessionTitle, "Push Day")
+    }
+
+    func testParsesUnpunctuatedRunOnMultiExerciseSpeechDump() {
+        let transcript = "bench press 60 kg 3 sets 10 reps incline dumbbell press 20 kg 3 sets 12 reps cable fly 15 kg 3 sets 15 reps lateral raise 10 kg 3 sets 15 reps"
+        let intent = RuleBasedWorkoutParser.parse(transcript, context: defaultContext)
+
+        XCTAssertEqual(intent.action, .logSets)
+        XCTAssertEqual(intent.distinctExerciseCount, 4)
+        XCTAssertEqual(intent.items.map(\.exerciseName), [
+            "Bench Press",
+            "Incline Dumbbell Press",
+            "Cable Fly",
+            "Lateral Raise"
+        ])
+        XCTAssertEqual(intent.items[1].weightValue ?? -1, 20, accuracy: 0.01)
+        XCTAssertEqual(intent.items[3].reps, 15)
+    }
+
+    func testParsesProgressiveOrdinalSetsOnSameExercise() {
+        let transcript = "Squat first set 80 kg 10 reps, second set 90 kg 8 reps, third set 100 kg 6 reps"
+        let intent = RuleBasedWorkoutParser.parse(transcript, context: defaultContext)
+
+        XCTAssertEqual(intent.action, .logSets)
+        XCTAssertEqual(intent.distinctExerciseCount, 1)
+        XCTAssertEqual(intent.items.count, 3)
+        XCTAssertEqual(intent.items.map(\.exerciseName), ["Squat", "Squat", "Squat"])
+        XCTAssertEqual(intent.items.compactMap(\.weightValue), [80, 90, 100])
+        XCTAssertEqual(intent.items.compactMap(\.reps), [10, 8, 6])
+    }
+
+    func testLLMReconciliationPreservesFullerMultiExerciseRecap() {
+        let transcript = "I finished my workout. Bench press 60 kg 3 sets 10 reps, cable fly 15 kg 3 sets 15 reps, tricep pushdown 25 kg 3 sets 12 reps"
+        let ruleParsed = RuleBasedWorkoutParser.parse(transcript, context: defaultContext)
+
+        // Case 1: LLM accidentally returned endSession on a post-gym recap -> prefer ruleParsed logSets.
+        let badEndSession = WorkoutCommandIntent(action: .endSession, rawTranscript: transcript, parserSource: .localLLM)
+        let reconciled1 = LocalLLMService.reconcileParsedIntents(llmIntent: badEndSession, ruleFallback: ruleParsed)
+        XCTAssertEqual(reconciled1.action, .logSets)
+        XCTAssertEqual(reconciled1.distinctExerciseCount, 3)
+
+        // Case 2: Quantized LLM dropped 2 of the 3 exercises -> prefer fuller ruleParsed list.
+        let partialLLM = WorkoutCommandIntent(
+            action: .logSets,
+            items: [ParsedSetGroupIntent(exerciseName: "Bench Press", setCount: 3, reps: 10, weightValue: 60, weightUnit: .kg)],
+            summary: "Bench Press 3x10",
+            rawTranscript: transcript,
+            parserSource: .localLLM
+        )
+        let reconciled2 = LocalLLMService.reconcileParsedIntents(llmIntent: partialLLM, ruleFallback: ruleParsed)
+        XCTAssertEqual(reconciled2.distinctExerciseCount, 3)
+        XCTAssertEqual(reconciled2.parserSource, .ruleBased)
+    }
 }
