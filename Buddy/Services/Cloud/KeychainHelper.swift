@@ -4,7 +4,7 @@ import Security
 /// Lightweight, zero-dependency iOS Keychain wrapper for persisting Firebase Auth tokens
 /// and user credentials securely on-device without requiring any special entitlements.
 public enum KeychainHelper {
-    private static let defaultService = "com.yuvaraja.buddy.cloudsync"
+    public static let defaultService = "com.yuvaraja.buddy.cloudsync"
 
     @discardableResult
     public static func saveString(_ value: String, account: String, service: String = defaultService) -> Bool {
