@@ -76,7 +76,7 @@ private struct BuddyLockScreenWidgetView: View {
                 Image(systemName: entry.snapshot.activeSession != nil ? "waveform" : "mic.fill")
                     .font(.system(size: 11, weight: .bold))
                 Text(entry.snapshot.activeSession?.title ?? "Buddy")
-                    .font(.system(.caption, design: .rounded, weight: .bold))
+                    .font(.system(size: 12, weight: .bold))
                     .lineLimit(1)
             }
 
@@ -85,12 +85,12 @@ private struct BuddyLockScreenWidgetView: View {
                     ? "\(displaySets) sets · \(entry.snapshot.preferredUnit.formatVolume(kg: displayVolumeKg))"
                     : "\(displaySets) sets today"
             )
-            .font(.system(.caption, design: .rounded, weight: .semibold))
+            .font(.system(size: 12, weight: .semibold))
             .monospacedDigit()
             .lineLimit(1)
 
             Text(lastExerciseLine)
-                .font(.system(.caption2, design: .rounded, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }

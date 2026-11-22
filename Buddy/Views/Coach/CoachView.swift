@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import UIKit
 
 struct CoachView: View {
     @Environment(\.modelContext) private var modelContext
@@ -8,6 +9,8 @@ struct CoachView: View {
     let store: WorkoutStore
     let llmService: LocalLLMService
     let modelManager: ModelManager
+    var isTabActive: Bool = true
+    var dockClearance: CGFloat = 78
     let onOpenModelSetup: () -> Void
 
     @State private var inputText: String = ""
@@ -18,6 +21,7 @@ struct CoachView: View {
     @State private var conversationEpoch: Int = 0
     @State private var lastStreamScrollAt: Date = .distantPast
     @State private var showClearConfirmation: Bool = false
+    @State private var keyboardOverlapHeight: CGFloat = 0
     @FocusState private var isInputFocused: Bool
 
     private var isCoachStreaming: Bool {
@@ -34,9 +38,13 @@ struct CoachView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                compactHeader
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 8)
+
                 offlineStatusBanner
                     .padding(.horizontal, 16)
-                    .padding(.top, 6)
                     .padding(.bottom, 8)
 
                 if !modelManager.isLLMDownloaded {
@@ -46,23 +54,7 @@ struct CoachView: View {
                 }
             }
             .background(BuddyTheme.canvasBackground.ignoresSafeArea())
-            .navigationTitle("Coach")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                if !messages.isEmpty {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button {
-                            BuddyHaptics.lightImpact()
-                            showClearConfirmation = true
-                        } label: {
-                            Image(systemName: "trash")
-                                .font(.subheadline.weight(.medium))
-                        }
-                        .disabled(isCoachStreaming)
-                        .accessibilityLabel("Clear conversation")
-                    }
-                }
-            }
+            .toolbar(.hidden, for: .navigationBar)
             .safeAreaInset(edge: .bottom) {
                 if modelManager.isLLMDownloaded {
                     coachInputBar
@@ -78,6 +70,20 @@ struct CoachView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             }
+            .onChange(of: isTabActive) { _, active in
+                if !active {
+                    isInputFocused = false
+                    if isCoachStreaming {
+                        stopGenerating()
+                    }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { notification in
+                keyboardOverlapHeight = Self.resolveKeyboardOverlapHeight(from: notification)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+                keyboardOverlapHeight = 0
+            }
             .onDisappear {
                 if isCoachStreaming {
                     stopGenerating()
@@ -86,7 +92,52 @@ struct CoachView: View {
         }
     }
 
-    // MARK: - Top Offline Status Banner
+    // MARK: - Compact Header
+
+    private var compactHeader: some View {
+        HStack {
+            HStack(spacing: 8) {
+                Text("Coach")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(.primary)
+
+                Text("OFFLINE")
+                    .font(.system(size: 10, weight: .bold))
+                    .tracking(0.6)
+                    .foregroundStyle(BuddyTheme.mutedText)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(BuddyTheme.chipSurface)
+                    )
+            }
+
+            Spacer()
+
+            if !messages.isEmpty {
+                Button {
+                    BuddyHaptics.lightImpact()
+                    showClearConfirmation = true
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 34, height: 34)
+                        .background(Circle().fill(BuddyTheme.cardSurface))
+                        .overlay {
+                            Circle().strokeBorder(BuddyTheme.hairlineBorder, lineWidth: 0.8)
+                        }
+                }
+                .buttonStyle(.plain)
+                .disabled(isCoachStreaming)
+                .accessibilityLabel("Clear conversation")
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    // MARK: - Top Offline Status Strip
 
     private var offlineStatusBanner: some View {
         let count = store.sessions.count
@@ -96,14 +147,14 @@ struct CoachView: View {
             : modelManager.selectedLLMPreset.displayName
 
         return HStack(spacing: 8) {
-            Image(systemName: "lock.shield.fill")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(modelManager.isLLMDownloaded ? BuddyTheme.emeraldLive : BuddyTheme.cobalt)
+            Circle()
+                .fill(modelManager.isLLMDownloaded ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
+                .frame(width: 6, height: 6)
 
-            Text("100% Offline · \(modelLabel) · Grounded in \(count) \(workoutWord)")
+            Text("\(modelLabel) · Grounded in \(count) \(workoutWord)")
                 .font(.caption.weight(.medium))
                 .buddyNumeric()
-                .foregroundStyle(.secondary)
+                .foregroundStyle(BuddyTheme.mutedText)
                 .lineLimit(1)
                 .truncationMode(.tail)
 
@@ -112,12 +163,12 @@ struct CoachView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(BuddyTheme.cardSurface)
         )
         .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(BuddyTheme.hairlineBorder, lineWidth: 0.75)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(BuddyTheme.hairlineBorder, lineWidth: 0.8)
         }
     }
 
@@ -126,23 +177,23 @@ struct CoachView: View {
     private var llmSetupPromptView: some View {
         ScrollView {
             VStack(spacing: 16) {
-                NativeCard(padding: 20, cornerRadius: 22) {
+                NativeCard(padding: 18, cornerRadius: 14) {
                     VStack(alignment: .leading, spacing: 14) {
                         ZStack {
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .fill(BuddyTheme.cobaltSoft)
-                                .frame(width: 48, height: 48)
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(BuddyTheme.elevatedSurface)
+                                .frame(width: 44, height: 44)
                             Image(systemName: "sparkles")
-                                .font(.system(size: 22, weight: .semibold))
-                                .foregroundStyle(BuddyTheme.cobalt)
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundStyle(.primary)
                         }
 
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Your Offline Gym Coach")
-                                .font(.system(size: 21, weight: .bold, design: .rounded))
+                                .font(.system(size: 19, weight: .bold))
                             Text("Download Qwen 2.5 once over Wi-Fi to chat with an on-device strength coach grounded directly in your workouts, streaks, and progression — completely offline.")
                                 .font(.subheadline)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(BuddyTheme.mutedText)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
 
@@ -155,12 +206,12 @@ struct CoachView: View {
                                 Text("Download Qwen 2.5")
                             }
                             .font(.subheadline.weight(.bold))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(BuddyTheme.inkInverse)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 13)
                             .background(
-                                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    .fill(BuddyTheme.cobalt)
+                                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                    .fill(BuddyTheme.inkPrimary)
                             )
                         }
                         .buttonStyle(.plain)
@@ -168,7 +219,8 @@ struct CoachView: View {
                 }
             }
             .padding(.horizontal, 16)
-            .padding(.top, 12)
+            .padding(.top, 8)
+            .padding(.bottom, BuddyTheme.floatingBarClearance)
         }
     }
 
@@ -180,7 +232,7 @@ struct CoachView: View {
                 LazyVStack(spacing: 12) {
                     if messages.isEmpty && !isCoachStreaming && streamingReply.isEmpty {
                         starterPromptsSection
-                            .padding(.top, 8)
+                            .padding(.top, 4)
                     } else {
                         ForEach(messages, id: \.id) { message in
                             CoachBubbleView(
@@ -241,54 +293,41 @@ struct CoachView: View {
     }
 
     private var starterPromptsSection: some View {
-        NativeCard(padding: 18, cornerRadius: 20) {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 10) {
-                    ZStack {
-                        Circle()
-                            .fill(BuddyTheme.cobaltSoft)
-                            .frame(width: 38, height: 38)
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(BuddyTheme.cobalt)
-                    }
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Ask Buddy Coach")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.primary)
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Ask Buddy Coach")
-                            .font(.headline)
-                        Text("Powered locally on your iPhone using your logged history.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
+            VStack(spacing: 8) {
+                ForEach(starterPrompts, id: \.self) { prompt in
+                    Button {
+                        BuddyHaptics.lightImpact()
+                        sendMessage(prompt)
+                    } label: {
+                        HStack(spacing: 10) {
+                            Text(prompt)
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(.primary)
+                                .multilineTextAlignment(.leading)
 
-                VStack(spacing: 8) {
-                    ForEach(starterPrompts, id: \.self) { prompt in
-                        Button {
-                            BuddyHaptics.lightImpact()
-                            sendMessage(prompt)
-                        } label: {
-                            HStack(spacing: 10) {
-                                Text(prompt)
-                                    .font(.subheadline.weight(.medium))
-                                    .foregroundStyle(.primary)
-                                    .multilineTextAlignment(.leading)
+                            Spacer(minLength: 4)
 
-                                Spacer(minLength: 4)
-
-                                Image(systemName: "arrow.up.right")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(BuddyTheme.cobalt)
-                            }
-                            .padding(.horizontal, 13)
-                            .padding(.vertical, 11)
-                            .background(
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .fill(BuddyTheme.elevatedSurface)
-                            )
+                            Image(systemName: "arrow.up.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(BuddyTheme.mutedText)
                         }
-                        .buttonStyle(.plain)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(BuddyTheme.cardSurface)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(BuddyTheme.hairlineBorder, lineWidth: 0.8)
+                        }
                     }
+                    .buttonStyle(.plain)
                 }
             }
         }
@@ -306,24 +345,25 @@ struct CoachView: View {
             Button {
                 coachError = nil
             } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.secondary)
+                Image(systemName: "xmark")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(BuddyTheme.mutedText)
             }
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(BuddyTheme.cardSurface)
         )
         .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(BuddyTheme.destructive.opacity(0.3), lineWidth: 0.85)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(BuddyTheme.destructive.opacity(0.4), lineWidth: 0.85)
         }
     }
 
-    // MARK: - Bottom Input Bar
+    // MARK: - Monochrome Composer Bar
 
     private var coachInputBar: some View {
         HStack(alignment: .bottom, spacing: 10) {
@@ -339,9 +379,11 @@ struct CoachView: View {
                     BuddyHaptics.lightImpact()
                     stopGenerating()
                 } label: {
-                    Image(systemName: "stop.circle.fill")
-                        .font(.system(size: 32))
-                        .foregroundStyle(BuddyTheme.destructive)
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .background(Circle().fill(BuddyTheme.destructive))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Stop response")
@@ -351,9 +393,14 @@ struct CoachView: View {
                     BuddyHaptics.lightImpact()
                     sendMessage(inputText)
                 } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 32))
-                        .foregroundStyle(canSend ? BuddyTheme.cobalt : Color.secondary.opacity(0.35))
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(canSend ? BuddyTheme.inkInverse : BuddyTheme.mutedText)
+                        .frame(width: 34, height: 34)
+                        .background(
+                            Circle()
+                                .fill(canSend ? BuddyTheme.inkPrimary : BuddyTheme.chipSurface)
+                        )
                 }
                 .buttonStyle(.plain)
                 .disabled(!canSend)
@@ -361,18 +408,37 @@ struct CoachView: View {
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.vertical, 7)
         .background {
             RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(.ultraThinMaterial)
+                .fill(BuddyTheme.cardSurface)
         }
         .overlay {
             RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .strokeBorder(BuddyTheme.glassBorder, lineWidth: 0.85)
+                .strokeBorder(BuddyTheme.glassBorder, lineWidth: 0.9)
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
-        .padding(.bottom, 10)
+        // Compute bottom clearance from real VoiceRecordDock height minus actual software keyboard lift
+        // above the bottom safe area so hardware keyboards, interactive scroll-dismiss, and expanded
+        // error pills never collide with VoiceRecordDock.
+        .padding(.bottom, max(0, dockClearance - keyboardOverlapHeight) + 8)
+        .animation(.snappy(duration: 0.2), value: keyboardOverlapHeight)
+        .animation(.snappy(duration: 0.2), value: dockClearance)
+    }
+
+    private static func resolveKeyboardOverlapHeight(from notification: Notification) -> CGFloat {
+        guard let endFrame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else {
+            return 0
+        }
+        let activeWindow = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first(where: \.isKeyWindow)
+        guard let activeWindow else { return 0 }
+        let frameInWindow = activeWindow.convert(endFrame, from: nil)
+        let overlap = activeWindow.bounds.intersection(frameInWindow).height
+        return max(0, overlap - activeWindow.safeAreaInsets.bottom)
     }
 
     // MARK: - Actions
@@ -490,7 +556,7 @@ struct CoachView: View {
     }
 }
 
-// MARK: - Chat Bubble View
+// MARK: - Monochrome Chat Bubble View
 
 private struct CoachBubbleView: View {
     let role: CoachRole
@@ -505,7 +571,7 @@ private struct CoachBubbleView: View {
                 userBubble
             } else {
                 assistantBubble
-                Spacer(minLength: 32)
+                Spacer(minLength: 24)
             }
         }
     }
@@ -514,23 +580,17 @@ private struct CoachBubbleView: View {
         VStack(alignment: .trailing, spacing: 4) {
             Text(content)
                 .font(.subheadline)
-                .foregroundStyle(.white)
+                .foregroundStyle(.primary)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
                 .background(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [BuddyTheme.cobalt, BuddyTheme.cobaltDeep],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(BuddyTheme.chipSurface)
                 )
 
             Text(timestamp.formatted(date: .omitted, time: .shortened))
                 .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(BuddyTheme.mutedText)
                 .padding(.trailing, 4)
         }
     }
@@ -541,14 +601,14 @@ private struct CoachBubbleView: View {
                 HStack(spacing: 5) {
                     Image(systemName: "sparkles")
                         .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(BuddyTheme.cobalt)
+                        .foregroundStyle(.primary)
                     Text("Buddy Coach")
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .foregroundStyle(BuddyTheme.cobalt)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.primary)
                     if isStreaming {
                         ProgressView()
                             .controlSize(.mini)
-                            .tint(BuddyTheme.cobalt)
+                            .tint(BuddyTheme.inkPrimary)
                     }
                 }
 
@@ -561,18 +621,18 @@ private struct CoachBubbleView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 11)
             .background(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(BuddyTheme.cardSurface)
             )
             .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(BuddyTheme.hairlineBorder, lineWidth: 0.75)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(BuddyTheme.hairlineBorder, lineWidth: 0.8)
             }
 
             if !isStreaming {
                 Text(timestamp.formatted(date: .omitted, time: .shortened))
                     .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(BuddyTheme.mutedText)
                     .padding(.leading, 4)
             }
         }

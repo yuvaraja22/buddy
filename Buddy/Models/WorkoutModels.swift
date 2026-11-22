@@ -28,6 +28,25 @@ public enum MuscleGroup: String, Codable, CaseIterable, Identifiable, Sendable {
         case .fullBody, .other: return "bolt.fill"
         }
     }
+
+    public var thumbnailAssetName: String {
+        switch self {
+        case .quads, .hamstrings, .glutes, .calves:
+            return "WorkoutThumbLegs"
+        case .chest:
+            return "WorkoutThumbChest"
+        case .back:
+            return "WorkoutThumbBack"
+        case .shoulders:
+            return "WorkoutThumbShoulders"
+        case .biceps, .triceps:
+            return "WorkoutThumbArms"
+        case .core:
+            return "WorkoutThumbCore"
+        case .cardio, .fullBody, .other:
+            return "WorkoutThumbFullBody"
+        }
+    }
 }
 
 public enum SetTag: String, Codable, CaseIterable, Identifiable, Sendable {
@@ -93,6 +112,19 @@ public final class WorkoutSession {
                 return lhs.orderIndex < rhs.orderIndex
             }
             return lhs.createdAt < rhs.createdAt
+        }
+    }
+
+    /// Entries ordered by most recent activity (latest logged set timestamp, falling back to entry creation),
+    /// so adding another set to an earlier exercise while supersetting immediately brings it to the top.
+    public var recentlyActiveEntries: [ExerciseEntry] {
+        entries.sorted { lhs, rhs in
+            let lhsDate = lhs.sets.map(\.loggedAt).max() ?? lhs.createdAt
+            let rhsDate = rhs.sets.map(\.loggedAt).max() ?? rhs.createdAt
+            if lhsDate != rhsDate {
+                return lhsDate > rhsDate
+            }
+            return lhs.orderIndex > rhs.orderIndex
         }
     }
 

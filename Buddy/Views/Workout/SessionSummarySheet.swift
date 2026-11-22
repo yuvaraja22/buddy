@@ -24,16 +24,15 @@ struct SessionSummarySheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 18) {
+                VStack(spacing: 16) {
                     celebrationHeader
-
                     summaryMetricGrid
 
                     if !session.sortedEntries.isEmpty {
                         exerciseBreakdownCard
                     }
                 }
-                .padding(.horizontal, 20)
+                .padding(.horizontal, 16)
                 .padding(.top, 12)
                 .padding(.bottom, 28)
             }
@@ -50,39 +49,32 @@ struct SessionSummarySheet: View {
     }
 
     private var celebrationHeader: some View {
-        NativeCard(padding: 18, cornerRadius: 22, tint: BuddyTheme.cobalt) {
+        NativeCard(padding: 18, cornerRadius: 16) {
             VStack(spacing: 14) {
                 ZStack {
                     Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: [BuddyTheme.cobalt, BuddyTheme.cobaltDeep],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: 60, height: 60)
-                        .shadow(color: BuddyTheme.cobalt.opacity(0.32), radius: 12, x: 0, y: 5)
+                        .fill(BuddyTheme.inkPrimary)
+                        .frame(width: 54, height: 54)
 
                     Image(systemName: "checkmark")
-                        .font(.system(size: 26, weight: .bold))
-                        .foregroundStyle(.white)
+                        .font(.system(size: 23, weight: .bold))
+                        .foregroundStyle(BuddyTheme.inkInverse)
                 }
 
                 VStack(spacing: 6) {
                     HStack(spacing: 6) {
                         TextField("Workout Title", text: $editableTitle)
-                            .font(.system(size: 22, weight: .bold, design: .rounded))
+                            .font(.system(size: 20, weight: .bold))
                             .multilineTextAlignment(.center)
 
                         Image(systemName: "pencil")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(BuddyTheme.mutedText)
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .fill(BuddyTheme.elevatedSurface)
                     )
 
@@ -96,7 +88,7 @@ struct SessionSummarySheet: View {
                     }
                     .font(.caption.weight(.medium))
                     .buddyNumeric()
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(BuddyTheme.mutedText)
                 }
             }
             .frame(maxWidth: .infinity)
@@ -114,7 +106,7 @@ struct SessionSummarySheet: View {
                 title: "Total Volume",
                 value: session.totalVolumeKg > 0 ? unit.formatVolume(kg: session.totalVolumeKg) : "—",
                 icon: "scalemass.fill",
-                tint: BuddyTheme.cobalt
+                tint: BuddyTheme.inkPrimary
             )
             StatMetricTile(
                 title: "Total Sets",
@@ -126,43 +118,42 @@ struct SessionSummarySheet: View {
                 title: "Total Reps",
                 value: "\(session.totalReps)",
                 icon: "repeat",
-                tint: BuddyTheme.amberStreak
+                tint: BuddyTheme.inkPrimary
             )
             StatMetricTile(
                 title: "Exercises",
                 value: "\(session.exerciseCount)",
                 icon: "figure.strengthtraining.traditional",
-                tint: BuddyTheme.cobalt
+                tint: BuddyTheme.inkPrimary
             )
         }
     }
 
     private var exerciseBreakdownCard: some View {
-        NativeCard(padding: 16, cornerRadius: 20) {
+        NativeCard(padding: 14, cornerRadius: 16) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Exercise Breakdown")
-                    .font(.headline)
+                    .font(.system(size: 16, weight: .bold))
                     .foregroundStyle(.primary)
 
                 VStack(spacing: 10) {
                     ForEach(session.sortedEntries, id: \.id) { entry in
+                        let setCountBadge = "\(entry.sets.count) \(entry.sets.count == 1 ? "set" : "sets")"
                         HStack(alignment: .center, spacing: 10) {
-                            Image(systemName: entry.muscleGroup.symbolName)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(BuddyTheme.cobalt)
-                                .frame(width: 30, height: 30)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                        .fill(BuddyTheme.cobaltSoft)
-                                )
+                            WorkoutThumbnailView(
+                                assetName: entry.muscleGroup.thumbnailAssetName,
+                                bottomRightBadge: setCountBadge,
+                                width: 74,
+                                height: 44
+                            )
 
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(entry.exerciseName)
-                                    .font(.subheadline.weight(.semibold))
+                                    .font(.subheadline.weight(.bold))
                                     .foregroundStyle(.primary)
                                 Text(entry.muscleGroup.rawValue)
                                     .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(BuddyTheme.mutedText)
                             }
 
                             Spacer(minLength: 8)
@@ -170,7 +161,7 @@ struct SessionSummarySheet: View {
                             Text(entry.compactSummary(unit: unit))
                                 .font(.caption.weight(.semibold))
                                 .buddyNumeric()
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(BuddyTheme.mutedText)
                         }
                     }
                 }
@@ -185,22 +176,22 @@ struct SessionSummarySheet: View {
             onDismiss()
         } label: {
             Text("Done")
-                .font(.headline)
-                .foregroundStyle(.white)
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(BuddyTheme.inkInverse)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 15)
                 .background(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(BuddyTheme.cobalt)
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(BuddyTheme.inkPrimary)
                 )
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 16)
         .padding(.top, 12)
         .padding(.bottom, 16)
-        .background(.ultraThinMaterial)
+        .background(BuddyTheme.canvasBackground)
         .overlay(alignment: .top) {
-            Divider()
+            Divider().overlay(BuddyTheme.hairlineBorder)
         }
     }
 

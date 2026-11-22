@@ -31,13 +31,17 @@ public enum WeightUnit: String, Codable, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    public func formatWeight(kg: Double) -> String {
+    public func formatWeightNumber(kg: Double) -> String {
         let converted = fromKg(kg)
         let rounded = (converted * 10).rounded() / 10
         if rounded.truncatingRemainder(dividingBy: 1) == 0 {
-            return "\(Int(rounded)) \(rawValue)"
+            return "\(Int(rounded))"
         }
-        return String(format: "%.1f %@", rounded, rawValue)
+        return String(format: "%.1f", rounded)
+    }
+
+    public func formatWeight(kg: Double) -> String {
+        "\(formatWeightNumber(kg: kg)) \(rawValue)"
     }
 
     public func formatVolume(kg: Double) -> String {

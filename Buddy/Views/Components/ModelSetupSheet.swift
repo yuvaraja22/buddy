@@ -9,15 +9,36 @@ struct ModelSetupSheet: View {
 
     @State private var sceneRefreshTick: Int = 0
 
+    /// Active LLM preset shown and downloaded by this sheet: honors `Qwen 2.5 0.5B` or an imported
+    /// `Custom GGUF` when selected in Settings, and falls back to `Qwen 2.5 1.5B` if `.custom` is
+    /// selected without a file on disk.
+    private var activeLLMPreset: LLMPreset {
+        if modelManager.selectedLLMPreset == .custom && !modelManager.isLLMDownloaded {
+            return .qwen25_1_5B
+        }
+        return modelManager.selectedLLMPreset
+    }
+
     var body: some View {
         let _ = sceneRefreshTick
-        let isAppleSpeechReady = appleSpeechService.isReadyForOfflineVoice(for: modelManager.selectedAppleSpeechLocale)
-        let isVoiceReady = modelManager.isVoiceReady(appleSpeechReady: isAppleSpeechReady)
-        let isAllReady = modelManager.isAllReady(appleSpeechReady: isAppleSpeechReady)
+        let preset = activeLLMPreset
+        let isVoiceReady = appleSpeechService.isReadyForOfflineVoice(for: modelManager.selectedAppleSpeechLocale)
+        let isLLMReady = modelManager.isDownloaded(preset)
+        let isAllReady = isVoiceReady && isLLMReady
+
+        let llmCardTitle: String = {
+            if preset == .custom, let customName = modelManager.customLLMFileName, !customName.isEmpty {
+                return customName
+            }
+            return preset.displayName
+        }()
+        let llmCardSize = preset.approximateSizeMB > 0
+            ? formatSizeMB(preset.approximateSizeMB)
+            : "Imported"
 
         NavigationStack {
             ScrollView {
-                VStack(spacing: 20) {
+                VStack(spacing: 18) {
                     heroHeader(isVoiceReady: isVoiceReady)
 
                     VStack(spacing: 12) {
@@ -25,20 +46,20 @@ struct ModelSetupSheet: View {
 
                         modelRowCard(
                             icon: "sparkles",
-                            title: LLMPreset.qwen25_1_5B.displayName,
-                            subtitle: LLMPreset.qwen25_1_5B.subtitle,
-                            sizeText: formatSizeMB(LLMPreset.qwen25_1_5B.approximateSizeMB),
-                            isDownloaded: modelManager.isDownloaded(.qwen25_1_5B),
+                            title: llmCardTitle,
+                            subtitle: preset.subtitle,
+                            sizeText: llmCardSize,
+                            isDownloaded: isLLMReady,
                             isDownloading: modelManager.isDownloadingLLM,
                             progress: modelManager.llmDownloadProgress,
                             onDownload: {
-                                Task { await modelManager.downloadLLMModel(.qwen25_1_5B) }
+                                Task { await modelManager.downloadLLMModel(preset) }
                             }
                         )
                     }
 
                     if let error = modelManager.downloadError {
-                        NativeCard(padding: 12, cornerRadius: 14, tint: BuddyTheme.destructive) {
+                        NativeCard(padding: 12, cornerRadius: 12, tint: BuddyTheme.destructive) {
                             HStack(alignment: .top, spacing: 10) {
                                 Image(systemName: "exclamationmark.triangle.fill")
                                     .foregroundStyle(BuddyTheme.destructive)
@@ -51,20 +72,25 @@ struct ModelSetupSheet: View {
 
                     privacyFootnote
                 }
-                .padding(.horizontal, 20)
+                .padding(.horizontal, 16)
                 .padding(.top, 12)
                 .padding(.bottom, 28)
             }
             .background(BuddyTheme.canvasBackground.ignoresSafeArea())
             .safeAreaInset(edge: .bottom) {
-                bottomActionBar(isVoiceReady: isVoiceReady, isAllReady: isAllReady)
+                bottomActionBar(
+                    preset: preset,
+                    isVoiceReady: isVoiceReady,
+                    isLLMReady: isLLMReady,
+                    isAllReady: isAllReady
+                )
             }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Close") {
                         dismiss()
                     }
-                    .fontWeight(.medium)
+                    .fontWeight(.semibold)
                 }
             }
             .onAppear {
@@ -82,109 +108,85 @@ struct ModelSetupSheet: View {
         }
     }
 
-    @ViewBuilder
     private var speechCard: some View {
-        if modelManager.selectedSpeechEngine == .appleOnDevice {
-            let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
-            let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
-            let ready = !isDenied && availability.isReady
-            let statusText = isDenied
-                ? "Speech Recognition permission is turned off. Enable it in iOS Settings → Buddy, or switch to WhisperKit in Settings."
-                : availability.statusMessage
+        let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
+        let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
+        let ready = !isDenied && availability.isReady
+        let statusText = isDenied
+            ? "Speech Recognition permission is turned off. Enable it in iOS Settings → Buddy."
+            : availability.statusMessage
 
-            NativeCard(padding: 16, cornerRadius: 18) {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .top, spacing: 12) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(ready ? BuddyTheme.emeraldLive.opacity(0.14) : BuddyTheme.amberStreak.opacity(0.14))
-                                .frame(width: 42, height: 42)
+        return NativeCard(padding: 15, cornerRadius: 14) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(BuddyTheme.elevatedSurface)
+                            .frame(width: 40, height: 40)
 
-                            Image(systemName: ready ? "checkmark.circle.fill" : "waveform")
-                                .font(.system(size: 18, weight: .semibold))
+                        Image(systemName: ready ? "checkmark.circle.fill" : "waveform")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(ready ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
+                    }
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text("Apple On-Device Speech")
+                                .font(.system(size: 15.5, weight: .bold))
+                                .foregroundStyle(.primary)
+
+                            Spacer()
+
+                            Text("0 MB")
+                                .font(.caption.weight(.bold))
+                                .buddyNumeric()
                                 .foregroundStyle(ready ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
                         }
 
-                        VStack(alignment: .leading, spacing: 3) {
-                            HStack(spacing: 6) {
-                                Text("Apple On-Device Speech")
-                                    .font(.headline)
-                                    .foregroundStyle(.primary)
-
-                                Spacer()
-
-                                Text("0 MB")
-                                    .font(.caption.weight(.semibold))
-                                    .buddyNumeric()
-                                    .foregroundStyle(ready ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
-                            }
-
-                            Text("Instant live speech-to-text tuned for 105 gym exercises & your accent. WhisperKit Large v3 Turbo is also available in Settings.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-
-                    HStack(spacing: 6) {
-                        Image(systemName: ready ? "checkmark.seal.fill" : "exclamationmark.circle.fill")
+                        Text("Instant offline speech-to-text with live captions tuned for 105 gym exercises and your accent.")
                             .font(.caption)
-                            .foregroundStyle(ready ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
-                        Text(statusText)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(ready ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
+                            .foregroundStyle(BuddyTheme.mutedText)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-            }
-        } else {
-            let preset = modelManager.selectedWhisperPreset
-            modelRowCard(
-                icon: "waveform",
-                title: preset.displayName,
-                subtitle: preset.subtitle,
-                sizeText: "~\(preset.approximateSizeMB) MB",
-                isDownloaded: modelManager.isDownloaded(preset),
-                isDownloading: modelManager.isDownloadingWhisper,
-                progress: modelManager.whisperDownloadProgress,
-                onDownload: {
-                    Task { await modelManager.downloadWhisperModel(preset) }
+
+                HStack(spacing: 6) {
+                    Image(systemName: ready ? "checkmark.seal.fill" : "exclamationmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(ready ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
+                    Text(statusText)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(ready ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-            )
+            }
         }
     }
 
     private func heroHeader(isVoiceReady: Bool) -> some View {
         VStack(spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [BuddyTheme.cobalt, BuddyTheme.cobaltDeep],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 68, height: 68)
-                    .shadow(color: BuddyTheme.cobalt.opacity(0.32), radius: 14, x: 0, y: 6)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(BuddyTheme.inkPrimary)
+                    .frame(width: 60, height: 60)
 
                 Image(systemName: "waveform.and.mic")
-                    .font(.system(size: 28, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundStyle(BuddyTheme.inkInverse)
             }
 
             VStack(spacing: 6) {
-                Text("100% Offline AI Pack")
-                    .font(.system(size: 26, weight: .bold, design: .rounded))
+                Text("100% Offline AI")
+                    .font(.system(size: 24, weight: .bold))
                     .multilineTextAlignment(.center)
 
                 Text(
                     isVoiceReady
-                        ? "Voice logging works right away with Apple On-Device Speech. Download Qwen 2.5 once over Wi-Fi for your offline Gym Coach and natural-language parsing."
-                        : "Set up offline speech in iOS Settings (or switch to WhisperKit in Buddy Settings) and download Qwen 2.5 once over Wi-Fi for your offline Gym Coach."
+                        ? "Voice logging works right away with Apple On-Device Speech. Download a local Qwen model once over Wi-Fi for your offline Gym Coach and natural-language parsing."
+                        : "Enable offline Dictation in iOS Settings for voice logging, and download a local Qwen model once over Wi-Fi for your offline Gym Coach."
                 )
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(BuddyTheme.mutedText)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
             }
@@ -196,7 +198,7 @@ struct ModelSetupSheet: View {
             )
             .padding(.top, 2)
         }
-        .padding(.top, 8)
+        .padding(.top, 6)
     }
 
     private func modelRowCard(
@@ -209,36 +211,38 @@ struct ModelSetupSheet: View {
         progress: Double,
         onDownload: @escaping () -> Void
     ) -> some View {
-        NativeCard(padding: 16, cornerRadius: 18) {
+        NativeCard(padding: 15, cornerRadius: 14) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .top, spacing: 12) {
                     ZStack {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(isDownloaded ? BuddyTheme.emeraldLive.opacity(0.14) : BuddyTheme.cobaltSoft)
-                            .frame(width: 42, height: 42)
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(BuddyTheme.elevatedSurface)
+                            .frame(width: 40, height: 40)
 
                         Image(systemName: isDownloaded ? "checkmark.circle.fill" : icon)
-                            .font(.system(size: 18, weight: .semibold))
-                            .foregroundStyle(isDownloaded ? BuddyTheme.emeraldLive : BuddyTheme.cobalt)
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(isDownloaded ? BuddyTheme.emeraldLive : Color.primary)
                     }
 
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 6) {
                             Text(title)
-                                .font(.headline)
+                                .font(.system(size: 15.5, weight: .bold))
                                 .foregroundStyle(.primary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
 
                             Spacer()
 
                             Text(sizeText)
-                                .font(.caption.weight(.semibold))
+                                .font(.caption.weight(.bold))
                                 .buddyNumeric()
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(BuddyTheme.mutedText)
                         }
 
                         Text(subtitle)
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(BuddyTheme.mutedText)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -246,17 +250,17 @@ struct ModelSetupSheet: View {
                 if isDownloading {
                     VStack(alignment: .leading, spacing: 5) {
                         ProgressView(value: min(max(progress, 0), 1))
-                            .tint(BuddyTheme.cobalt)
+                            .tint(BuddyTheme.inkPrimary)
 
                         HStack {
                             Text("Downloading…")
                                 .font(.caption2.weight(.medium))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(BuddyTheme.mutedText)
                             Spacer()
                             Text("\(Int((min(max(progress, 0), 1) * 100).rounded()))%")
-                                .font(.caption2.weight(.semibold))
+                                .font(.caption2.weight(.bold))
                                 .buddyNumeric()
-                                .foregroundStyle(BuddyTheme.cobalt)
+                                .foregroundStyle(.primary)
                         }
                     }
                 } else if isDownloaded {
@@ -272,14 +276,14 @@ struct ModelSetupSheet: View {
                     HStack {
                         Text("Not downloaded yet")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(BuddyTheme.mutedText)
                         Spacer()
                         Button("Download") {
                             BuddyHaptics.lightImpact()
                             onDownload()
                         }
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(BuddyTheme.cobalt)
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.primary)
                     }
                 }
             }
@@ -290,24 +294,24 @@ struct ModelSetupSheet: View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "wifi")
                 .font(.footnote.weight(.semibold))
-                .foregroundStyle(BuddyTheme.cobalt)
+                .foregroundStyle(.primary)
                 .padding(.top, 2)
 
-            Text("Recommended on Wi-Fi. You can switch between Apple On-Device Speech, WhisperKit Large v3 Turbo, or import your own .gguf anytime in Settings.")
+            Text("Recommended on Wi-Fi. You can switch between Qwen 2.5 1.5B, Qwen 2.5 0.5B, or import your own .gguf file anytime in Settings.")
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(BuddyTheme.mutedText)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 4)
     }
 
-    private func bottomActionBar(isVoiceReady: Bool, isAllReady: Bool) -> some View {
-        let needsWhisper = (modelManager.selectedSpeechEngine == .whisperKit)
-            && !modelManager.isDownloaded(modelManager.selectedWhisperPreset)
-        let needsLLM = !modelManager.isDownloaded(.qwen25_1_5B)
-        let hasPendingDownloads = needsWhisper || needsLLM
-        let missingMB = (needsWhisper ? modelManager.selectedWhisperPreset.approximateSizeMB : 0)
-            + (needsLLM ? LLMPreset.qwen25_1_5B.approximateSizeMB : 0)
+    private func bottomActionBar(
+        preset: LLMPreset,
+        isVoiceReady: Bool,
+        isLLMReady: Bool,
+        isAllReady: Bool
+    ) -> some View {
+        let needsLLM = !isLLMReady && preset != .custom
 
         return VStack(spacing: 10) {
             if isAllReady {
@@ -319,57 +323,42 @@ struct ModelSetupSheet: View {
                         Image(systemName: "checkmark.circle.fill")
                         Text("Start Training")
                     }
-                    .font(.headline)
-                    .foregroundStyle(.white)
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(BuddyTheme.inkInverse)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 15)
                     .background(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .fill(BuddyTheme.cobalt)
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(BuddyTheme.inkPrimary)
                     )
                 }
                 .buttonStyle(.plain)
-            } else if hasPendingDownloads {
-                let isBusy = modelManager.isDownloadingWhisper || modelManager.isDownloadingLLM
-                let downloadLabel: String = {
-                    if isBusy { return "Downloading Offline AI…" }
-                    if needsWhisper && needsLLM {
-                        return "Download Offline AI Pack (\(formatSizeMB(missingMB)))"
-                    }
-                    if needsWhisper {
-                        return "Download \(modelManager.selectedWhisperPreset.displayName) (\(formatSizeMB(missingMB)))"
-                    }
-                    return "Download Qwen 2.5 Coach (\(formatSizeMB(missingMB)))"
-                }()
+            } else if needsLLM {
+                let isBusy = modelManager.isDownloadingLLM
+                let sizeLabel = formatSizeMB(preset.approximateSizeMB)
 
                 Button {
                     BuddyHaptics.mediumImpact()
                     Task {
-                        await modelManager.downloadRecommendedPack()
+                        await modelManager.downloadLLMModel(preset)
                     }
                 } label: {
                     HStack(spacing: 10) {
                         if isBusy {
                             ProgressView()
-                                .tint(.white)
+                                .tint(BuddyTheme.inkInverse)
                         } else {
                             Image(systemName: "arrow.down.circle.fill")
                         }
-                        Text(downloadLabel)
+                        Text(isBusy ? "Downloading \(preset.displayName)…" : "Download \(preset.displayName) (\(sizeLabel))")
                     }
-                    .font(.headline)
-                    .foregroundStyle(.white)
+                    .font(.system(size: 15.5, weight: .bold))
+                    .foregroundStyle(BuddyTheme.inkInverse)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 15)
                     .background(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .fill(
-                                LinearGradient(
-                                    colors: [BuddyTheme.cobalt, BuddyTheme.cobaltDeep],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(BuddyTheme.inkPrimary)
                             .opacity(isBusy ? 0.78 : 1.0)
                     )
                 }
@@ -386,13 +375,12 @@ struct ModelSetupSheet: View {
                             : "Skip for now (Use Typed & Manual Logging)"
                     )
                     .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(BuddyTheme.mutedText)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
                 }
                 .buttonStyle(.plain)
             } else {
-                // Qwen 2.5 is already cached, but Apple On-Device Speech still needs setup in iOS Settings.
                 Button {
                     BuddyHaptics.lightImpact()
                     dismiss()
@@ -401,24 +389,24 @@ struct ModelSetupSheet: View {
                         Image(systemName: "checkmark.circle")
                         Text("Continue (Typed & Manual Logging)")
                     }
-                    .font(.headline)
-                    .foregroundStyle(.white)
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(BuddyTheme.inkInverse)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 15)
                     .background(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .fill(BuddyTheme.cobalt)
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(BuddyTheme.inkPrimary)
                     )
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 16)
         .padding(.top, 12)
         .padding(.bottom, 16)
-        .background(.ultraThinMaterial)
+        .background(BuddyTheme.canvasBackground)
         .overlay(alignment: .top) {
-            Divider()
+            Divider().overlay(BuddyTheme.hairlineBorder)
         }
     }
 

@@ -9,12 +9,16 @@ struct BuddyApp: App {
     @State private var modelManager: ModelManager
     @State private var audioRecorder: AudioRecorderService
     @State private var appleSpeechService: AppleSpeechService
-    @State private var whisperService: WhisperTranscriptionService
     @State private var llmService: LocalLLMService
     @State private var pipeline: VoicePipelineCoordinator
     @State private var workoutStore: WorkoutStore
 
     @Environment(\.scenePhase) private var scenePhase
+    @AppStorage("buddy.preferences.appearance") private var appearanceRaw: String = BuddyAppearance.dark.rawValue
+
+    private var preferredAppearance: BuddyAppearance {
+        BuddyAppearance(rawValue: appearanceRaw) ?? .dark
+    }
 
     @MainActor
     init() {
@@ -24,12 +28,10 @@ struct BuddyApp: App {
         let manager = ModelManager()
         let recorder = AudioRecorderService()
         let appleSpeech = AppleSpeechService()
-        let whisper = WhisperTranscriptionService(modelManager: manager)
         let llm = LocalLLMService(modelManager: manager)
         let coordinator = VoicePipelineCoordinator(
             audioRecorder: recorder,
             appleSpeechService: appleSpeech,
-            whisperService: whisper,
             llmService: llm,
             modelManager: manager
         )
@@ -39,7 +41,6 @@ struct BuddyApp: App {
         _modelManager = State(initialValue: manager)
         _audioRecorder = State(initialValue: recorder)
         _appleSpeechService = State(initialValue: appleSpeech)
-        _whisperService = State(initialValue: whisper)
         _llmService = State(initialValue: llm)
         _pipeline = State(initialValue: coordinator)
         _workoutStore = State(initialValue: store)
@@ -52,10 +53,16 @@ struct BuddyApp: App {
                 pipeline: pipeline,
                 modelManager: modelManager,
                 appleSpeechService: appleSpeechService,
-                whisperService: whisperService,
                 llmService: llmService
             )
-            .tint(BuddyTheme.cobalt)
+            .tint(BuddyTheme.inkPrimary)
+            .preferredColorScheme(preferredAppearance.colorScheme)
+            .onAppear {
+                BuddyAppearance.applyToAllWindows(preferredAppearance)
+            }
+            .onChange(of: appearanceRaw) { _, _ in
+                BuddyAppearance.applyToAllWindows(preferredAppearance)
+            }
         }
         .modelContainer(modelContainer)
         .onChange(of: scenePhase) { _, newPhase in
@@ -65,7 +72,9 @@ struct BuddyApp: App {
                 llmService.stopCoachGeneration()
                 WidgetRefreshHelper.sync(store: workoutStore)
             case .active:
+                BuddyAppearance.applyToAllWindows(preferredAppearance)
                 modelManager.refreshDownloadState()
+                appleSpeechService.refreshAuthorizationStatus()
                 pipeline.resumePendingWorkIfNeeded(into: workoutStore)
             case .inactive:
                 break

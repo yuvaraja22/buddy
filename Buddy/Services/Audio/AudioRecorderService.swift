@@ -5,7 +5,6 @@ import Observation
 public enum AudioRecorderError: LocalizedError, Sendable {
     case permissionDenied
     case invalidInputFormat
-    case converterCreationFailed
     case engineStartFailed(String)
 
     public var errorDescription: String? {
@@ -14,107 +13,55 @@ public enum AudioRecorderError: LocalizedError, Sendable {
             return "Microphone permission was denied. Enable Microphone access for Buddy in Settings."
         case .invalidInputFormat:
             return "Could not read audio from the device microphone."
-        case .converterCreationFailed:
-            return "Could not configure the 16 kHz offline audio converter."
         case .engineStartFailed(let detail):
             return "Could not start audio recording: \(detail)"
         }
     }
 }
 
-/// Thread-safe bounded raw mono Float32 accumulator segmented by hardware sample rate.
-/// Storing raw hardware-rate samples during capture avoids calling stateful `AVAudioConverter`
-/// with `.noDataNow` on every 42ms realtime tap chunk (which introduces polyphase FIR glitches).
-/// When `shouldStoreSamples` is false (Apple On-Device Speech streaming mode), only duration
-/// is tracked so the realtime audio tap allocates zero heap memory.
-private final class LockedRawAudioBuffer: @unchecked Sendable {
-    struct Segment {
-        let sampleRate: Double
-        var samples: [Float]
-    }
-
+/// Thread-safe duration tracker updated directly on CoreAudio's realtime tap with zero heap allocations.
+private final class LockedDurationTracker: @unchecked Sendable {
     private let lock = NSLock()
-    private var segments: [Segment] = []
-    private var accumulatedDurationSeconds: TimeInterval = 0
-    private var shouldStoreSamples: Bool = true
+    private var accumulatedSeconds: TimeInterval = 0
     private let maxDurationSeconds: TimeInterval
 
     init(maxDurationSeconds: TimeInterval) {
         self.maxDurationSeconds = maxDurationSeconds
     }
 
-    func reset(storeSamples: Bool) {
+    func reset() {
         lock.lock()
-        segments.removeAll(keepingCapacity: false)
-        accumulatedDurationSeconds = 0
-        shouldStoreSamples = storeSamples
+        accumulatedSeconds = 0
         lock.unlock()
     }
 
-    var storesSamples: Bool {
-        lock.lock()
-        let flag = shouldStoreSamples
-        lock.unlock()
-        return flag
-    }
-
-    func recordDuration(frameCount: Int, sampleRate: Double) {
+    func record(frameCount: Int, sampleRate: Double) {
         guard frameCount > 0, sampleRate > 0 else { return }
         lock.lock()
-        accumulatedDurationSeconds = min(
+        accumulatedSeconds = min(
             maxDurationSeconds,
-            accumulatedDurationSeconds + (Double(frameCount) / sampleRate)
+            accumulatedSeconds + (Double(frameCount) / sampleRate)
         )
         lock.unlock()
     }
 
-    func append(_ newSamples: [Float], sampleRate: Double) {
-        guard !newSamples.isEmpty, sampleRate > 0 else { return }
+    var totalSeconds: TimeInterval {
         lock.lock()
-        defer { lock.unlock() }
-
-        let remainingSeconds = maxDurationSeconds - accumulatedDurationSeconds
-        guard remainingSeconds > 0 else { return }
-
-        let maxAllowedFrames = Int(ceil(remainingSeconds * sampleRate))
-        let countToCopy = min(newSamples.count, maxAllowedFrames)
-        guard countToCopy > 0 else { return }
-
-        if shouldStoreSamples {
-            let slice = countToCopy == newSamples.count ? newSamples : Array(newSamples.prefix(countToCopy))
-            if let lastIndex = segments.indices.last,
-               abs(segments[lastIndex].sampleRate - sampleRate) < 1.0 {
-                segments[lastIndex].samples.append(contentsOf: slice)
-            } else {
-                var initial: [Float] = []
-                initial.reserveCapacity(max(Int(sampleRate * 5), slice.count))
-                initial.append(contentsOf: slice)
-                segments.append(Segment(sampleRate: sampleRate, samples: initial))
-            }
-        }
-
-        accumulatedDurationSeconds += Double(countToCopy) / sampleRate
-    }
-
-    var totalDurationSeconds: TimeInterval {
-        lock.lock()
-        let duration = accumulatedDurationSeconds
+        let duration = accumulatedSeconds
         lock.unlock()
         return duration
     }
 
-    func drain() -> (segments: [Segment], duration: TimeInterval) {
+    func drain() -> TimeInterval {
         lock.lock()
-        let copiedSegments = segments
-        let duration = accumulatedDurationSeconds
-        segments.removeAll(keepingCapacity: false)
-        accumulatedDurationSeconds = 0
+        let duration = accumulatedSeconds
+        accumulatedSeconds = 0
         lock.unlock()
-        return (copiedSegments, duration)
+        return duration
     }
 }
 
-/// Thread-safe holder for an optional live PCM buffer listener (used by Apple On-Device Speech).
+/// Thread-safe holder for the live PCM buffer listener (consumed by Apple On-Device Speech).
 private final class LockedAudioBufferHandler: @unchecked Sendable {
     private let lock = NSLock()
     private var handler: (@Sendable (AVAudioPCMBuffer) -> Void)?
@@ -157,12 +104,11 @@ private final class AudioNotificationObserverToken: @unchecked Sendable {
 @Observable
 @MainActor
 public final class AudioRecorderService {
-    public static let targetSampleRate: Double = 16_000
     public static let maxRecordingSeconds: TimeInterval = 60
-    private static let visualizerBarCount: Int = 28
+    private static let visualizerBarCount: Int = 24
 
     public var isRecording: Bool = false
-    public var audioLevels: [Float] = Array(repeating: 0.05, count: visualizerBarCount)
+    public var audioLevels: [Float] = Array(repeating: 0.08, count: visualizerBarCount)
     public var recordingDuration: TimeInterval = 0
     public var permissionDenied: Bool = false
 
@@ -173,7 +119,7 @@ public final class AudioRecorderService {
     @ObservationIgnored public var onEngineRestarted: (@MainActor () throws -> Void)?
 
     @ObservationIgnored private var audioEngine: AVAudioEngine?
-    private let rawAudioBuffer = LockedRawAudioBuffer(maxDurationSeconds: maxRecordingSeconds)
+    private let durationTracker = LockedDurationTracker(maxDurationSeconds: maxRecordingSeconds)
     private let audioBufferHandler = LockedAudioBufferHandler()
     @ObservationIgnored private var recordingStartDate: Date?
     @ObservationIgnored private var durationTask: Task<Void, Never>?
@@ -186,7 +132,7 @@ public final class AudioRecorderService {
         installInterruptionObserver()
     }
 
-    /// Sets or clears a realtime audio buffer callback used for live streaming speech recognition.
+    /// Sets or clears the realtime PCM buffer callback forwarded to Apple On-Device Speech.
     public func setAudioBufferHandler(_ handler: (@Sendable (AVAudioPCMBuffer) -> Void)?) {
         audioBufferHandler.set(handler)
     }
@@ -210,12 +156,10 @@ public final class AudioRecorderService {
         }
     }
 
-    /// Activates `AVAudioSession`, invokes `onSessionActivated` (so streaming speech recognizers
-    /// start *after* the audio session is active and *before* buffers flow), and starts `AVAudioEngine`.
-    /// Set `captureRawSamples = false` when streaming directly to Apple Speech to avoid allocating
-    /// up to 60s of redundant 48 kHz samples on the realtime audio thread.
+    /// Activates `AVAudioSession`, invokes `onSessionActivated` (so Apple On-Device Speech starts
+    /// *after* the audio session is active and *before* buffers flow), and starts `AVAudioEngine`
+    /// with a zero-allocation realtime tap.
     public func startRecording(
-        captureRawSamples: Bool = true,
         onSessionActivated: (@MainActor () throws -> Void)? = nil
     ) async throws {
         let granted = await requestPermission()
@@ -223,16 +167,14 @@ public final class AudioRecorderService {
             throw AudioRecorderError.permissionDenied
         }
 
-        // Clean up any stale engine session before starting a fresh capture.
         teardownEngine(deactivateSession: false)
-        rawAudioBuffer.reset(storeSamples: captureRawSamples)
+        durationTracker.reset()
         configRecoveryAttempts = 0
 
         let session = AVAudioSession.sharedInstance()
         do {
-            // Use `.default` mode (not `.measurement`) so iOS enables hardware mic AGC,
-            // directional beamforming, and voice front-end conditioning — matching WhisperKit's
-            // own AudioProcessor and Apple Speech best practices.
+            // `.default` mode enables iOS hardware mic AGC, directional beamforming, and voice
+            // front-end conditioning for clean recognition even in a gym.
             try session.setCategory(
                 .playAndRecord,
                 mode: .default,
@@ -263,212 +205,19 @@ public final class AudioRecorderService {
         isRecording = true
         recordingDuration = 0
         recordingStartDate = Date()
-        audioLevels = Array(repeating: 0.05, count: Self.visualizerBarCount)
+        audioLevels = Array(repeating: 0.08, count: Self.visualizerBarCount)
         startDurationTimer()
     }
 
-    /// Stops recording and returns clean, single-pass resampled and gently normalized
-    /// 16 kHz mono Float32 PCM audio ready for WhisperKit.
-    public func stopRecording() -> [Float] {
+    /// Stops recording and returns the captured audio duration in seconds.
+    public func stopRecording() -> TimeInterval {
         teardownEngine(deactivateSession: true)
-        let (segments, _) = rawAudioBuffer.drain()
-        guard !segments.isEmpty else { return [] }
-
-        var combined16k: [Float] = []
-        for segment in segments {
-            let resampled = Self.resampleTo16kHz(
-                samples: segment.samples,
-                fromSampleRate: segment.sampleRate
-            )
-            combined16k.append(contentsOf: resampled)
-        }
-
-        return Self.normalizeSpeechAudio(combined16k)
-    }
-
-    /// Stops recording and returns the captured audio duration without running 16 kHz resampling.
-    /// Used when live streaming buffers were already consumed by Apple On-Device Speech.
-    public func stopRecordingDurationOnly() -> TimeInterval {
-        teardownEngine(deactivateSession: true)
-        let (_, duration) = rawAudioBuffer.drain()
-        return duration
+        return durationTracker.drain()
     }
 
     public func cancelRecording() {
         teardownEngine(deactivateSession: true)
-        rawAudioBuffer.reset(storeSamples: false)
-    }
-
-    // MARK: - Single-Pass Offline Audio Resampling & Conditioning
-
-    /// Resamples mono Float32 samples to 16 kHz in ONE continuous `AVAudioConverter` pass
-    /// (sequential `.haveData` slices followed by `.endOfStream`) so polyphase FIR filter state
-    /// never stalls or glitches at buffer boundaries.
-    public nonisolated static func resampleTo16kHz(
-        samples: [Float],
-        fromSampleRate sourceSampleRate: Double
-    ) -> [Float] {
-        guard !samples.isEmpty, sourceSampleRate > 0 else { return [] }
-        if abs(sourceSampleRate - targetSampleRate) < 1.0 {
-            return samples
-        }
-
-        guard let inputFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: sourceSampleRate,
-            channels: 1,
-            interleaved: false
-        ),
-        let outputFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: targetSampleRate,
-            channels: 1,
-            interleaved: false
-        ),
-        let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
-            return linearResampleTo16kHz(samples: samples, fromSampleRate: sourceSampleRate)
-        }
-
-        let ratio = targetSampleRate / sourceSampleRate
-        let expectedOutputCount = max(1, Int(ceil(Double(samples.count) * ratio)) + 64)
-        var outputSamples: [Float] = []
-        outputSamples.reserveCapacity(expectedOutputCount)
-
-        let feedChunkSize = 8_192
-        let outputChunkCapacity: AVAudioFrameCount = 32_768
-        guard let feedBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: AVAudioFrameCount(feedChunkSize)),
-              let feedChannel = feedBuffer.floatChannelData?[0],
-              let outputChunk = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: outputChunkCapacity) else {
-            return linearResampleTo16kHz(samples: samples, fromSampleRate: sourceSampleRate)
-        }
-
-        var inputOffset = 0
-        var conversionError: NSError?
-
-        samples.withUnsafeBufferPointer { src in
-            guard let baseAddress = src.baseAddress else { return }
-
-            while true {
-                outputChunk.frameLength = 0
-                let status = converter.convert(to: outputChunk, error: &conversionError) { inNumberOfPackets, outStatus in
-                    let remaining = samples.count - inputOffset
-                    guard remaining > 0 else {
-                        outStatus.pointee = .endOfStream
-                        return nil
-                    }
-                    let requested = max(1, Int(inNumberOfPackets))
-                    let framesToCopy = min(remaining, min(feedChunkSize, requested))
-                    feedChannel.update(from: baseAddress.advanced(by: inputOffset), count: framesToCopy)
-                    feedBuffer.frameLength = AVAudioFrameCount(framesToCopy)
-                    inputOffset += framesToCopy
-                    outStatus.pointee = .haveData
-                    return feedBuffer
-                }
-
-                if let outChannel = outputChunk.floatChannelData?[0], outputChunk.frameLength > 0 {
-                    let produced = Int(outputChunk.frameLength)
-                    outputSamples.append(contentsOf: UnsafeBufferPointer(start: outChannel, count: produced))
-                }
-
-                if status == .endOfStream || status == .error || conversionError != nil {
-                    break
-                }
-                if status == .inputRanDry || outputChunk.frameLength == 0 {
-                    break
-                }
-            }
-        }
-
-        if conversionError != nil || outputSamples.isEmpty {
-            return linearResampleTo16kHz(samples: samples, fromSampleRate: sourceSampleRate)
-        }
-
-        return outputSamples
-    }
-
-    /// Removes DC offset and gently normalizes quiet speech toward a 0.75 level (clamped to
-    /// `1.0x...6.0x` gain) using a 99th-percentile magnitude over the interior window so short
-    /// button tap/release mic thumps never suppress or attenuate spoken words, while leaving
-    /// near-silent noise floors unboosted.
-    public nonisolated static func normalizeSpeechAudio(_ samples: [Float]) -> [Float] {
-        guard !samples.isEmpty else { return samples }
-
-        var sum: Double = 0
-        for sample in samples where sample.isFinite {
-            sum += Double(sample)
-        }
-        let mean = Float(sum / Double(samples.count))
-
-        var centered = [Float](repeating: 0, count: samples.count)
-        for index in 0..<samples.count {
-            let raw = samples[index]
-            centered[index] = raw.isFinite ? (raw - mean) : 0
-        }
-
-        // Exclude ~30ms at the start and end (480 samples at 16 kHz) when measuring speech level
-        // so mechanical finger tap/release spikes next to the bottom iPhone mic don't skew gain.
-        let edgeTrim = centered.count > 2_400 ? 480 : 0
-        let measureStart = edgeTrim
-        let measureEnd = centered.count - edgeTrim
-        let measureCount = max(1, measureEnd - measureStart)
-
-        var sumSquares: Double = 0
-        // Stride-sample up to ~4096 points across the measurement window for fast O(N) percentile.
-        let strideStep = max(1, measureCount / 4_096)
-        var sampledMagnitudes: [Float] = []
-        sampledMagnitudes.reserveCapacity((measureCount / strideStep) + 1)
-
-        var index = measureStart
-        while index < measureEnd {
-            let value = centered[index]
-            let magnitude = abs(value)
-            sumSquares += Double(value) * Double(value)
-            if (index - measureStart) % strideStep == 0 {
-                sampledMagnitudes.append(magnitude)
-            }
-            index += 1
-        }
-
-        let rms = Float(sqrt(sumSquares / Double(measureCount)))
-        sampledMagnitudes.sort()
-        let p99Index = min(sampledMagnitudes.count - 1, Int(Double(sampledMagnitudes.count - 1) * 0.99))
-        let robustLevel = sampledMagnitudes.isEmpty ? Float(0) : sampledMagnitudes[p99Index]
-
-        // Only boost when real speech energy exceeds the room noise floor.
-        guard robustLevel > 0.008, rms > 0.0015 else {
-            return centered
-        }
-
-        let targetLevel: Float = 0.75
-        // Never attenuate quiet speech (gain >= 1.0), and cap boost at 6x to avoid raising hiss.
-        let gain = min(6.0, max(1.0, targetLevel / robustLevel))
-        guard gain > 1.05 else {
-            return centered
-        }
-
-        for i in 0..<centered.count {
-            centered[i] = max(-0.98, min(0.98, centered[i] * gain))
-        }
-        return centered
-    }
-
-    private nonisolated static func linearResampleTo16kHz(
-        samples: [Float],
-        fromSampleRate sourceSampleRate: Double
-    ) -> [Float] {
-        guard !samples.isEmpty, sourceSampleRate > 0 else { return [] }
-        let ratio = sourceSampleRate / targetSampleRate
-        let outputLength = max(1, Int(Double(samples.count) / ratio))
-        var result = [Float](repeating: 0, count: outputLength)
-
-        for i in 0..<outputLength {
-            let srcPosition = Double(i) * ratio
-            let lowIndex = min(samples.count - 1, Int(srcPosition))
-            let highIndex = min(samples.count - 1, lowIndex + 1)
-            let frac = Float(srcPosition - Double(lowIndex))
-            result[i] = samples[lowIndex] * (1.0 - frac) + samples[highIndex] * frac
-        }
-        return result
+        durationTracker.reset()
     }
 
     // MARK: - Private Helpers
@@ -485,7 +234,7 @@ public final class AudioRecorderService {
         Self.installRealtimeTap(
             on: inputNode,
             inputFormat: inputFormat,
-            rawAudioBuffer: rawAudioBuffer,
+            durationTracker: durationTracker,
             bufferHandler: audioBufferHandler
         ) { [weak self] level in
             Task { @MainActor [weak self] in
@@ -543,15 +292,13 @@ public final class AudioRecorderService {
 
     private func handleEngineConfigurationChange(_ engine: AVAudioEngine) {
         let elapsed = recordingStartDate.map { Date().timeIntervalSince($0) } ?? 0
-        let bufferedDuration = rawAudioBuffer.totalDurationSeconds
+        let bufferedDuration = durationTracker.totalSeconds
 
         // AirPods / Bluetooth headsets negotiate A2DP -> HFP ~50–250ms after engine.start().
-        // Re-install the tap on the new hardware format instead of aborting as "too short".
+        // Remove the old bus-0 tap and stop the engine FIRST so no trailing buffer in the old
+        // format (e.g. 48 kHz) can reach the fresh SFSpeechAudioBufferRecognitionRequest.
         if configRecoveryAttempts < 2 && (elapsed < 1.0 || bufferedDuration < 0.3) {
             configRecoveryAttempts += 1
-            // Remove the old bus-0 tap and stop the engine FIRST so no trailing buffer in the old
-            // format (e.g. 48 kHz) can reach the fresh SFSpeechAudioBufferRecognitionRequest and
-            // cause an NSInvalidArgumentException when the new 16/24 kHz HFP buffers arrive.
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
 
@@ -598,8 +345,8 @@ public final class AudioRecorderService {
 
     private func appendVisualizerLevel(_ rawLevel: Float) {
         guard isRecording else { return }
-        let clamped = min(1.0, max(0.05, rawLevel))
-        let previous = audioLevels.last ?? 0.05
+        let clamped = min(1.0, max(0.08, rawLevel))
+        let previous = audioLevels.last ?? 0.08
         let smoothed = (previous * 0.35) + (clamped * 0.65)
         if audioLevels.count >= Self.visualizerBarCount {
             audioLevels.removeFirst()
@@ -621,7 +368,7 @@ public final class AudioRecorderService {
         isRecording = false
         recordingStartDate = nil
         recordingDuration = 0
-        audioLevels = Array(repeating: 0.05, count: Self.visualizerBarCount)
+        audioLevels = Array(repeating: 0.08, count: Self.visualizerBarCount)
 
         if deactivateSession {
             deactivateAudioSession()
@@ -636,50 +383,31 @@ public final class AudioRecorderService {
     }
 
     /// Installs the audio tap outside `@MainActor` isolation so CoreAudio's realtime
-    /// thread never triggers a main-actor executor assertion.
+    /// thread performs zero heap allocations and never triggers a main-actor assertion.
     private nonisolated static func installRealtimeTap(
         on inputNode: AVAudioInputNode,
         inputFormat: AVAudioFormat,
-        rawAudioBuffer: LockedRawAudioBuffer,
+        durationTracker: LockedDurationTracker,
         bufferHandler: LockedAudioBufferHandler,
         onLevel: @escaping @Sendable (Float) -> Void
     ) {
         let hardwareSampleRate = inputFormat.sampleRate
-        let shouldStoreSamples = rawAudioBuffer.storesSamples
 
         inputNode.installTap(onBus: 0, bufferSize: 2048, format: inputFormat) { buffer, _ in
             let frameCount = Int(buffer.frameLength)
             guard frameCount > 0 else { return }
 
-            // Forward hardware PCM buffer directly to Apple On-Device Speech when active.
             bufferHandler.forward(buffer)
+            durationTracker.record(frameCount: frameCount, sampleRate: hardwareSampleRate)
 
-            let rms: Float
-            if shouldStoreSamples {
-                let monoSamples = extractMonoFloatSamples(from: buffer)
-                guard !monoSamples.isEmpty else { return }
-                rawAudioBuffer.append(monoSamples, sampleRate: hardwareSampleRate)
-
-                var sumSquares: Float = 0
-                for sample in monoSamples {
-                    sumSquares += sample * sample
-                }
-                rms = sqrt(sumSquares / Float(max(1, monoSamples.count)))
-            } else {
-                // Zero-allocation path for Apple On-Device Speech streaming: track duration and
-                // compute RMS in-place directly over the PCM buffer without heap allocations.
-                rawAudioBuffer.recordDuration(frameCount: frameCount, sampleRate: hardwareSampleRate)
-                rms = computeRMSInPlace(from: buffer)
-            }
-
+            let rms = computeRMSInPlace(from: buffer)
             let decibels = 20 * log10(max(rms, 1e-5))
-            // Map typical gym speech range (-52 dB to -8 dB) into [0.05, 1.0].
-            let normalized = min(1.0, max(0.05, (decibels + 52.0) / 44.0))
+            let normalized = min(1.0, max(0.08, (decibels + 52.0) / 44.0))
             onLevel(normalized)
         }
     }
 
-    /// Computes mono RMS directly from an `AVAudioPCMBuffer` without heap allocations.
+    /// Computes mono RMS directly over hardware PCM buffers with zero heap allocations.
     private nonisolated static func computeRMSInPlace(from buffer: AVAudioPCMBuffer) -> Float {
         let frameCount = Int(buffer.frameLength)
         let channelCount = Int(buffer.format.channelCount)
@@ -735,54 +463,5 @@ public final class AudioRecorderService {
         }
 
         return 0
-    }
-
-    /// Extracts mono Float32 samples cleanly from any hardware PCM buffer layout.
-    private nonisolated static func extractMonoFloatSamples(from buffer: AVAudioPCMBuffer) -> [Float] {
-        let frameCount = Int(buffer.frameLength)
-        guard frameCount > 0 else { return [] }
-        let channelCount = Int(buffer.format.channelCount)
-        guard channelCount > 0 else { return [] }
-
-        if let floatChannels = buffer.floatChannelData {
-            if channelCount == 1 {
-                return Array(UnsafeBufferPointer(start: floatChannels[0], count: frameCount))
-            }
-            var mono = [Float](repeating: 0, count: frameCount)
-            let scale = 1.0 / Float(channelCount)
-            for channel in 0..<channelCount {
-                let ptr = floatChannels[channel]
-                for frame in 0..<frameCount {
-                    mono[frame] += ptr[frame] * scale
-                }
-            }
-            return mono
-        }
-
-        if let int16Channels = buffer.int16ChannelData {
-            var mono = [Float](repeating: 0, count: frameCount)
-            let scale = 1.0 / (Float(Int16.max) * Float(channelCount))
-            for channel in 0..<channelCount {
-                let ptr = int16Channels[channel]
-                for frame in 0..<frameCount {
-                    mono[frame] += Float(ptr[frame]) * scale
-                }
-            }
-            return mono
-        }
-
-        if let int32Channels = buffer.int32ChannelData {
-            var mono = [Float](repeating: 0, count: frameCount)
-            let scale = 1.0 / (Float(Int32.max) * Float(channelCount))
-            for channel in 0..<channelCount {
-                let ptr = int32Channels[channel]
-                for frame in 0..<frameCount {
-                    mono[frame] += Float(ptr[frame]) * scale
-                }
-            }
-            return mono
-        }
-
-        return []
     }
 }

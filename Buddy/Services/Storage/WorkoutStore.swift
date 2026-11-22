@@ -304,6 +304,7 @@ public final class WorkoutStore {
         notes: String = ""
     ) -> LoggedSet {
         let nextNumber = entry.sets.count + 1
+        let loggedAt = monotonicTimestamp(in: entry.session, fallbackEntry: entry)
         let newSet = LoggedSet(
             setNumber: nextNumber,
             reps: reps,
@@ -312,7 +313,7 @@ public final class WorkoutStore {
             tag: tag,
             notes: notes,
             rawTranscript: "",
-            loggedAt: Date(),
+            loggedAt: loggedAt,
             entry: nil
         )
         modelContext.insert(newSet)
@@ -340,6 +341,7 @@ public final class WorkoutStore {
     ) {
         let session = activeSession ?? createActiveSession(title: "Workout", sync: false)
         let resolved = ExerciseCatalog.resolve(name)
+        let baseTime = monotonicTimestamp(in: session)
         let entry: ExerciseEntry
 
         if let existing = session.entries.first(where: {
@@ -353,7 +355,7 @@ public final class WorkoutStore {
                 canonicalName: resolved.canonicalName,
                 muscleGroup: resolved.muscleGroup,
                 orderIndex: nextOrder,
-                createdAt: Date(),
+                createdAt: baseTime,
                 session: nil
             )
             modelContext.insert(created)
@@ -366,7 +368,6 @@ public final class WorkoutStore {
 
         let count = max(1, sets)
         let existingCount = entry.sets.count
-        let baseTime = Date()
         for offset in 0..<count {
             let newSet = LoggedSet(
                 setNumber: existingCount + offset + 1,
@@ -555,7 +556,7 @@ public final class WorkoutStore {
         var lastEntry: ExerciseEntry?
         var lastSet: LoggedSet?
 
-        let baseTime = Date()
+        let baseTime = monotonicTimestamp(in: session)
         var sequenceOffset = 0
 
         for item in intent.items {
@@ -840,6 +841,29 @@ public final class WorkoutStore {
             return activeSession
         }
         return sessions.first(where: { $0.id == id })
+    }
+
+    private func monotonicTimestamp(
+        in session: WorkoutSession?,
+        fallbackEntry: ExerciseEntry? = nil,
+        now: Date = Date()
+    ) -> Date {
+        var latestExisting: Date?
+        if let session {
+            for entry in session.entries {
+                latestExisting = latestExisting.map { max($0, entry.createdAt) } ?? entry.createdAt
+                for set in entry.sets {
+                    latestExisting = latestExisting.map { max($0, set.loggedAt) } ?? set.loggedAt
+                }
+            }
+        } else if let fallbackEntry {
+            latestExisting = fallbackEntry.sets.map(\.loggedAt).max() ?? fallbackEntry.createdAt
+        }
+
+        if let latestExisting, now <= latestExisting {
+            return latestExisting.addingTimeInterval(0.001)
+        }
+        return now
     }
 
     private func mostRecentSet(in session: WorkoutSession) -> (entry: ExerciseEntry, set: LoggedSet)? {

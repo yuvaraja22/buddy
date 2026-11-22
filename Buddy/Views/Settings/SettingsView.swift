@@ -9,22 +9,15 @@ struct SettingsView: View {
     let store: WorkoutStore
     let modelManager: ModelManager
     let appleSpeechService: AppleSpeechService
-    let whisperService: WhisperTranscriptionService
     let llmService: LocalLLMService
 
+    @AppStorage("buddy.preferences.appearance") private var appearanceRaw: String = BuddyAppearance.dark.rawValue
     @State private var showFileImporter: Bool = false
     @State private var importMessage: String?
     @State private var importIsError: Bool = false
     @State private var widgetRefreshNote: String?
     @State private var sceneRefreshTick: Int = 0
 
-    private let whisperPresets: [WhisperPreset] = [
-        .largeV3Turbo,
-        .small,
-        .baseEn,
-        .baseMultilingual,
-        .tinyEn
-    ]
     private let llmPresets: [LLMPreset] = [.qwen25_1_5B, .qwen25_0_5B, .custom]
 
     var body: some View {
@@ -44,7 +37,7 @@ struct SettingsView: View {
                     Button("Done") {
                         dismiss()
                     }
-                    .fontWeight(.semibold)
+                    .fontWeight(.bold)
                 }
             }
             .fileImporter(
@@ -73,6 +66,22 @@ struct SettingsView: View {
     private var preferencesSection: some View {
         Section("Preferences") {
             Picker(
+                "Appearance",
+                selection: Binding(
+                    get: { BuddyAppearance(rawValue: appearanceRaw) ?? .dark },
+                    set: { newAppearance in
+                        BuddyHaptics.selection()
+                        appearanceRaw = newAppearance.rawValue
+                        BuddyAppearance.applyToAllWindows(newAppearance)
+                    }
+                )
+            ) {
+                ForEach(BuddyAppearance.allCases) { option in
+                    Text(option.displayName).tag(option)
+                }
+            }
+
+            Picker(
                 "Weight Unit",
                 selection: Binding(
                     get: { store.preferredUnit },
@@ -90,172 +99,57 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Speech Recognition (Apple On-Device + WhisperKit)
+    // MARK: - Speech Recognition (Apple On-Device)
 
     private var speechSection: some View {
-        let engine = modelManager.selectedSpeechEngine
+        let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
+        let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
 
         return Section {
             Picker(
-                "Speech Engine",
+                "Voice Accent / Locale",
                 selection: Binding(
-                    get: { modelManager.selectedSpeechEngine },
-                    set: { newEngine in
+                    get: { modelManager.selectedAppleSpeechLocale },
+                    set: { newLocale in
                         BuddyHaptics.selection()
-                        let changed = (modelManager.selectedSpeechEngine != newEngine)
-                        modelManager.selectedSpeechEngine = newEngine
-                        if changed && newEngine == .appleOnDevice {
-                            Task { await whisperService.unload() }
-                        }
+                        modelManager.selectedAppleSpeechLocale = newLocale
                     }
                 )
             ) {
-                ForEach(SpeechEngine.allCases) { option in
+                ForEach(AppleSpeechLocaleOption.allCases) { option in
                     Text(option.displayName).tag(option)
                 }
             }
 
-            Text(engine.subtitle)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if isDenied {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(BuddyTheme.amberStreak)
+                        .padding(.top, 1)
 
-            if engine == .appleOnDevice {
-                appleSpeechControls
+                    Text("Speech Recognition access is turned off. Enable it in iOS Settings → Buddy.")
+                        .font(.caption)
+                        .foregroundStyle(BuddyTheme.amberStreak)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             } else {
-                whisperKitControls
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: availability.isReady ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(availability.isReady ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
+                        .padding(.top, 1)
+
+                    Text(availability.statusMessage)
+                        .font(.caption)
+                        .foregroundStyle(availability.isReady ? Color.secondary : BuddyTheme.amberStreak)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         } header: {
-            Text("Speech Recognition (Offline)")
+            Text("Apple On-Device Speech")
         } footer: {
-            if engine == .appleOnDevice {
-                Text("Runs 100% on-device via iOS Speech Recognition with gym exercise hints and zero RAM impact on Qwen 2.5.")
-            } else {
-                Text("Whisper Large v3 Turbo (~626 MB) offers the strongest Whisper accuracy across accents. Audio stays 100% on-device.")
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var appleSpeechControls: some View {
-        let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
-        let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
-
-        Picker(
-            "Voice Accent / Locale",
-            selection: Binding(
-                get: { modelManager.selectedAppleSpeechLocale },
-                set: { newLocale in
-                    BuddyHaptics.selection()
-                    modelManager.selectedAppleSpeechLocale = newLocale
-                }
-            )
-        ) {
-            ForEach(AppleSpeechLocaleOption.allCases) { option in
-                Text(option.displayName).tag(option)
-            }
-        }
-
-        if isDenied {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.subheadline)
-                    .foregroundStyle(BuddyTheme.amberStreak)
-                    .padding(.top, 1)
-
-                Text("Speech Recognition access is turned off. Enable it in iOS Settings → Buddy, or switch Speech Engine to WhisperKit.")
-                    .font(.caption)
-                    .foregroundStyle(BuddyTheme.amberStreak)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        } else {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: availability.isReady ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                    .font(.subheadline)
-                    .foregroundStyle(availability.isReady ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
-                    .padding(.top, 1)
-
-                Text(availability.statusMessage)
-                    .font(.caption)
-                    .foregroundStyle(availability.isReady ? .secondary : BuddyTheme.amberStreak)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var whisperKitControls: some View {
-        let selected = modelManager.selectedWhisperPreset
-
-        Picker(
-            "Whisper Variant",
-            selection: Binding(
-                get: { modelManager.selectedWhisperPreset },
-                set: { preset in
-                    BuddyHaptics.selection()
-                    let changed = (modelManager.selectedWhisperPreset != preset)
-                    modelManager.selectedWhisperPreset = preset
-                    modelManager.refreshDownloadState()
-                    if changed {
-                        Task { await whisperService.unload() }
-                    }
-                }
-            )
-        ) {
-            ForEach(whisperPresets, id: \.self) { preset in
-                Text("\(preset.displayName) (~\(preset.approximateSizeMB) MB)")
-                    .tag(preset)
-            }
-        }
-        .disabled(modelManager.isDownloadingWhisper)
-
-        Text(selected.subtitle)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-
-        if modelManager.isDownloadingWhisper {
-            VStack(alignment: .leading, spacing: 6) {
-                ProgressView(value: min(max(modelManager.whisperDownloadProgress, 0), 1))
-                    .tint(BuddyTheme.cobalt)
-                HStack {
-                    Text("Downloading \(selected.displayName)…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("\(Int((min(max(modelManager.whisperDownloadProgress, 0), 1) * 100).rounded()))%")
-                        .font(.caption.weight(.semibold))
-                        .buddyNumeric()
-                        .foregroundStyle(BuddyTheme.cobalt)
-                }
-            }
-        } else if modelManager.isWhisperDownloaded {
-            HStack {
-                Label("Downloaded & Ready", systemImage: "checkmark.circle.fill")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(BuddyTheme.emeraldLive)
-                Spacer()
-                Button("Delete", role: .destructive) {
-                    BuddyHaptics.warning()
-                    Task {
-                        await whisperService.unload()
-                        modelManager.deleteWhisperModel(selected)
-                    }
-                }
-                .font(.subheadline.weight(.semibold))
-            }
-        } else {
-            Button {
-                BuddyHaptics.mediumImpact()
-                Task {
-                    await modelManager.downloadWhisperModel(selected)
-                }
-            } label: {
-                Label(
-                    "Download \(selected.displayName) (~\(selected.approximateSizeMB) MB)",
-                    systemImage: "arrow.down.circle.fill"
-                )
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(BuddyTheme.cobalt)
-            }
+            Text("100% offline with live streaming captions, gym exercise vocabulary hints, 0 MB download, and zero extra RAM usage.")
         }
     }
 
@@ -307,7 +201,7 @@ struct SettingsView: View {
             if modelManager.isDownloadingLLM {
                 VStack(alignment: .leading, spacing: 8) {
                     ProgressView(value: min(max(modelManager.llmDownloadProgress, 0), 1))
-                        .tint(BuddyTheme.cobalt)
+                        .tint(BuddyTheme.inkPrimary)
                     HStack {
                         Text("Downloading \(selected.displayName)…")
                             .font(.caption)
@@ -316,7 +210,7 @@ struct SettingsView: View {
                         Text("\(Int((min(max(modelManager.llmDownloadProgress, 0), 1) * 100).rounded()))%")
                             .font(.caption.weight(.semibold))
                             .buddyNumeric()
-                            .foregroundStyle(BuddyTheme.cobalt)
+                            .foregroundStyle(.primary)
                     }
                     Button("Cancel Download", role: .destructive) {
                         BuddyHaptics.lightImpact()
@@ -349,7 +243,7 @@ struct SettingsView: View {
                         systemImage: "arrow.down.circle.fill"
                     )
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(BuddyTheme.cobalt)
+                    .foregroundStyle(.primary)
                 }
             }
 
@@ -358,7 +252,7 @@ struct SettingsView: View {
                 showFileImporter = true
             } label: {
                 Label("Import .gguf from Files", systemImage: "doc.badge.plus")
-                    .foregroundStyle(BuddyTheme.cobalt)
+                    .foregroundStyle(.primary)
             }
 
             if let error = modelManager.downloadError {
@@ -384,40 +278,22 @@ struct SettingsView: View {
     private var memoryAndRuntimeSection: some View {
         Section {
             LabeledContent("Speech Engine") {
-                if modelManager.selectedSpeechEngine == .appleOnDevice {
-                    let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
-                    let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
-                    let badgeColor: Color = (isDenied || !availability.isReady) ? BuddyTheme.amberStreak : BuddyTheme.emeraldLive
-                    let badgeLabel: String = {
-                        if isDenied { return "Permission Needed" }
-                        if !availability.isReady { return "Offline Pack Needed" }
-                        return "Apple On-Device"
-                    }()
+                let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
+                let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
+                let badgeColor: Color = (isDenied || !availability.isReady) ? BuddyTheme.amberStreak : BuddyTheme.emeraldLive
+                let badgeLabel: String = {
+                    if isDenied { return "Permission Needed" }
+                    if !availability.isReady { return "Offline Pack Needed" }
+                    return "Apple On-Device"
+                }()
 
-                    HStack(spacing: 5) {
-                        Circle()
-                            .fill(badgeColor)
-                            .frame(width: 7, height: 7)
-                        Text(badgeLabel)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(badgeColor)
-                    }
-                } else {
-                    runtimeBadge(
-                        isLoaded: whisperService.isLoaded,
-                        isLoading: whisperService.isLoading,
-                        label: whisperService.loadedVariantName
-                    )
-                }
-            }
-
-            if modelManager.selectedSpeechEngine == .appleOnDevice && (whisperService.isLoaded || whisperService.isLoading) {
-                LabeledContent("Whisper Runtime") {
-                    runtimeBadge(
-                        isLoaded: whisperService.isLoaded,
-                        isLoading: whisperService.isLoading,
-                        label: whisperService.loadedVariantName
-                    )
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(badgeColor)
+                        .frame(width: 7, height: 7)
+                    Text(badgeLabel)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(badgeColor)
                 }
             }
 
@@ -443,15 +319,12 @@ struct SettingsView: View {
 
             Button {
                 BuddyHaptics.lightImpact()
-                Task {
-                    await whisperService.unload()
-                    llmService.unload()
-                }
+                llmService.unload()
             } label: {
-                Label("Free Model Memory", systemImage: "memorychip")
-                    .foregroundStyle(BuddyTheme.cobalt)
+                Label("Free LLM Memory", systemImage: "memorychip")
+                    .foregroundStyle(.primary)
             }
-            .disabled(!whisperService.isLoaded && !llmService.isLoaded)
+            .disabled(!llmService.isLoaded)
         } header: {
             Text("Memory & Runtime")
         }
@@ -480,7 +353,7 @@ struct SettingsView: View {
                 widgetRefreshNote = "Widgets refreshed at \(Date().formatted(date: .omitted, time: .standard))"
             } label: {
                 Label("Test Widget Refresh", systemImage: "arrow.clockwise.circle")
-                    .foregroundStyle(BuddyTheme.cobalt)
+                    .foregroundStyle(.primary)
             }
 
             if let widgetRefreshNote {
