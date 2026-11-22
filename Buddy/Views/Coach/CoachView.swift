@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import UIKit
 
 struct CoachView: View {
     @Environment(\.modelContext) private var modelContext
@@ -8,6 +9,8 @@ struct CoachView: View {
     let store: WorkoutStore
     let llmService: LocalLLMService
     let modelManager: ModelManager
+    var isTabActive: Bool = true
+    var dockClearance: CGFloat = 78
     let onOpenModelSetup: () -> Void
 
     @State private var inputText: String = ""
@@ -18,6 +21,7 @@ struct CoachView: View {
     @State private var conversationEpoch: Int = 0
     @State private var lastStreamScrollAt: Date = .distantPast
     @State private var showClearConfirmation: Bool = false
+    @State private var keyboardOverlapHeight: CGFloat = 0
     @FocusState private var isInputFocused: Bool
 
     private var isCoachStreaming: Bool {
@@ -65,6 +69,20 @@ struct CoachView: View {
                     clearConversation()
                 }
                 Button("Cancel", role: .cancel) {}
+            }
+            .onChange(of: isTabActive) { _, active in
+                if !active {
+                    isInputFocused = false
+                    if isCoachStreaming {
+                        stopGenerating()
+                    }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { notification in
+                keyboardOverlapHeight = Self.resolveKeyboardOverlapHeight(from: notification)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+                keyboardOverlapHeight = 0
             }
             .onDisappear {
                 if isCoachStreaming {
@@ -401,9 +419,26 @@ struct CoachView: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
-        // Sit snugly above the floating Uber tab bar when browsing, and snugly above the keyboard when typing.
-        .padding(.bottom, isInputFocused ? 10 : 84)
-        .animation(.snappy(duration: 0.2), value: isInputFocused)
+        // Compute bottom clearance from real VoiceRecordDock height minus actual software keyboard lift
+        // above the bottom safe area so hardware keyboards, interactive scroll-dismiss, and expanded
+        // error pills never collide with VoiceRecordDock.
+        .padding(.bottom, max(0, dockClearance - keyboardOverlapHeight) + 8)
+        .animation(.snappy(duration: 0.2), value: keyboardOverlapHeight)
+        .animation(.snappy(duration: 0.2), value: dockClearance)
+    }
+
+    private static func resolveKeyboardOverlapHeight(from notification: Notification) -> CGFloat {
+        guard let endFrame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else {
+            return 0
+        }
+        let activeWindow = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first(where: \.isKeyWindow)
+        guard let activeWindow else { return 0 }
+        let frameInWindow = activeWindow.convert(endFrame, from: nil)
+        let overlap = activeWindow.bounds.intersection(frameInWindow).height
+        return max(0, overlap - activeWindow.safeAreaInsets.bottom)
     }
 
     // MARK: - Actions

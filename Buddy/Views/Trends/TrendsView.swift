@@ -11,6 +11,7 @@ private enum ExerciseChartMetric: String, CaseIterable, Identifiable {
 
 struct TrendsView: View {
     let store: WorkoutStore
+    var dockClearance: CGFloat = 78
 
     @State private var selectedTimeframe: TrendTimeframe = .month
     @State private var selectedExercise: String = ""
@@ -40,7 +41,9 @@ struct TrendsView: View {
         let progressionPoints = activeExercise.map {
             StatsCalculator.exerciseProgression(canonicalName: $0, sessions: sessions)
         } ?? []
-        let sortedHistory = sessions.sorted { $0.startedAt > $1.startedAt }
+        let sortedHistory = sessions
+            .filter { $0.isActive || $0.totalSets > 0 }
+            .sorted { $0.startedAt > $1.startedAt }
 
         NavigationStack {
             ScrollView {
@@ -61,7 +64,7 @@ struct TrendsView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
-                .padding(.bottom, BuddyTheme.floatingBarClearance)
+                .padding(.bottom, max(BuddyTheme.floatingBarClearance, dockClearance + 24))
             }
             .background(BuddyTheme.canvasBackground.ignoresSafeArea())
             .toolbar(.hidden, for: .navigationBar)
@@ -453,7 +456,7 @@ struct TrendsView: View {
 
     private func sessionHistoryRow(_ session: WorkoutSession) -> some View {
         let primaryMuscle = session.sortedEntries.first?.muscleGroup ?? .fullBody
-        let durationBadge = DurationFormatter.formatClock(seconds: max(60, session.durationSeconds))
+        let durationBadge = DurationFormatter.formatClock(seconds: max(1, session.durationSeconds))
 
         return HStack(alignment: .top, spacing: 12) {
             WorkoutThumbnailView(

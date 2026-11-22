@@ -67,6 +67,7 @@ struct SessionDetailView: View {
         }
         .sheet(item: $editingSet) { set in
             SetEditorSheet(set: set, store: store)
+                .buddyAppearance()
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
         }
@@ -149,12 +150,13 @@ struct SessionDetailView: View {
     }
 
     private func exerciseTableCard(_ entry: ExerciseEntry) -> some View {
-        NativeCard(padding: 13, cornerRadius: 14) {
+        let setCountBadge = "\(entry.sets.count) \(entry.sets.count == 1 ? "set" : "sets")"
+        return NativeCard(padding: 13, cornerRadius: 14) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .center, spacing: 10) {
                     WorkoutThumbnailView(
                         assetName: entry.muscleGroup.thumbnailAssetName,
-                        bottomRightBadge: "\(entry.sets.count)s",
+                        bottomRightBadge: setCountBadge,
                         width: 76,
                         height: 46
                     )

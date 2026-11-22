@@ -126,6 +126,19 @@ private struct SmallHomeWidgetView: View {
         snapshot.activeSession?.totalVolumeKg ?? snapshot.todayVolumeKg
     }
 
+    private var subtitleText: String {
+        if displayVolumeKg > 0 {
+            return snapshot.preferredUnit.formatVolume(kg: displayVolumeKg)
+        }
+        if let activeTitle = snapshot.activeSession?.title {
+            return activeTitle
+        }
+        if displaySets > 0 {
+            return snapshot.todayReps > 0 ? "\(snapshot.todayReps) reps today" : "Logged today"
+        }
+        return "Ready to train"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 5) {
@@ -167,15 +180,11 @@ private struct SmallHomeWidgetView: View {
                         .foregroundStyle(muted)
                 }
 
-                Text(
-                    displayVolumeKg > 0
-                        ? snapshot.preferredUnit.formatVolume(kg: displayVolumeKg)
-                        : (snapshot.activeSession?.title ?? "Ready to train")
-                )
-                .font(.system(size: 12, weight: .medium))
-                .monospacedDigit()
-                .foregroundStyle(muted)
-                .lineLimit(1)
+                Text(subtitleText)
+                    .font(.system(size: 12, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(muted)
+                    .lineLimit(1)
             }
 
             Spacer(minLength: 2)

@@ -499,15 +499,52 @@ public final class ModelManager {
     }
 
     /// Reclaims storage from any previously downloaded WhisperKit CoreML models (145–626 MB)
-    /// left behind on devices upgrading from older builds.
+    /// left behind on devices upgrading from older builds without blocking cold-launch UI rendering.
+    /// Atomically renames `BuddyModels/Whisper` to a sibling trash path on the same APFS volume
+    /// (instant O(1) `rename(2)` so storage calculation excludes it immediately) and unlinks off-main.
     private func purgeLegacyWhisperCacheIfPresent() {
-        let legacyWhisperDir = modelsRootDirectory.appendingPathComponent("Whisper", isDirectory: true)
-        if FileManager.default.fileExists(atPath: legacyWhisperDir.path) {
-            try? FileManager.default.removeItem(at: legacyWhisperDir)
-        }
         defaults.removeObject(forKey: DefaultsKey.legacySpeechEngine)
         defaults.removeObject(forKey: DefaultsKey.legacyWhisperPreset)
         defaults.removeObject(forKey: DefaultsKey.legacyWhisperRelativePaths)
+
+        let fileManager = FileManager.default
+        let parentDir = modelsRootDirectory.deletingLastPathComponent()
+        let legacyWhisperDir = modelsRootDirectory.appendingPathComponent("Whisper", isDirectory: true)
+        var directoriesToDelete: [URL] = []
+
+        if fileManager.fileExists(atPath: legacyWhisperDir.path) {
+            let stagedTrash = parentDir.appendingPathComponent(
+                ".BuddyLegacyWhisperTrash-\(UUID().uuidString)",
+                isDirectory: true
+            )
+            do {
+                try fileManager.moveItem(at: legacyWhisperDir, to: stagedTrash)
+                directoriesToDelete.append(stagedTrash)
+            } catch {
+                directoriesToDelete.append(legacyWhisperDir)
+            }
+        }
+
+        // Also sweep any leftover trash folder if the app was force-quit mid-cleanup previously.
+        if let siblings = try? fileManager.contentsOfDirectory(
+            at: parentDir,
+            includingPropertiesForKeys: nil,
+            options: []
+        ) {
+            for sibling in siblings where sibling.lastPathComponent.hasPrefix(".BuddyLegacyWhisperTrash-") {
+                if !directoriesToDelete.contains(sibling) {
+                    directoriesToDelete.append(sibling)
+                }
+            }
+        }
+
+        guard !directoriesToDelete.isEmpty else { return }
+        Task.detached(priority: .utility) {
+            let backgroundFM = FileManager.default
+            for url in directoriesToDelete {
+                try? backgroundFM.removeItem(at: url)
+            }
+        }
     }
 
     private func ensureModelDirectories() {

@@ -1,12 +1,45 @@
 import SwiftUI
 
-private enum QuickSplitFilter: String, CaseIterable, Identifiable {
+public enum WorkoutSplitFilter: String, CaseIterable, Identifiable, Sendable {
     case all = "All"
     case upper = "Upper"
     case lower = "Lower"
-    case full = "Other"
+    case other = "Full / Other"
 
-    var id: String { rawValue }
+    public var id: String { rawValue }
+
+    /// Classifies a workout session into exactly one split bucket based on its muscle-group
+    /// composition (or title when empty):
+    /// - Upper-only (even with accessory core/cardio like a finisher plank) -> `.upper`
+    /// - Lower-only (even with accessory core/cardio) -> `.lower`
+    /// - Combined Upper + Lower (true Full Body) or Core/Cardio/Other-only -> `.other`
+    public static func classify(muscleGroups: [MuscleGroup], title: String) -> WorkoutSplitFilter {
+        let upperGroups: Set<MuscleGroup> = [.chest, .back, .shoulders, .biceps, .triceps]
+        let lowerGroups: Set<MuscleGroup> = [.quads, .hamstrings, .glutes, .calves]
+
+        let hasUpper = muscleGroups.contains { upperGroups.contains($0) }
+        let hasLower = muscleGroups.contains { lowerGroups.contains($0) }
+
+        if hasUpper && !hasLower {
+            return .upper
+        }
+        if hasLower && !hasUpper {
+            return .lower
+        }
+        if hasUpper && hasLower {
+            return .other
+        }
+
+        if muscleGroups.isEmpty {
+            let lowerTitle = title.lowercased()
+            let titleUpper = lowerTitle.contains("push") || lowerTitle.contains("pull") || lowerTitle.contains("upper")
+            let titleLower = lowerTitle.contains("leg") || lowerTitle.contains("lower")
+            if titleUpper && !titleLower { return .upper }
+            if titleLower && !titleUpper { return .lower }
+        }
+
+        return .other
+    }
 }
 
 struct WorkoutHomeView: View {
@@ -15,6 +48,8 @@ struct WorkoutHomeView: View {
     let modelManager: ModelManager
     let appleSpeechService: AppleSpeechService
     let llmService: LocalLLMService
+    var isTabActive: Bool = true
+    var dockClearance: CGFloat = 78
     var dismissSheetsToken: Int = 0
 
     @State private var showSettings: Bool = false
@@ -22,7 +57,7 @@ struct WorkoutHomeView: View {
     @State private var editingSet: LoggedSet?
     @State private var showEndSessionDialog: Bool = false
     @State private var quickCommandText: String = ""
-    @State private var selectedRecentFilter: QuickSplitFilter = .all
+    @State private var selectedRecentFilter: WorkoutSplitFilter = .all
     @FocusState private var isCommandBarFocused: Bool
 
     private let examplePhrases: [(chip: String, command: String)] = [
@@ -48,7 +83,7 @@ struct WorkoutHomeView: View {
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 8)
-                    .padding(.bottom, BuddyTheme.floatingBarClearance)
+                    .padding(.bottom, max(BuddyTheme.floatingBarClearance, dockClearance + 24))
                 }
                 .scrollDismissesKeyboard(.interactively)
                 .background(BuddyTheme.canvasBackground.ignoresSafeArea())
@@ -56,7 +91,7 @@ struct WorkoutHomeView: View {
                 if let banner = store.latestBanner {
                     autoSaveToast(banner)
                         .padding(.horizontal, 16)
-                        .padding(.bottom, 84)
+                        .padding(.bottom, dockClearance + 8)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                         .task(id: banner.id) {
                             try? await Task.sleep(nanoseconds: 6_000_000_000)
@@ -77,21 +112,34 @@ struct WorkoutHomeView: View {
                 store.recentlyEndedSession = nil
             }
             .confirmationDialog(
-                "End current workout?",
+                (store.activeSession?.totalSets ?? 0) == 0 ? "Discard empty workout?" : "End current workout?",
                 isPresented: $showEndSessionDialog,
                 titleVisibility: .visible
             ) {
-                Button("End & Save Workout") {
-                    BuddyHaptics.success()
-                    _ = store.endActiveSession()
-                    WidgetRefreshHelper.sync(store: store)
+                if let active = store.activeSession, active.totalSets == 0 {
+                    Button("Discard Empty Workout", role: .destructive) {
+                        BuddyHaptics.lightImpact()
+                        store.deleteSession(active)
+                        WidgetRefreshHelper.sync(store: store)
+                    }
+                } else {
+                    Button("End & Save Workout") {
+                        BuddyHaptics.success()
+                        _ = store.endActiveSession()
+                        WidgetRefreshHelper.sync(store: store)
+                    }
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("Your workout summary will be saved to Trends and synced with widgets.")
+                if (store.activeSession?.totalSets ?? 0) == 0 {
+                    Text("No sets were logged in this session. Discarding keeps your history clean.")
+                } else {
+                    Text("Your workout summary will be saved to Trends and synced with widgets.")
+                }
             }
             .sheet(item: $editingSet) { set in
                 SetEditorSheet(set: set, store: store)
+                    .buddyAppearance()
                     .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
             }
@@ -108,11 +156,13 @@ struct WorkoutHomeView: View {
                         store.recentlyEndedSession = nil
                     }
                 )
+                .buddyAppearance()
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
             }
             .sheet(isPresented: $showManualAdd) {
                 ManualAddExerciseSheet(store: store)
+                    .buddyAppearance()
                     .presentationDetents([.medium, .large])
                     .presentationDragIndicator(.visible)
             }
@@ -123,6 +173,7 @@ struct WorkoutHomeView: View {
                     appleSpeechService: appleSpeechService,
                     llmService: llmService
                 )
+                .buddyAppearance()
             }
         }
     }
@@ -146,9 +197,16 @@ struct WorkoutHomeView: View {
                         .tracking(0.6)
                         .foregroundStyle(BuddyTheme.emeraldLive)
 
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        let elapsed = max(0, Int(context.date.timeIntervalSince(session.startedAt)))
-                        Text(DurationFormatter.formatClock(seconds: elapsed))
+                    if isTabActive {
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            let elapsed = max(0, Int(context.date.timeIntervalSince(session.startedAt)))
+                            Text(DurationFormatter.formatClock(seconds: elapsed))
+                                .font(.system(size: 14, weight: .bold))
+                                .monospacedDigit()
+                                .foregroundStyle(.primary)
+                        }
+                    } else {
+                        Text(DurationFormatter.formatClock(seconds: session.durationSeconds))
                             .font(.system(size: 14, weight: .bold))
                             .monospacedDigit()
                             .foregroundStyle(.primary)
@@ -326,13 +384,13 @@ struct WorkoutHomeView: View {
 
             flatSessionMetricStrip(session)
 
-            let entries = session.sortedEntries
-            if entries.isEmpty {
+            let activeEntries = session.recentlyActiveEntries
+            if activeEntries.isEmpty {
                 emptyActiveSessionCard
             } else {
-                let latestEntryID = entries.last?.id
+                let latestEntryID = activeEntries.first?.id
                 LazyVStack(spacing: 12) {
-                    ForEach(entries.reversed(), id: \.id) { entry in
+                    ForEach(activeEntries, id: \.id) { entry in
                         ExerciseCardView(
                             entry: entry,
                             unit: store.preferredUnit,
@@ -359,7 +417,7 @@ struct WorkoutHomeView: View {
                         ))
                     }
                 }
-                .animation(.snappy(duration: 0.28), value: entries.map(\.id))
+                .animation(.snappy(duration: 0.28), value: activeEntries.map(\.id))
             }
         }
     }
@@ -413,7 +471,7 @@ struct WorkoutHomeView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Session active")
                         .font(.system(size: 16, weight: .bold))
-                    Text("Tap or hold the white mic button below and speak your set naturally, or tap a quick command.")
+                    Text("Tap or hold the mic button below and speak your set naturally, or tap a quick command.")
                         .font(.subheadline)
                         .foregroundStyle(BuddyTheme.mutedText)
                 }
@@ -432,16 +490,14 @@ struct WorkoutHomeView: View {
             weeklyGoal: 4
         )
         let completedSessions = store.sessions
-            .filter { !$0.isActive }
+            .filter { !$0.isActive && $0.totalSets > 0 }
             .sorted { $0.startedAt > $1.startedAt }
 
         let filteredRecent = completedSessions.filter { matchesRecentFilter($0) }
 
         return VStack(alignment: .leading, spacing: 20) {
-            // Compact weekly status banner (Uber promo/status card style)
             weeklyGoalBanner(consistency: consistency)
 
-            // Uber "For you" circular quick-start workout tiles
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Text("Quick start")
@@ -485,7 +541,6 @@ struct WorkoutHomeView: View {
                 }
             }
 
-            // YouTube-style quick voice try chips
             VStack(alignment: .leading, spacing: 10) {
                 Text("Try saying or tapping")
                     .font(.system(size: 13, weight: .semibold))
@@ -494,7 +549,6 @@ struct WorkoutHomeView: View {
                 quickTryChipStrip
             }
 
-            // YouTube-style Recent Sessions feed with left 16:9 dark artwork thumbnails
             if !completedSessions.isEmpty {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
@@ -510,7 +564,7 @@ struct WorkoutHomeView: View {
 
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
-                            ForEach(QuickSplitFilter.allCases) { filter in
+                            ForEach(WorkoutSplitFilter.allCases) { filter in
                                 FilterChip(
                                     title: filter.rawValue,
                                     isSelected: selectedRecentFilter == filter
@@ -663,7 +717,7 @@ struct WorkoutHomeView: View {
 
     private func youtubeSessionRow(_ session: WorkoutSession) -> some View {
         let primaryMuscle = session.sortedEntries.first?.muscleGroup ?? .fullBody
-        let durationBadge = DurationFormatter.formatClock(seconds: max(60, session.durationSeconds))
+        let durationBadge = DurationFormatter.formatClock(seconds: max(1, session.durationSeconds))
 
         return HStack(alignment: .top, spacing: 12) {
             WorkoutThumbnailView(
@@ -810,24 +864,12 @@ struct WorkoutHomeView: View {
     }
 
     private func matchesRecentFilter(_ session: WorkoutSession) -> Bool {
-        switch selectedRecentFilter {
-        case .all:
-            return true
-        case .upper:
-            let upperGroups: Set<MuscleGroup> = [.chest, .back, .shoulders, .biceps, .triceps]
-            return session.entries.contains { upperGroups.contains($0.muscleGroup) }
-                || session.derivedTitle.localizedCaseInsensitiveContains("push")
-                || session.derivedTitle.localizedCaseInsensitiveContains("pull")
-                || session.derivedTitle.localizedCaseInsensitiveContains("upper")
-        case .lower:
-            let lowerGroups: Set<MuscleGroup> = [.quads, .hamstrings, .glutes, .calves]
-            return session.entries.contains { lowerGroups.contains($0.muscleGroup) }
-                || session.derivedTitle.localizedCaseInsensitiveContains("leg")
-                || session.derivedTitle.localizedCaseInsensitiveContains("lower")
-        case .full:
-            let otherGroups: Set<MuscleGroup> = [.core, .cardio, .fullBody, .other]
-            return session.entries.isEmpty || session.entries.contains { otherGroups.contains($0.muscleGroup) }
-        }
+        guard selectedRecentFilter != .all else { return true }
+        let category = WorkoutSplitFilter.classify(
+            muscleGroups: session.entries.map(\.muscleGroup),
+            title: session.derivedTitle
+        )
+        return category == selectedRecentFilter
     }
 
     private func addQuickSet(to entry: ExerciseEntry) {

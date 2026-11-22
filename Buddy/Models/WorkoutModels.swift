@@ -115,6 +115,19 @@ public final class WorkoutSession {
         }
     }
 
+    /// Entries ordered by most recent activity (latest logged set timestamp, falling back to entry creation),
+    /// so adding another set to an earlier exercise while supersetting immediately brings it to the top.
+    public var recentlyActiveEntries: [ExerciseEntry] {
+        entries.sorted { lhs, rhs in
+            let lhsDate = lhs.sets.map(\.loggedAt).max() ?? lhs.createdAt
+            let rhsDate = rhs.sets.map(\.loggedAt).max() ?? rhs.createdAt
+            if lhsDate != rhsDate {
+                return lhsDate > rhsDate
+            }
+            return lhs.orderIndex > rhs.orderIndex
+        }
+    }
+
     public var durationSeconds: Int {
         let end = endedAt ?? Date()
         return max(0, Int(end.timeIntervalSince(startedAt)))

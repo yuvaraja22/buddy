@@ -72,6 +72,7 @@ struct SettingsView: View {
                     set: { newAppearance in
                         BuddyHaptics.selection()
                         appearanceRaw = newAppearance.rawValue
+                        BuddyAppearance.applyToAllWindows(newAppearance)
                     }
                 )
             ) {

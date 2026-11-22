@@ -298,11 +298,7 @@ struct ExerciseCardView: View {
 
     private func compactChipLabel(for set: LoggedSet) -> String {
         if let weightKg = set.weightKg, weightKg > 0, let reps = set.reps, reps > 0 {
-            let weightVal = unit.fromKg(weightKg)
-            let formattedWeight = weightVal.truncatingRemainder(dividingBy: 1) == 0
-                ? "\(Int(weightVal))"
-                : String(format: "%.1f", weightVal)
-            return "\(formattedWeight)×\(reps)"
+            return "\(unit.formatWeightNumber(kg: weightKg))×\(reps)"
         }
         if let reps = set.reps, reps > 0 {
             return "\(reps)r"

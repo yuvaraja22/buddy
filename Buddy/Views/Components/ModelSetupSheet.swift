@@ -9,10 +9,32 @@ struct ModelSetupSheet: View {
 
     @State private var sceneRefreshTick: Int = 0
 
+    /// Active LLM preset shown and downloaded by this sheet: honors `Qwen 2.5 0.5B` or an imported
+    /// `Custom GGUF` when selected in Settings, and falls back to `Qwen 2.5 1.5B` if `.custom` is
+    /// selected without a file on disk.
+    private var activeLLMPreset: LLMPreset {
+        if modelManager.selectedLLMPreset == .custom && !modelManager.isLLMDownloaded {
+            return .qwen25_1_5B
+        }
+        return modelManager.selectedLLMPreset
+    }
+
     var body: some View {
         let _ = sceneRefreshTick
+        let preset = activeLLMPreset
         let isVoiceReady = appleSpeechService.isReadyForOfflineVoice(for: modelManager.selectedAppleSpeechLocale)
-        let isAllReady = modelManager.isAllReady(appleSpeechReady: isVoiceReady)
+        let isLLMReady = modelManager.isDownloaded(preset)
+        let isAllReady = isVoiceReady && isLLMReady
+
+        let llmCardTitle: String = {
+            if preset == .custom, let customName = modelManager.customLLMFileName, !customName.isEmpty {
+                return customName
+            }
+            return preset.displayName
+        }()
+        let llmCardSize = preset.approximateSizeMB > 0
+            ? formatSizeMB(preset.approximateSizeMB)
+            : "Imported"
 
         NavigationStack {
             ScrollView {
@@ -24,14 +46,14 @@ struct ModelSetupSheet: View {
 
                         modelRowCard(
                             icon: "sparkles",
-                            title: LLMPreset.qwen25_1_5B.displayName,
-                            subtitle: LLMPreset.qwen25_1_5B.subtitle,
-                            sizeText: formatSizeMB(LLMPreset.qwen25_1_5B.approximateSizeMB),
-                            isDownloaded: modelManager.isDownloaded(.qwen25_1_5B),
+                            title: llmCardTitle,
+                            subtitle: preset.subtitle,
+                            sizeText: llmCardSize,
+                            isDownloaded: isLLMReady,
                             isDownloading: modelManager.isDownloadingLLM,
                             progress: modelManager.llmDownloadProgress,
                             onDownload: {
-                                Task { await modelManager.downloadLLMModel(.qwen25_1_5B) }
+                                Task { await modelManager.downloadLLMModel(preset) }
                             }
                         )
                     }
@@ -56,7 +78,12 @@ struct ModelSetupSheet: View {
             }
             .background(BuddyTheme.canvasBackground.ignoresSafeArea())
             .safeAreaInset(edge: .bottom) {
-                bottomActionBar(isVoiceReady: isVoiceReady, isAllReady: isAllReady)
+                bottomActionBar(
+                    preset: preset,
+                    isVoiceReady: isVoiceReady,
+                    isLLMReady: isLLMReady,
+                    isAllReady: isAllReady
+                )
             }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -155,8 +182,8 @@ struct ModelSetupSheet: View {
 
                 Text(
                     isVoiceReady
-                        ? "Voice logging works right away with Apple On-Device Speech. Download Qwen 2.5 once over Wi-Fi for your offline Gym Coach and natural-language parsing."
-                        : "Enable offline Dictation in iOS Settings for voice logging, and download Qwen 2.5 once over Wi-Fi for your offline Gym Coach."
+                        ? "Voice logging works right away with Apple On-Device Speech. Download a local Qwen model once over Wi-Fi for your offline Gym Coach and natural-language parsing."
+                        : "Enable offline Dictation in iOS Settings for voice logging, and download a local Qwen model once over Wi-Fi for your offline Gym Coach."
                 )
                 .font(.subheadline)
                 .foregroundStyle(BuddyTheme.mutedText)
@@ -202,6 +229,8 @@ struct ModelSetupSheet: View {
                             Text(title)
                                 .font(.system(size: 15.5, weight: .bold))
                                 .foregroundStyle(.primary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
 
                             Spacer()
 
@@ -268,7 +297,7 @@ struct ModelSetupSheet: View {
                 .foregroundStyle(.primary)
                 .padding(.top, 2)
 
-            Text("Recommended on Wi-Fi. You can switch to Qwen 2.5 0.5B or import your own .gguf file anytime in Settings.")
+            Text("Recommended on Wi-Fi. You can switch between Qwen 2.5 1.5B, Qwen 2.5 0.5B, or import your own .gguf file anytime in Settings.")
                 .font(.caption)
                 .foregroundStyle(BuddyTheme.mutedText)
                 .fixedSize(horizontal: false, vertical: true)
@@ -276,8 +305,13 @@ struct ModelSetupSheet: View {
         .padding(.horizontal, 4)
     }
 
-    private func bottomActionBar(isVoiceReady: Bool, isAllReady: Bool) -> some View {
-        let needsLLM = !modelManager.isDownloaded(.qwen25_1_5B)
+    private func bottomActionBar(
+        preset: LLMPreset,
+        isVoiceReady: Bool,
+        isLLMReady: Bool,
+        isAllReady: Bool
+    ) -> some View {
+        let needsLLM = !isLLMReady && preset != .custom
 
         return VStack(spacing: 10) {
             if isAllReady {
@@ -301,12 +335,12 @@ struct ModelSetupSheet: View {
                 .buttonStyle(.plain)
             } else if needsLLM {
                 let isBusy = modelManager.isDownloadingLLM
-                let sizeLabel = formatSizeMB(LLMPreset.qwen25_1_5B.approximateSizeMB)
+                let sizeLabel = formatSizeMB(preset.approximateSizeMB)
 
                 Button {
                     BuddyHaptics.mediumImpact()
                     Task {
-                        await modelManager.downloadRecommendedPack()
+                        await modelManager.downloadLLMModel(preset)
                     }
                 } label: {
                     HStack(spacing: 10) {
@@ -316,9 +350,9 @@ struct ModelSetupSheet: View {
                         } else {
                             Image(systemName: "arrow.down.circle.fill")
                         }
-                        Text(isBusy ? "Downloading Qwen 2.5…" : "Download Qwen 2.5 Coach (\(sizeLabel))")
+                        Text(isBusy ? "Downloading \(preset.displayName)…" : "Download \(preset.displayName) (\(sizeLabel))")
                     }
-                    .font(.system(size: 16, weight: .bold))
+                    .font(.system(size: 15.5, weight: .bold))
                     .foregroundStyle(BuddyTheme.inkInverse)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 15)

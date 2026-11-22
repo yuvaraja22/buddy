@@ -57,6 +57,12 @@ struct BuddyApp: App {
             )
             .tint(BuddyTheme.inkPrimary)
             .preferredColorScheme(preferredAppearance.colorScheme)
+            .onAppear {
+                BuddyAppearance.applyToAllWindows(preferredAppearance)
+            }
+            .onChange(of: appearanceRaw) { _, _ in
+                BuddyAppearance.applyToAllWindows(preferredAppearance)
+            }
         }
         .modelContainer(modelContainer)
         .onChange(of: scenePhase) { _, newPhase in
@@ -66,6 +72,7 @@ struct BuddyApp: App {
                 llmService.stopCoachGeneration()
                 WidgetRefreshHelper.sync(store: workoutStore)
             case .active:
+                BuddyAppearance.applyToAllWindows(preferredAppearance)
                 modelManager.refreshDownloadState()
                 appleSpeechService.refreshAuthorizationStatus()
                 pipeline.resumePendingWorkIfNeeded(into: workoutStore)

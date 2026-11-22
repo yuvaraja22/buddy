@@ -1,3 +1,4 @@
+import SwiftData
 import XCTest
 @testable import Buddy
 
@@ -72,10 +73,105 @@ final class SpeechAndAudioTests: XCTestCase {
         XCTAssertEqual(MuscleGroup.biceps.thumbnailAssetName, "WorkoutThumbArms")
     }
 
-    func testBuddyAppearanceColorSchemeMapping() {
+    func testBuddyAppearanceColorSchemeAndUIUserInterfaceStyleMapping() {
         XCTAssertEqual(BuddyAppearance.dark.colorScheme, .dark)
         XCTAssertEqual(BuddyAppearance.light.colorScheme, .light)
         XCTAssertNil(BuddyAppearance.system.colorScheme)
+
+        XCTAssertEqual(BuddyAppearance.dark.uiUserInterfaceStyle, .dark)
+        XCTAssertEqual(BuddyAppearance.light.uiUserInterfaceStyle, .light)
+        XCTAssertEqual(BuddyAppearance.system.uiUserInterfaceStyle, .unspecified)
+    }
+
+    func testWeightUnitFormatWeightNumberAvoidsIEEE754LbsDrift() {
+        // 205 lbs round-tripped through kg produces 205.00000000000003 unrounded; must render "205".
+        let kg205 = WeightUnit.lbs.toKg(205.0)
+        XCTAssertEqual(WeightUnit.lbs.formatWeightNumber(kg: kg205), "205")
+
+        let kg135 = WeightUnit.lbs.toKg(135.0)
+        XCTAssertEqual(WeightUnit.lbs.formatWeightNumber(kg: kg135), "135")
+
+        let kg62_5 = WeightUnit.kg.toKg(62.5)
+        XCTAssertEqual(WeightUnit.kg.formatWeightNumber(kg: kg62_5), "62.5")
+    }
+
+    @MainActor
+    func testRecentlyActiveEntriesBringsSupersettedExerciseToTop() throws {
+        let schema = Schema([
+            WorkoutSession.self,
+            ExerciseEntry.self,
+            LoggedSet.self,
+            CoachMessage.self
+        ])
+        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+        let container = try ModelContainer(for: schema, configurations: [config])
+        let context = container.mainContext
+
+        let t0 = Date(timeIntervalSince1970: 1_750_000_000)
+        let t1 = t0.addingTimeInterval(60)
+        let t2 = t0.addingTimeInterval(120)
+
+        let session = WorkoutSession(startedAt: t0, title: "Push Day", isActive: true)
+        context.insert(session)
+
+        let bench = ExerciseEntry(
+            exerciseName: "Bench Press",
+            canonicalName: "bench press",
+            muscleGroup: .chest,
+            orderIndex: 0,
+            createdAt: t0
+        )
+        let incline = ExerciseEntry(
+            exerciseName: "Incline Dumbbell Press",
+            canonicalName: "incline dumbbell press",
+            muscleGroup: .chest,
+            orderIndex: 1,
+            createdAt: t1
+        )
+        context.insert(bench)
+        context.insert(incline)
+        bench.session = session
+        incline.session = session
+        session.entries.append(contentsOf: [bench, incline])
+
+        let benchSet1 = LoggedSet(setNumber: 1, reps: 10, weightKg: 60, loggedAt: t0)
+        let inclineSet1 = LoggedSet(setNumber: 1, reps: 12, weightKg: 24, loggedAt: t1)
+        let benchSet2 = LoggedSet(setNumber: 2, reps: 10, weightKg: 60, loggedAt: t2)
+        context.insert(benchSet1)
+        context.insert(inclineSet1)
+        context.insert(benchSet2)
+        benchSet1.entry = bench
+        benchSet2.entry = bench
+        inclineSet1.entry = incline
+        bench.sets.append(contentsOf: [benchSet1, benchSet2])
+        incline.sets.append(inclineSet1)
+
+        let ordered = session.recentlyActiveEntries
+        XCTAssertEqual(ordered.first?.exerciseName, "Bench Press")
+        XCTAssertEqual(ordered.last?.exerciseName, "Incline Dumbbell Press")
+    }
+
+    func testWorkoutSplitFilterClassifiesUpperLowerFullAndCoreCleanly() {
+        // Upper workout finishing with an accessory plank stays Upper
+        XCTAssertEqual(
+            WorkoutSplitFilter.classify(muscleGroups: [.chest, .triceps, .core], title: "Push Day"),
+            .upper
+        )
+        // Lower workout finishing with a plank stays Lower
+        XCTAssertEqual(
+            WorkoutSplitFilter.classify(muscleGroups: [.quads, .hamstrings, .core], title: "Leg Day"),
+            .lower
+        )
+        // Full-body session spanning upper + lower lifts goes to Full / Other
+        XCTAssertEqual(
+            WorkoutSplitFilter.classify(muscleGroups: [.chest, .quads], title: "Full Body"),
+            .other
+        )
+        // Core/Cardio-only session goes to Full / Other
+        XCTAssertEqual(
+            WorkoutSplitFilter.classify(muscleGroups: [.core, .cardio], title: "Core & Conditioning"),
+            .other
+        )
     }
 
     @MainActor

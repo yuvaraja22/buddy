@@ -8,13 +8,14 @@ Speak naturally between sets — *"leg extension 3 sets 15 reps"*, *"bench press
 
 ## Features
 
-- **1-Tap Voice Logging**: Record directly from the app, Home Screen widgets, Lock Screen widgets, or the active workout Live Activity (`buddy://record`).
-- **Smart Set Expansion & Undo**: Commands like *"leg extension 3 sets 15 reps"* expand into 3 numbered `LoggedSet` rows under one exercise card, with instant inline editing and 1-tap Undo.
+- **1-Tap Offline Voice Logging**: Built on **Apple On-Device Speech** (`SFSpeechRecognizer`, `requiresOnDeviceRecognition = true`) with **0 MB download**, live streaming captions while speaking, gym vocabulary biasing across 105 exercises, and an Accent/Locale picker (`Auto`, `English (India)`, `English (US)`, `English (UK)`, `English (Australia)`, `English (Canada)`). Record from the floating mic button, Home Screen widgets, Lock Screen widgets, or the active workout Live Activity (`buddy://record`).
+- **YouTube + Uber OLED Monochrome UI**: Pitch-black `#000000` canvas, matte charcoal surfaces (`#141414`), crisp white/black high-contrast controls, floating pill bottom navigation paired with a morphing Mic FAB, Uber-style command bar & circular Quick Start split tiles (`Push`, `Pull`, `Legs`, `Open`), and YouTube-style 16:9 dark artwork exercise & session rows (with Dark / Light / System appearance toggle in Settings).
+- **Smart Set Expansion & Undo**: Commands like *"leg extension 3 sets 15 reps"* expand into 3 numbered `LoggedSet` rows under one exercise card, with directly tappable inline set chips, expandable rows, and 1-tap Undo.
 - **Widgets & Live Activities**:
-  - **Home Screen** (Small, Medium, Large): Streak counter, live session timer, 7-day consistency/volume bar chart, today's exercises, and cobalt Record CTA.
+  - **Home Screen** (Small, Medium, Large): Streak counter, live session timer, 7-day monochrome consistency/volume bar chart, today's exercises, and crisp monochrome Record CTA.
   - **Lock Screen** (Circular, Rectangular, Inline): Weekly goal progress ring with centered mic icon, today's set/volume status, and streak ticker.
   - **Dynamic Island & Lock Screen Live Activity**: Ticking workout timer, live set & volume counters, last logged exercise, and 1-tap **Voice Log** pill.
-- **Trends & Progression**: Workout streaks, weekly goal tracking, activity heatmaps, volume timelines, and per-exercise strength progression.
+- **Trends & Progression**: Workout streaks, weekly goal tracking, monochrome 12-week activity heatmap, volume timelines, and per-exercise strength progression with YouTube-style filter chips.
 - **Local AI Gym Coach**: Ask training questions grounded in your on-device SwiftData workout history.
 - **SideStore-Ready App Group Sync**: Dynamically reads `embedded.mobileprovision` at runtime so `Buddy` and `BuddyWidgets` stay synced even when SideStore/AltStore remaps `group.com.yuvaraja.buddy` with a free Apple ID Team suffix.
 
@@ -26,11 +27,11 @@ Buddy is tuned for Apple A16 Bionic + 6 GB RAM (iPhone 15 Plus) and runs 100% lo
 
 | Layer | Technology | Role |
 | --- | --- | --- |
-| **Speech-to-Text** | **WhisperKit** (CoreML / Neural Engine) | On-device gym audio transcription; audio never leaves the iPhone |
+| **Speech-to-Text** | **Apple On-Device Speech** (`Speech` framework) | 0 MB / 0 RAM offline live-caption gym transcription with exercise vocabulary hints; audio never leaves the iPhone |
 | **Intent Parsing & Coach** | **Qwen2.5-1.5B** (`LLM.swift` / llama.cpp Metal) | Structured JSON workout command extraction & offline coaching |
-| **Instant Fallback Parser** | `RuleBasedWorkoutParser` + `ExerciseCatalog` | Zero-latency deterministic parser for common set commands, edits, and exercise aliases (works even before model download) |
+| **Instant Fallback Parser** | `RuleBasedWorkoutParser` + `ExerciseCatalog` | Zero-latency deterministic parser for common set commands, edits, and exercise aliases (works immediately before downloading Qwen) |
 | **Persistence** | **SwiftData** + Shared App Group JSON Snapshot | Local relational workout database + atomic `widget_snapshot.json` for WidgetKit |
-| **UI & System Extensions** | **SwiftUI**, **WidgetKit**, **ActivityKit** | Adaptive Light/Dark cobalt design (`#0A66FF` / `#3B82F6`), rounded tabular numerals |
+| **UI & System Extensions** | **SwiftUI**, **WidgetKit**, **ActivityKit** | OLED monochrome dark-first design (`#000000` / `#141414` / `#FFFFFF`), sharp sans-serif tabular numerals, Dark/Light/System toggle |
 
 ---
 
@@ -59,14 +60,11 @@ If the repository is public and has a published tag release (e.g., `v1.0.0`):
 
 ---
 
-## First-Run Wi-Fi Model Download
+## First-Run Setup
 
-1. Launch **Buddy** while connected to **Wi-Fi** (keep the app open on screen during the initial download).
-2. Open **Settings → Offline AI Models** (or follow the first-run prompt) to download:
-   - **WhisperKit** speech model (CoreML weights)
-   - **Qwen2.5-1.5B** quantized GGUF model (~1 GB)
-3. Once downloaded and cached locally on your iPhone, Buddy works **100% offline in Airplane Mode** inside the gym.
-4. Even before downloading Qwen2.5-1.5B, the built-in **Instant Parser** handles standard voice and text commands immediately.
+1. Launch **Buddy** and allow **Microphone** and **Speech Recognition** when prompted — offline voice logging works right away with **Apple On-Device Speech** (0 MB download) and the built-in **Instant Parser**.
+2. *(Optional, recommended over Wi-Fi)* Open **Settings → Local LLM (llama.cpp)** (or follow the first-run prompt) to download **Qwen2.5-1.5B (Q4)** (~1.05 GB) — or lighter **Qwen2.5-0.5B** (~490 MB) — to unlock the offline **AI Gym Coach** and richer natural-language voice parsing.
+3. Once cached locally on your iPhone, Buddy works **100% offline in Airplane Mode** inside the gym.
 
 ---
 

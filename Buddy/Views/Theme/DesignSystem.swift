@@ -23,6 +23,53 @@ public enum BuddyAppearance: String, CaseIterable, Identifiable, Codable, Sendab
         case .system: return nil
         }
     }
+
+    public var uiUserInterfaceStyle: UIUserInterfaceStyle {
+        switch self {
+        case .dark: return .dark
+        case .light: return .light
+        case .system: return .unspecified
+        }
+    }
+
+    /// Applies the user's preferred interface style across all active UIWindowScene windows
+    /// so UIKit-backed `.sheet`, `.alert`, and `.confirmationDialog` presentations reliably
+    /// inherit Buddy's appearance even when iOS is in the opposite system mode.
+    @MainActor
+    public static func applyToAllWindows(_ appearance: BuddyAppearance) {
+        let style = appearance.uiUserInterfaceStyle
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            for window in windowScene.windows {
+                window.overrideUserInterfaceStyle = style
+            }
+        }
+    }
+}
+
+public struct BuddyAppearanceModifier: ViewModifier {
+    @AppStorage("buddy.preferences.appearance") private var appearanceRaw: String = BuddyAppearance.dark.rawValue
+
+    private var appearance: BuddyAppearance {
+        BuddyAppearance(rawValue: appearanceRaw) ?? .dark
+    }
+
+    public func body(content: Content) -> some View {
+        content
+            .preferredColorScheme(appearance.colorScheme)
+            .tint(BuddyTheme.inkPrimary)
+    }
+}
+
+public struct VoiceDockHeightKey: PreferenceKey {
+    public static var defaultValue: CGFloat = 78
+
+    public static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let candidate = nextValue()
+        if candidate > 0 {
+            value = candidate
+        }
+    }
 }
 
 public enum BuddyTheme {
@@ -231,6 +278,11 @@ public extension View {
     /// Applies crisp tabular numerals without Apple's rounded font style.
     func buddyNumeric() -> some View {
         self.monospacedDigit()
+    }
+
+    /// Propagates Buddy's persisted OLED appearance preference onto presented sheets and roots.
+    func buddyAppearance() -> some View {
+        modifier(BuddyAppearanceModifier())
     }
 }
 

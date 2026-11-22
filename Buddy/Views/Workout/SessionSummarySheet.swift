@@ -138,12 +138,13 @@ struct SessionSummarySheet: View {
 
                 VStack(spacing: 10) {
                     ForEach(session.sortedEntries, id: \.id) { entry in
+                        let setCountBadge = "\(entry.sets.count) \(entry.sets.count == 1 ? "set" : "sets")"
                         HStack(alignment: .center, spacing: 10) {
                             WorkoutThumbnailView(
                                 assetName: entry.muscleGroup.thumbnailAssetName,
-                                bottomRightBadge: "\(entry.sets.count)s",
-                                width: 68,
-                                height: 42
+                                bottomRightBadge: setCountBadge,
+                                width: 74,
+                                height: 44
                             )
 
                             VStack(alignment: .leading, spacing: 2) {
