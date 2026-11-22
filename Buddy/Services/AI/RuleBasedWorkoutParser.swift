@@ -440,6 +440,10 @@ public enum RuleBasedWorkoutParser {
     // MARK: - Voice Control / Undo / Edit Commands
 
     private static func isEndSessionCommand(_ text: String) -> Bool {
+        // Never swallow a post-gym recap like "I finished my workout, today I did bench press 60 kg 3 sets 10 reps".
+        guard firstMatch(pattern: #"\d"#, in: text) == nil else {
+            return false
+        }
         let patterns = [
             #"\b(?:end|finish|stop|complete|close|wrap\s+up)\s+(?:the\s+|my\s+|this\s+)?(?:workout|session)\b"#,
             #"\b(?:i'?m\s+|im\s+)?(?:done|finished)\s+(?:working\s+out|with\s+(?:the\s+|my\s+)?(?:workout|session))\b"#,
@@ -603,29 +607,161 @@ public enum RuleBasedWorkoutParser {
     // MARK: - Clause Splitting & Set Group Parsing
 
     private static func splitIntoClauses(_ normalized: String) -> [String] {
-        let separatorPattern = #"(?:\s*;\s*|\s+and\s+then\s+|\s+then\s+)"#
+        // 1. Split on sentence punctuation (preserving decimals like 22.5), newlines, semicolons,
+        //    and spoken multi-exercise transition connectors.
+        let separatorPattern = #"(?:(?<!\d)\.(?!\d)\s*|[!?;]\s*|\n+|\s+and\s+then\s+|\s+after\s+that\s+|\s+followed\s+by\s+|\s+moved\s+on\s+to\s+|\s+moved\s+to\s+|\s+switched\s+to\s+|\s+finished\s+with\s+|\s+ended\s+with\s+|\s+next\s+up\s+|\s+lastly\s+|\s+finally\s+|\s+then\s+|\s+next\s+|\s+also\s+)"#
         let replaced = replaceMatches(pattern: separatorPattern, in: normalized, with: " || ")
         let primaryParts = replaced
             .components(separatedBy: " || ")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
 
-        // Also split on plain " and " ONLY when both halves contain workout metrics (digits),
-        // preserving compound exercise names like "clean and jerk" or "snatch and press".
-        var finalParts: [String] = []
+        // 2. Split on plain " and " ONLY when every sub-part contains workout metrics (digits),
+        //    preserving compound exercise names like "clean and jerk" or "snatch and press".
+        var andSplitParts: [String] = []
         for part in primaryParts {
             let subParts = part
                 .components(separatedBy: " and ")
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
             if subParts.count > 1 && subParts.allSatisfy({ firstMatch(pattern: #"\d"#, in: $0) != nil }) {
-                finalParts.append(contentsOf: subParts)
+                andSplitParts.append(contentsOf: subParts)
             } else {
-                finalParts.append(part)
+                andSplitParts.append(part)
             }
         }
 
+        // 3. Split on commas when at least 2 comma chunks contain digits (handles progressive sets like
+        //    "bench press, 60 kg 10 reps, 70 kg 8 reps" and comma-listed workouts preceded by intro phrases
+        //    like "I finished my workout, bench press 60 kg 3 sets 10 reps, cable fly 15 kg 3 sets 15 reps").
+        var commaSplitParts: [String] = []
+        for part in andSplitParts {
+            let subParts = part
+                .components(separatedBy: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            let metricCount = subParts.filter { firstMatch(pattern: #"\d"#, in: $0) != nil }.count
+            if subParts.count > 1 && metricCount >= 2 {
+                var pendingPrefix = ""
+                for chunk in subParts {
+                    if firstMatch(pattern: #"\d"#, in: chunk) != nil {
+                        if pendingPrefix.isEmpty {
+                            commaSplitParts.append(chunk)
+                        } else {
+                            commaSplitParts.append("\(pendingPrefix) \(chunk)")
+                            pendingPrefix = ""
+                        }
+                    } else {
+                        pendingPrefix = pendingPrefix.isEmpty ? chunk : "\(pendingPrefix) \(chunk)"
+                    }
+                }
+                if !pendingPrefix.isEmpty, let last = commaSplitParts.popLast() {
+                    commaSplitParts.append("\(last) \(pendingPrefix)")
+                }
+            } else {
+                commaSplitParts.append(part)
+            }
+        }
+
+        // 4. Split unpunctuated run-on recaps at known ExerciseCatalog boundaries whenever a new
+        //    exercise name appears AFTER a completed metric group and still has digits ahead.
+        var finalParts: [String] = []
+        for part in commaSplitParts {
+            finalParts.append(contentsOf: splitOnRunOnExerciseBoundaries(part))
+        }
+
         return finalParts.isEmpty ? [normalized] : finalParts
+    }
+
+    private static let runOnPreExerciseFillers: Set<String> = [
+        "i", "did", "done", "just", "also", "and", "some", "my", "the", "a", "an", "on", "hit", "started", "with"
+    ]
+
+    private static let knownExercisePhraseTokens: [[String]] = {
+        ExerciseCatalog.longestFirstKnownPhrases.map { phrase in
+            phrase.split(separator: " ").map(String.init)
+        }
+    }()
+
+    private static let knownPhraseFirstTokenIndex: [String: [[String]]] = {
+        var map: [String: [[String]]] = [:]
+        for tokens in knownExercisePhraseTokens {
+            guard let first = tokens.first else { continue }
+            map[first, default: []].append(tokens)
+        }
+        return map
+    }()
+
+    private static func splitOnRunOnExerciseBoundaries(_ clause: String) -> [String] {
+        let rawTokens = clause.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard rawTokens.count >= 5 else { return [clause] }
+
+        let cleanedTokens: [String] = rawTokens.map { token in
+            token.trimmingCharacters(in: .punctuationCharacters).lowercased()
+        }
+
+        var segments: [[String]] = []
+        var segmentStart = 0
+        var hasSeenMetric = false
+        var index = 0
+
+        while index < rawTokens.count {
+            let clean = cleanedTokens[index]
+            let tokenHasDigit = clean.rangeOfCharacter(from: .decimalDigits) != nil
+
+            if hasSeenMetric && !tokenHasDigit,
+               let candidatePhrases = knownPhraseFirstTokenIndex[clean] {
+                var matchedLength: Int?
+                for phraseTokens in candidatePhrases {
+                    let endIdx = index + phraseTokens.count
+                    guard endIdx <= cleanedTokens.count else { continue }
+                    var allMatch = true
+                    for offset in 0..<phraseTokens.count {
+                        if cleanedTokens[index + offset] != phraseTokens[offset] {
+                            allMatch = false
+                            break
+                        }
+                    }
+                    if allMatch {
+                        matchedLength = phraseTokens.count
+                        break
+                    }
+                }
+
+                if let matchedLength {
+                    // Only split if there are workout digits AFTER this exercise name.
+                    let tailHasDigit = cleanedTokens[(index + matchedLength)...].contains {
+                        $0.rangeOfCharacter(from: .decimalDigits) != nil
+                    }
+                    if tailHasDigit {
+                        // Pull trailing intro filler words ("i did", "some", "hit") into the new clause.
+                        var splitIdx = index
+                        while splitIdx > segmentStart && runOnPreExerciseFillers.contains(cleanedTokens[splitIdx - 1]) {
+                            splitIdx -= 1
+                        }
+                        if splitIdx > segmentStart {
+                            segments.append(Array(rawTokens[segmentStart..<splitIdx]))
+                            segmentStart = splitIdx
+                            hasSeenMetric = false
+                            index += matchedLength
+                            continue
+                        }
+                    }
+                }
+            }
+
+            if tokenHasDigit {
+                hasSeenMetric = true
+            }
+            index += 1
+        }
+
+        if segmentStart < rawTokens.count {
+            segments.append(Array(rawTokens[segmentStart..<rawTokens.count]))
+        }
+
+        guard segments.count > 1 else { return [clause] }
+        return segments.map { $0.joined(separator: " ") }.filter { !$0.isEmpty }
     }
 
     private static func parseSetGroupClause(
@@ -672,6 +808,20 @@ public enum RuleBasedWorkoutParser {
             tag = .failure
             working = removingMatch(m, from: working)
         }
+
+        // Strip ordinal progressive set labels ("first set 60 kg 10 reps", "set 2 70 kg 8 reps")
+        // without touching "3 set 15 reps" (which has a digit immediately preceding "set").
+        working = replaceMatches(
+            pattern: #"\b(?:first|second|third|fourth|fifth|sixth|1st|2nd|3rd|4th|5th|6th)\s+set\b"#,
+            in: working,
+            with: " "
+        )
+        working = replaceMatches(
+            pattern: #"(?<!\d\s)\bset\s+(?:number\s+)?\d{1,2}\b(?=\s+(?:at|@|with|for|\d))"#,
+            in: working,
+            with: " "
+        )
+        working = collapseWhitespace(working)
 
         // 2. Extract duration (timed / cardio exercises)
         let durResult = extractDuration(from: working)
@@ -864,7 +1014,7 @@ public enum RuleBasedWorkoutParser {
 
         // Hours
         let hourMatches = allMatches(
-            pattern: #"(?:(?:for)\s+)?(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b"#,
+            pattern: #"(?:\bfor\s+)?(?<![a-z0-9])(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b"#,
             in: working
         )
         for m in hourMatches.reversed() {
@@ -878,7 +1028,7 @@ public enum RuleBasedWorkoutParser {
 
         // "1 minute 30" (implicit seconds immediately following minutes)
         let minImplicitSecMatches = allMatches(
-            pattern: #"(?:(?:for)\s+)?(\d+)\s*(?:minutes?|mins?)\s+(?:and\s+)?(\d{1,2})\b(?!\s*(?:kg|kgs|kilos?|kilograms?|lbs?|pounds?|reps?|sets?|x|by|seconds?|secs?|minutes?|mins?))"#,
+            pattern: #"(?:\bfor\s+)?(?<![a-z0-9])(\d+)\s*(?:minutes?|mins?)\s+(?:and\s+)?(\d{1,2})\b(?!\s*(?:kg|kgs|kilos?|kilograms?|lbs?|pounds?|reps?|sets?|x|by|seconds?|secs?|minutes?|mins?))"#,
             in: working
         )
         for m in minImplicitSecMatches.reversed() {
@@ -893,7 +1043,7 @@ public enum RuleBasedWorkoutParser {
 
         // Minutes
         let minMatches = allMatches(
-            pattern: #"(?:(?:for)\s+)?(\d+(?:\.\d+)?)\s*(?:minutes?|mins?)\b"#,
+            pattern: #"(?:\bfor\s+)?(?<![a-z0-9])(\d+(?:\.\d+)?)\s*(?:minutes?|mins?)\b"#,
             in: working
         )
         for m in minMatches.reversed() {
@@ -907,7 +1057,7 @@ public enum RuleBasedWorkoutParser {
 
         // Seconds
         let secMatches = allMatches(
-            pattern: #"(?:(?:for|and)\s+)?(\d+(?:\.\d+)?)\s*(?:seconds?|secs?)\b"#,
+            pattern: #"(?:\b(?:for|and)\s+)?(?<![a-z0-9])(\d+(?:\.\d+)?)\s*(?:seconds?|secs?)\b"#,
             in: working
         )
         for m in secMatches.reversed() {
@@ -925,7 +1075,7 @@ public enum RuleBasedWorkoutParser {
     private static func extractWeight(
         from input: String
     ) -> (value: Double?, unit: WeightUnit?, remaining: String) {
-        let pattern = #"(?:(?:at|@|with|for)\s+)?(?<![a-z0-9])(\d+(?:\.\d+)?)\s*(kg|kgs|kilos?|kilograms?|lbs?|pounds?)\b"#
+        let pattern = #"(?:(?:\b(?:at|with|for)|@)\s+)?(?<![a-z0-9])(\d+(?:\.\d+)?)\s*(kg|kgs|kilos?|kilograms?|lbs?|pounds?)\b"#
         guard let m = firstMatch(pattern: pattern, in: input),
               let numStr = captureGroup(1, in: m, text: input),
               let unitStr = captureGroup(2, in: m, text: input),
@@ -951,9 +1101,12 @@ public enum RuleBasedWorkoutParser {
 
         text = collapseWhitespace(text)
 
-        // Strip common spoken preamble verbs
+        // Strip common spoken preamble verbs and post-gym recap lead-ins
         let leadingPhrases = [
-            #"^(?:i\s+just\s+did|just\s+did|i\s+did|i\s+just\s+finished|just\s+finished|i\s+finished|finished|completed|log|logged|add|added|record|track|put\s+down|did|doing|do)\b\s*"#,
+            #"^(?:today\s+at\s+the\s+gym\s+|at\s+the\s+gym\s+today\s+|at\s+the\s+gym\s+|in\s+the\s+gym\s+|today'?s\s+workout\s+was\s+|today'?s\s+session\s+was\s+|for\s+my\s+workout\s+|in\s+my\s+workout\s+|today\s+|yesterday\s+)"#,
+            #"^(?:i\s+just\s+finished\s+(?:my\s+|the\s+)?(?:workout|gym|session)|just\s+finished\s+(?:my\s+|the\s+)?(?:workout|gym|session)|i\s+finished\s+(?:my\s+|the\s+)?(?:workout|gym|session)|finished\s+(?:my\s+|the\s+)?(?:workout|gym|session))\b\s*"#,
+            #"^(?:i\s+started\s+with|started\s+with|i\s+also\s+did|i\s+just\s+did|just\s+did|i\s+did|i\s+hit|i\s+just\s+finished|just\s+finished|i\s+finished|finished|completed|log|logged|add|added|record|track|put\s+down|did|doing|do|hit|was|were)\b\s*"#,
+            #"^(?:first|second|third|fourth|fifth|sixth|1st|2nd|3rd|4th|5th|6th|last|final|next|also|then|afterwards|afterward|i)\b\s*"#,
             #"^(?:on\s+the|on\s+my|on|the|my|a|an|some|another|more|of|for|at|with|to|set|sets|rep|reps|and)\b\s*"#
         ]
 
@@ -967,7 +1120,7 @@ public enum RuleBasedWorkoutParser {
         }
 
         // Strip stray trailing prepositions/fillers
-        let trailingPattern = #"\s*\b(?:of|for|at|with|to|on|in|the|a|an|my|set|sets|rep|reps|and|again|more)\b$"#
+        let trailingPattern = #"\s*\b(?:of|for|at|with|to|on|in|the|a|an|my|set|sets|rep|reps|and|again|more|i|did)\b$"#
         previous = ""
         while previous != text {
             previous = text
@@ -982,7 +1135,8 @@ public enum RuleBasedWorkoutParser {
         let continuationPhrases: Set<String> = [
             "", "same", "same thing", "same exercise", "that", "it", "this",
             "this exercise", "last", "last one", "last exercise", "another",
-            "another one", "one more", "more", "again"
+            "another one", "one more", "more", "again", "next", "next set",
+            "final", "final set"
         ]
         return continuationPhrases.contains(cleaned.lowercased())
     }

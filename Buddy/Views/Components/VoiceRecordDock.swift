@@ -77,12 +77,18 @@ struct VoiceRecordDock: View {
     // MARK: - Uber-Style Floating Pill Navigation Bar
 
     private var floatingTabCapsule: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 2) {
             tabPillItem(
                 tab: .workout,
                 title: "Home",
                 symbol: "house.fill",
                 inactiveSymbol: "house"
+            )
+            tabPillItem(
+                tab: .calendar,
+                title: "Calendar",
+                symbol: "calendar",
+                inactiveSymbol: "calendar"
             )
             tabPillItem(
                 tab: .trends,
@@ -97,8 +103,8 @@ struct VoiceRecordDock: View {
                 inactiveSymbol: "sparkles"
             )
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 5)
     }
 
     private func tabPillItem(
@@ -116,13 +122,14 @@ struct VoiceRecordDock: View {
         } label: {
             VStack(spacing: 3) {
                 Image(systemName: isSelected ? symbol : inactiveSymbol)
-                    .font(.system(size: 16, weight: isSelected ? .semibold : .regular))
+                    .font(.system(size: 15, weight: isSelected ? .semibold : .regular))
                     .foregroundStyle(isSelected ? Color.primary : BuddyTheme.mutedText)
 
                 Text(title)
-                    .font(.system(size: 10, weight: isSelected ? .semibold : .medium))
+                    .font(.system(size: 9.5, weight: isSelected ? .semibold : .medium))
                     .foregroundStyle(isSelected ? Color.primary : BuddyTheme.mutedText)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background {
@@ -516,7 +523,7 @@ struct VoiceRecordDock: View {
 
 // MARK: - Monochrome Waveform Strip
 
-private struct VoiceWaveformStrip: View {
+struct VoiceWaveformStrip: View {
     let levels: [Float]
     let barCount: Int
 

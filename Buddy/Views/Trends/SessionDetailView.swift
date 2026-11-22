@@ -74,22 +74,33 @@ struct SessionDetailView: View {
     }
 
     private var sessionHeaderCard: some View {
-        NativeCard(padding: 15, cornerRadius: 14, tint: session.isActive ? BuddyTheme.emeraldLive : nil) {
+        let isCheckInOnly = (session.totalSets == 0 && session.isManualCheckInDay)
+        return NativeCard(padding: 15, cornerRadius: 14, tint: (session.isActive || isCheckInOnly) ? BuddyTheme.emeraldLive : nil) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     if session.isActive {
                         StatusPill(text: "LIVE", tint: BuddyTheme.emeraldLive, isPulsing: true)
+                    } else if isCheckInOnly {
+                        StatusPill(
+                            text: "Check-in",
+                            icon: "checkmark.circle.fill",
+                            tint: BuddyTheme.emeraldLive
+                        )
                     } else {
                         StatusPill(
-                            text: DurationFormatter.formatCompact(seconds: session.durationSeconds),
+                            text: DurationFormatter.formatCompact(seconds: max(1, session.durationSeconds)),
                             icon: "clock",
                             tint: BuddyTheme.inkPrimary
                         )
                     }
                     Spacer()
-                    Text(session.startedAt.formatted(date: .abbreviated, time: .shortened))
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(BuddyTheme.mutedText)
+                    Text(
+                        isCheckInOnly
+                            ? session.startedAt.formatted(date: .abbreviated, time: .omitted)
+                            : session.startedAt.formatted(date: .abbreviated, time: .shortened)
+                    )
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(BuddyTheme.mutedText)
                 }
 
                 Text(session.derivedTitle)
@@ -136,9 +147,13 @@ struct SessionDetailView: View {
         let entries = session.sortedEntries
         if entries.isEmpty {
             NativeCard(padding: 16, cornerRadius: 14) {
-                Text("No exercises were recorded in this session.")
-                    .font(.subheadline)
-                    .foregroundStyle(BuddyTheme.mutedText)
+                Text(
+                    session.isManualCheckInDay
+                        ? "Marked as a trained day on your calendar. You can add exercises to this date anytime from the Calendar tab."
+                        : "No exercises were recorded in this session."
+                )
+                .font(.subheadline)
+                .foregroundStyle(BuddyTheme.mutedText)
             }
         } else {
             VStack(spacing: 12) {

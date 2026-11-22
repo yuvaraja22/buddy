@@ -115,6 +115,7 @@ public enum StatsCalculator {
         var setCount: Int = 0
         var repCount: Int = 0
         var volumeKg: Double = 0
+        var hasCheckIn: Bool = false
     }
 
     // MARK: - Consistency & Streaks
@@ -126,7 +127,7 @@ public enum StatsCalculator {
     ) -> ConsistencyStats {
         let goal = max(1, weeklyGoal)
         let calendar = Calendar.current
-        let loggedSessions = sessions.filter { $0.totalSets > 0 }
+        let loggedSessions = sessions.filter { $0.countsAsWorkout }
 
         guard !loggedSessions.isEmpty else {
             return ConsistencyStats(
@@ -215,7 +216,9 @@ public enum StatsCalculator {
                 return nil
             }
             let totals = totalsByDay[day] ?? DayTotals()
-            let intensity = intensityLevel(forSetCount: totals.setCount)
+            let intensity = totals.setCount > 0
+                ? intensityLevel(forSetCount: totals.setCount)
+                : (totals.hasCheckIn ? 1 : 0)
             return HeatmapDay(
                 id: day,
                 date: day,
@@ -492,7 +495,7 @@ public enum StatsCalculator {
                 id: isoFormatter.string(from: day),
                 weekdayLabel: weekdayFormatter.string(from: day),
                 date: day,
-                setCount: totals.setCount,
+                setCount: totals.setCount > 0 ? totals.setCount : (totals.hasCheckIn ? 1 : 0),
                 volumeKg: totals.volumeKg,
                 isToday: offset == 0
             )
@@ -522,7 +525,7 @@ public enum StatsCalculator {
         preferredUnit: WeightUnit
     ) -> String {
         let loggedSessions = sessions
-            .filter { $0.totalSets > 0 }
+            .filter { $0.countsAsWorkout }
             .sorted { $0.startedAt > $1.startedAt }
 
         guard !loggedSessions.isEmpty || sessions.contains(where: { $0.isActive }) else {
@@ -555,14 +558,21 @@ public enum StatsCalculator {
         if !recentWorkouts.isEmpty {
             lines.append("Recent workouts:")
             for session in recentWorkouts {
-                let topExercises = session.sortedEntries.prefix(3).map {
-                    "\($0.exerciseName) \($0.compactSummary(unit: preferredUnit))"
-                }.joined(separator: ", ")
                 let dateLabel = dateFormatter.string(from: session.startedAt)
-                lines.append(
-                    "- \(dateLabel) \(session.derivedTitle): \(session.totalSets) sets, " +
-                    "\(preferredUnit.formatVolume(kg: session.totalVolumeKg)) (\(topExercises))"
-                )
+                if session.totalSets == 0 && session.isManualCheckInDay {
+                    let noteSuffix = session.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        ? ""
+                        : " — \(session.notes.trimmingCharacters(in: .whitespacesAndNewlines))"
+                    lines.append("- \(dateLabel) \(session.derivedTitle): manual check-in\(noteSuffix)")
+                } else {
+                    let topExercises = session.sortedEntries.prefix(3).map {
+                        "\($0.exerciseName) \($0.compactSummary(unit: preferredUnit))"
+                    }.joined(separator: ", ")
+                    lines.append(
+                        "- \(dateLabel) \(session.derivedTitle): \(session.totalSets) sets, " +
+                        "\(preferredUnit.formatVolume(kg: session.totalVolumeKg)) (\(topExercises))"
+                    )
+                }
             }
         }
 
@@ -598,12 +608,15 @@ public enum StatsCalculator {
         calendar: Calendar
     ) -> [Date: DayTotals] {
         var map: [Date: DayTotals] = [:]
-        for session in sessions where session.totalSets > 0 {
+        for session in sessions where session.countsAsWorkout {
             let day = calendar.startOfDay(for: session.startedAt)
             var totals = map[day] ?? DayTotals()
             totals.setCount += session.totalSets
             totals.repCount += session.totalReps
             totals.volumeKg += session.totalVolumeKg
+            if session.isManualCheckInDay {
+                totals.hasCheckIn = true
+            }
             map[day] = totals
         }
         return map

@@ -74,6 +74,58 @@ public struct WorkoutCommandIntent: Codable, Equatable, Sendable {
         self.rawTranscript = rawTranscript
         self.parserSource = parserSource
     }
+
+    /// Number of distinct canonical exercises represented in `items`.
+    public var distinctExerciseCount: Int {
+        Set(items.map { ExerciseCatalog.resolve($0.exerciseName).canonicalName.lowercased() }).count
+    }
+
+    /// Auto-derived monochrome session title from the parsed exercise muscle groups.
+    public var suggestedSessionTitle: String {
+        let groups = Set(items.map { ExerciseCatalog.resolve($0.exerciseName).muscleGroup })
+        guard !groups.isEmpty else { return "Workout" }
+        let lowerGroups: Set<MuscleGroup> = [.quads, .hamstrings, .glutes, .calves]
+        let pushGroups: Set<MuscleGroup> = [.chest, .shoulders, .triceps]
+        let pullGroups: Set<MuscleGroup> = [.back, .biceps]
+
+        if groups.isSubset(of: lowerGroups) { return "Leg Day" }
+        if groups.isSubset(of: pushGroups) { return "Push Day" }
+        if groups.isSubset(of: pullGroups) { return "Pull Day" }
+        if groups == [.cardio] { return "Cardio" }
+        if groups == [.core] { return "Core Session" }
+        if groups.count == 1, let only = groups.first { return "\(only.rawValue) Day" }
+        let upperGroups: Set<MuscleGroup> = [.chest, .back, .shoulders, .biceps, .triceps]
+        if groups.isSubset(of: upperGroups.union([.core])) { return "Upper Body" }
+        return "Full Body"
+    }
+}
+
+public struct PendingSessionRecap: Identifiable, Equatable, Sendable {
+    public let id: UUID
+    public var items: [ParsedSetGroupIntent]
+    public var rawTranscript: String
+    public var parserSource: ParserSource
+    public var targetDate: Date
+    public var suggestedTitle: String
+    public var defaultFinishImmediately: Bool
+
+    public init(
+        id: UUID = UUID(),
+        items: [ParsedSetGroupIntent],
+        rawTranscript: String,
+        parserSource: ParserSource,
+        targetDate: Date = Date(),
+        suggestedTitle: String = "Workout",
+        defaultFinishImmediately: Bool = true
+    ) {
+        self.id = id
+        self.items = items
+        self.rawTranscript = rawTranscript
+        self.parserSource = parserSource
+        self.targetDate = targetDate
+        self.suggestedTitle = suggestedTitle
+        self.defaultFinishImmediately = defaultFinishImmediately
+    }
 }
 
 public struct WorkoutMutationBanner: Equatable, Identifiable {

@@ -24,6 +24,9 @@ public final class VoicePipelineCoordinator {
 
     public var phase: PipelinePhase = .idle
     public var liveTranscript: String = ""
+    public var pendingRecap: PendingSessionRecap?
+    public var isRecapCaptureMode: Bool = false
+    public var recapTargetDate: Date?
 
     public var audioLevels: [Float] {
         audioRecorder.audioLevels
@@ -79,6 +82,8 @@ public final class VoicePipelineCoordinator {
             guard let self, case .recording = self.phase else { return }
             self.operationToken &+= 1
             self.isFinishingRecording = false
+            self.isRecapCaptureMode = false
+            self.recapTargetDate = nil
             self.audioRecorder.setAudioBufferHandler(nil)
             self.audioRecorder.onEngineRestarted = nil
             self.appleSpeechService.cancelStreaming()
@@ -86,14 +91,43 @@ public final class VoicePipelineCoordinator {
         }
     }
 
-    /// Registers the active `WorkoutStore` used if recording hits the 60s cap or an AirPods route change.
+    /// Registers the active `WorkoutStore` used if recording hits the 3-minute cap or an AirPods route change.
     public func attachStore(_ store: WorkoutStore) {
         activeStoreForAutoStop = store
     }
 
-    public func beginRecording(isHoldMode: Bool) {
+    /// Starts a dedicated full-session voice recap capture (targeting `date`) that always opens the
+    /// monochrome Review & Confirm sheet once finished so the user can review all parsed exercises.
+    public func beginRecapRecording(for date: Date = Date()) {
         guard phase == .idle || phase.isError else { return }
         guard !isRequestingPermission else { return }
+        isRecapCaptureMode = true
+        recapTargetDate = date
+        beginRecording(isHoldMode: false, preserveRecapMode: true)
+    }
+
+    public func dismissPendingRecap() {
+        pendingRecap = nil
+    }
+
+    public func reparseRecapTranscript(
+        _ text: String,
+        context: ActiveSessionPromptContext
+    ) async -> WorkoutCommandIntent {
+        await llmService.parseVoiceTranscript(text, context: context)
+    }
+
+    public func beginRecording(isHoldMode: Bool) {
+        beginRecording(isHoldMode: isHoldMode, preserveRecapMode: false)
+    }
+
+    private func beginRecording(isHoldMode: Bool, preserveRecapMode: Bool) {
+        guard phase == .idle || phase.isError else { return }
+        guard !isRequestingPermission else { return }
+        if !preserveRecapMode {
+            isRecapCaptureMode = false
+            recapTargetDate = nil
+        }
 
         // Request microphone permission BEFORE entering `.recording` so iOS's system alert
         // never creates a fake recording state or triggers a "too short" error upon dismissal.
@@ -106,9 +140,11 @@ public final class VoicePipelineCoordinator {
                 self.isRequestingPermission = false
                 if granted {
                     if !isHoldMode && UIApplication.shared.applicationState != .background {
-                        self.beginRecording(isHoldMode: false)
+                        self.beginRecording(isHoldMode: false, preserveRecapMode: preserveRecapMode)
                     }
                 } else {
+                    self.isRecapCaptureMode = false
+                    self.recapTargetDate = nil
                     self.phase = .error("Microphone permission is needed for offline voice logging. Enable it in iOS Settings.")
                 }
             }
@@ -116,6 +152,8 @@ public final class VoicePipelineCoordinator {
         }
 
         guard micPermission == .granted else {
+            isRecapCaptureMode = false
+            recapTargetDate = nil
             phase = .error("Microphone permission is needed for offline voice logging. Enable it in iOS Settings.")
             return
         }
@@ -129,9 +167,11 @@ public final class VoicePipelineCoordinator {
                 self.isRequestingPermission = false
                 if granted {
                     if !isHoldMode && UIApplication.shared.applicationState != .background {
-                        self.beginRecording(isHoldMode: false)
+                        self.beginRecording(isHoldMode: false, preserveRecapMode: preserveRecapMode)
                     }
                 } else {
+                    self.isRecapCaptureMode = false
+                    self.recapTargetDate = nil
                     self.phase = .error(AppleSpeechError.permissionDenied.localizedDescription)
                 }
             }
@@ -139,12 +179,16 @@ public final class VoicePipelineCoordinator {
         }
 
         guard speechStatus == .authorized else {
+            isRecapCaptureMode = false
+            recapTargetDate = nil
             phase = .error(AppleSpeechError.permissionDenied.localizedDescription)
             return
         }
 
         let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
         guard availability.isReady else {
+            isRecapCaptureMode = false
+            recapTargetDate = nil
             phase = .error(availability.statusMessage)
             return
         }
@@ -256,6 +300,8 @@ public final class VoicePipelineCoordinator {
         let wasParsing = (phase == .parsing)
         operationToken &+= 1
         isFinishingRecording = false
+        isRecapCaptureMode = false
+        recapTargetDate = nil
         startRecordingTask?.cancel()
         startRecordingTask = nil
         processingTask?.cancel()
@@ -499,8 +545,29 @@ public final class VoicePipelineCoordinator {
     }
 
     private func applyIntent(_ intent: WorkoutCommandIntent, transcript: String, into store: WorkoutStore) {
+        let wasRecapMode = isRecapCaptureMode
+        let targetDate = recapTargetDate ?? Date()
+        isRecapCaptureMode = false
+        recapTargetDate = nil
+
         if intent.action == .unknown {
-            phase = .error("Couldn't match a workout set from \"\(transcript)\". Try \"Leg extension 3 sets 15 reps\".")
+            phase = .error("Couldn't match a workout set from \"\(transcript)\". Try \"Bench press 60 kg 3 sets 10 reps\".")
+            return
+        }
+
+        // Open the Review & Confirm sheet whenever the user explicitly started a full-session Recap
+        // (including past-day Calendar voice logs) OR dictated 2+ distinct exercises in a single go.
+        if intent.action == .logSets && !intent.items.isEmpty && (wasRecapMode || intent.distinctExerciseCount >= 2) {
+            let isToday = Calendar.current.isDateInToday(targetDate)
+            pendingRecap = PendingSessionRecap(
+                items: intent.items,
+                rawTranscript: transcript,
+                parserSource: intent.parserSource,
+                targetDate: targetDate,
+                suggestedTitle: intent.suggestedSessionTitle,
+                defaultFinishImmediately: wasRecapMode || !isToday || store.activeSession == nil
+            )
+            phase = .idle
             return
         }
 

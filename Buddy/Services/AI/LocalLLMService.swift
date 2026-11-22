@@ -121,7 +121,7 @@ public final class LocalLLMService {
                 temp: 0.1,
                 repeatPenalty: 1.15,
                 historyLimit: 6,
-                maxTokenCount: 1536
+                maxTokenCount: 2048
             )
             return UncheckedSendableBox(value: instance)
         }.value
@@ -193,8 +193,10 @@ public final class LocalLLMService {
             )
         }
 
+        let ruleFallback = RuleBasedWorkoutParser.parse(trimmed, context: context)
+
         guard modelManager.isLLMDownloaded else {
-            return RuleBasedWorkoutParser.parse(trimmed, context: context)
+            return ruleFallback
         }
 
         await acquireExclusiveAccess()
@@ -217,7 +219,7 @@ public final class LocalLLMService {
             try await ensureLoaded()
             try Task.checkCancellation()
             guard let bot = llm else {
-                return RuleBasedWorkoutParser.parse(trimmed, context: context)
+                return ruleFallback
             }
 
             let systemPrompt = Self.buildParserSystemPrompt(context: context)
@@ -242,19 +244,43 @@ public final class LocalLLMService {
             try Task.checkCancellation()
             let intent = structured.value.toDomainIntent(rawTranscript: trimmed)
 
-            if intent.action == .unknown || (intent.action == .logSets && intent.items.isEmpty) {
-                let fallback = RuleBasedWorkoutParser.parse(trimmed, context: context)
-                if fallback.action != .unknown {
-                    return fallback
-                }
-            }
-
-            return intent
+            return Self.reconcileParsedIntents(llmIntent: intent, ruleFallback: ruleFallback)
         } catch is CancellationError {
             return WorkoutCommandIntent(action: .unknown, rawTranscript: trimmed, parserSource: .localLLM)
         } catch {
-            return RuleBasedWorkoutParser.parse(trimmed, context: context)
+            return ruleFallback
         }
+    }
+
+    /// Reconciles local LLM output with the deterministic rule-based parser so quantized models
+    /// never silently drop exercises during long multi-exercise post-gym voice recaps or mistake
+    /// a past-tense recap ("I finished my workout, I did bench press...") for an empty endSession.
+    public nonisolated static func reconcileParsedIntents(
+        llmIntent: WorkoutCommandIntent,
+        ruleFallback: WorkoutCommandIntent
+    ) -> WorkoutCommandIntent {
+        if llmIntent.action == .unknown || (llmIntent.action == .logSets && llmIntent.items.isEmpty) {
+            return ruleFallback.action != .unknown ? ruleFallback : llmIntent
+        }
+
+        if llmIntent.action == .endSession && ruleFallback.action == .logSets && !ruleFallback.items.isEmpty {
+            return ruleFallback
+        }
+
+        if ruleFallback.action == .logSets && llmIntent.action == .logSets {
+            // If the deterministic parser cleanly captured strictly more distinct exercises
+            // (e.g. a 5-exercise gym recap where a 0.5B/1.5B LLM only emitted 2), keep the fuller list.
+            if ruleFallback.distinctExerciseCount > llmIntent.distinctExerciseCount && ruleFallback.distinctExerciseCount >= 2 {
+                return ruleFallback
+            }
+            if ruleFallback.distinctExerciseCount == llmIntent.distinctExerciseCount
+                && ruleFallback.items.count > llmIntent.items.count
+                && ruleFallback.items.count >= 3 {
+                return ruleFallback
+            }
+        }
+
+        return llmIntent
     }
 
     public func streamCoachReply(
@@ -438,18 +464,19 @@ public final class LocalLLMService {
 
         Rules:
         1. Choose action:
-           - "logSets": logging one or more exercises/sets. If user says "another set", "one more", or "same weight", use Last exercise logged ("\(lastExercise)").
+           - "logSets": logging one OR an entire gym session of multiple exercises/sets in one go. Past-tense recaps (e.g. "I finished my workout, today I did bench press... then cable fly...") MUST use "logSets" (NOT "endSession"). If user says "another set", "one more", or "same weight", use Last exercise logged ("\(lastExercise)").
            - "updateLastSet": correcting the most recent set ("make that 85 kg", "actually 12 reps", "mark as warmup").
            - "deleteLastSet": removing/undoing the last logged set.
            - "deleteLastExercise": removing the last logged exercise.
-           - "endSession": finishing or ending the workout.
+           - "endSession": ONLY when user asks to finish/end the workout without listing exercises/sets.
            - "unknown": not a workout command.
-        2. "sets" must be an integer >= 1 (default 1). "3 sets of 10" -> sets: 3, reps: 10.
-        3. "unit" must be "kg" or "lbs" ONLY when explicitly spoken; omit it otherwise.
-        4. For timed holds or cardio (e.g. "2 minute plank"), set "durationSeconds" (e.g. 120).
-        5. Use "tag": "warmup", "dropset", "failure", or "normal" when mentioned.
-        6. Omit optional fields (reps, weight, unit, durationSeconds, tag, note) when not mentioned; do not output null.
-        7. Write a concise 3-8 word "summary" of the logged action.
+        2. For full-session recaps, emit ONE item per exercise (or per distinct weight/rep set group on the same exercise) in the exact order spoken; never skip or merge different exercises.
+        3. "sets" must be an integer >= 1 (default 1). "3 sets of 10" -> sets: 3, reps: 10.
+        4. "unit" must be "kg" or "lbs" ONLY when explicitly spoken; omit it otherwise.
+        5. For timed holds or cardio (e.g. "2 minute plank"), set "durationSeconds" (e.g. 120).
+        6. Use "tag": "warmup", "dropset", "failure", or "normal" when mentioned.
+        7. Omit optional fields (reps, weight, unit, durationSeconds, tag, note) when not mentioned; do not output null.
+        8. Write a concise 3-8 word "summary" of the logged action.
         """
     }
 

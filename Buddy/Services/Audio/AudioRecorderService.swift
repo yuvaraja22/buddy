@@ -104,7 +104,8 @@ private final class AudioNotificationObserverToken: @unchecked Sendable {
 @Observable
 @MainActor
 public final class AudioRecorderService {
-    public static let maxRecordingSeconds: TimeInterval = 60
+    /// Supports uninterrupted 3-minute full-session post-gym voice recaps alongside AppleSpeechService rollover.
+    public static let maxRecordingSeconds: TimeInterval = 180
     private static let visualizerBarCount: Int = 24
 
     public var isRecording: Bool = false

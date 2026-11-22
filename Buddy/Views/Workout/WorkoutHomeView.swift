@@ -51,6 +51,7 @@ struct WorkoutHomeView: View {
     var isTabActive: Bool = true
     var dockClearance: CGFloat = 78
     var dismissSheetsToken: Int = 0
+    var onStartFullSessionRecap: () -> Void = {}
 
     @State private var showSettings: Bool = false
     @State private var showManualAdd: Bool = false
@@ -61,9 +62,9 @@ struct WorkoutHomeView: View {
     @FocusState private var isCommandBarFocused: Bool
 
     private let examplePhrases: [(chip: String, command: String)] = [
-        ("Leg ext 3×15", "Leg extension 3 sets 15 reps"),
         ("Bench 60 kg 3×10", "Bench press 60 kg 3 sets 10 reps"),
-        ("RDL 80 kg 3×10", "Romanian deadlift 80 kg 3 sets 10 reps"),
+        ("Full Push recap", "Bench press 60 kg 3 sets 10 reps, incline dumbbell press 20 kg 3 sets 12 reps, cable fly 15 kg 3 sets 15 reps"),
+        ("Leg ext 3×15", "Leg extension 3 sets 15 reps"),
         ("Plank 60s", "Plank 60 seconds")
     ]
 
@@ -424,13 +425,20 @@ struct WorkoutHomeView: View {
 
     private func flatSessionMetricStrip(_ session: WorkoutSession) -> some View {
         HStack(spacing: 0) {
-            stripMetricCell(title: "VOLUME", value: compactVolumeString(kg: session.totalVolumeKg))
+            stripMetricCell(title: "EXERCISES", value: "\(session.exerciseCount)")
             stripDivider
             stripMetricCell(title: "SETS", value: "\(session.totalSets)")
             stripDivider
             stripMetricCell(title: "REPS", value: "\(session.totalReps)")
             stripDivider
-            stripMetricCell(title: "LIFTS", value: "\(session.exerciseCount)")
+            if isTabActive {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    let elapsed = max(0, Int(context.date.timeIntervalSince(session.startedAt)))
+                    stripMetricCell(title: "DURATION", value: DurationFormatter.formatCompact(seconds: elapsed))
+                }
+            } else {
+                stripMetricCell(title: "DURATION", value: DurationFormatter.formatCompact(seconds: session.durationSeconds))
+            }
         }
         .padding(.vertical, 12)
         .background {
@@ -471,7 +479,7 @@ struct WorkoutHomeView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Session active")
                         .font(.system(size: 16, weight: .bold))
-                    Text("Tap or hold the mic button below and speak your set naturally, or tap a quick command.")
+                    Text("Tap or hold the mic button below and speak one set or your entire workout in one go.")
                         .font(.subheadline)
                         .foregroundStyle(BuddyTheme.mutedText)
                 }
@@ -490,7 +498,7 @@ struct WorkoutHomeView: View {
             weeklyGoal: 4
         )
         let completedSessions = store.sessions
-            .filter { !$0.isActive && $0.totalSets > 0 }
+            .filter { !$0.isActive && $0.countsAsWorkout }
             .sorted { $0.startedAt > $1.startedAt }
 
         let filteredRecent = completedSessions.filter { matchesRecentFilter($0) }
@@ -532,11 +540,11 @@ struct WorkoutHomeView: View {
                     }
 
                     uberQuickTile(
-                        title: "Open",
-                        symbol: "plus",
+                        title: "Recap",
+                        symbol: "waveform.badge.plus",
                         badge: nil
                     ) {
-                        startSplitSession(title: "Workout")
+                        onStartFullSessionRecap()
                     }
                 }
             }
@@ -716,13 +724,15 @@ struct WorkoutHomeView: View {
     }
 
     private func youtubeSessionRow(_ session: WorkoutSession) -> some View {
-        let primaryMuscle = session.sortedEntries.first?.muscleGroup ?? .fullBody
-        let durationBadge = DurationFormatter.formatClock(seconds: max(1, session.durationSeconds))
+        let isCheckInOnly = (session.totalSets == 0 && session.isManualCheckInDay)
+        let badgeText = isCheckInOnly
+            ? "Check-in"
+            : DurationFormatter.formatClock(seconds: max(1, session.durationSeconds))
 
         return HStack(alignment: .top, spacing: 12) {
             WorkoutThumbnailView(
-                assetName: primaryMuscle.thumbnailAssetName,
-                bottomRightBadge: durationBadge,
+                assetName: session.primaryMuscleGroup.thumbnailAssetName,
+                bottomRightBadge: badgeText,
                 topLeftTag: Calendar.current.isDateInToday(session.startedAt) ? "Today" : nil,
                 width: 132,
                 height: 76
@@ -735,26 +745,37 @@ struct WorkoutHomeView: View {
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
 
-                Text(session.startedAt.formatted(date: .abbreviated, time: .shortened))
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(BuddyTheme.mutedText)
-                    .lineLimit(1)
-
-                HStack(spacing: 6) {
-                    Text("\(session.totalSets) sets")
-                        .monospacedDigit()
-                    Text("·")
-                    Text("\(session.exerciseCount) \(session.exerciseCount == 1 ? "lift" : "lifts")")
-                        .monospacedDigit()
-                    if session.totalVolumeKg > 0 {
-                        Text("·")
-                        Text(store.preferredUnit.formatVolume(kg: session.totalVolumeKg))
-                            .monospacedDigit()
-                    }
-                }
-                .font(.system(size: 12, weight: .semibold))
+                Text(
+                    isCheckInOnly
+                        ? session.startedAt.formatted(date: .abbreviated, time: .omitted)
+                        : session.startedAt.formatted(date: .abbreviated, time: .shortened)
+                )
+                .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(BuddyTheme.mutedText)
                 .lineLimit(1)
+
+                if isCheckInOnly {
+                    Text(session.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Marked as trained" : session.notes)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(BuddyTheme.emeraldLive)
+                        .lineLimit(1)
+                } else {
+                    HStack(spacing: 6) {
+                        Text("\(session.exerciseCount) \(session.exerciseCount == 1 ? "lift" : "lifts")")
+                            .monospacedDigit()
+                        Text("·")
+                        Text("\(session.totalSets) \(session.totalSets == 1 ? "set" : "sets")")
+                            .monospacedDigit()
+                        if session.totalReps > 0 {
+                            Text("·")
+                            Text("\(session.totalReps) reps")
+                                .monospacedDigit()
+                        }
+                    }
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(BuddyTheme.mutedText)
+                    .lineLimit(1)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 2)
@@ -883,127 +904,5 @@ struct WorkoutHomeView: View {
             tag: .normal,
             notes: ""
         )
-    }
-
-    private func compactVolumeString(kg: Double) -> String {
-        if kg <= 0 { return "0 \(store.preferredUnit.label)" }
-        return store.preferredUnit.formatVolume(kg: kg)
-    }
-}
-
-// MARK: - Quick Manual Add Exercise Sheet
-
-private struct ManualAddExerciseSheet: View {
-    @Environment(\.dismiss) private var dismiss
-
-    let store: WorkoutStore
-
-    @State private var exerciseName: String = ""
-    @State private var setsCount: Int = 3
-    @State private var repsCount: Int = 10
-    @State private var includeReps: Bool = true
-    @State private var weightText: String = ""
-    @State private var durationText: String = ""
-    @State private var tag: SetTag = .normal
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Exercise") {
-                    TextField("e.g. Bench Press, Leg Extension, Plank", text: $exerciseName)
-                        .autocorrectionDisabled(false)
-                }
-
-                Section("Prescription") {
-                    Stepper(value: $setsCount, in: 1...20) {
-                        HStack {
-                            Text("Sets")
-                            Spacer()
-                            Text("\(setsCount)")
-                                .buddyNumeric()
-                                .fontWeight(.bold)
-                                .foregroundStyle(.primary)
-                        }
-                    }
-
-                    Toggle("Track Reps", isOn: $includeReps)
-
-                    if includeReps {
-                        Stepper(value: $repsCount, in: 1...200) {
-                            HStack {
-                                Text("Reps")
-                                Spacer()
-                                Text("\(repsCount)")
-                                    .buddyNumeric()
-                                    .fontWeight(.bold)
-                                    .foregroundStyle(.primary)
-                            }
-                        }
-                    }
-
-                    HStack {
-                        Text("Weight (\(store.preferredUnit.label))")
-                        Spacer()
-                        TextField("Bodyweight", text: $weightText)
-                            .keyboardType(.decimalPad)
-                            .multilineTextAlignment(.trailing)
-                            .buddyNumeric()
-                    }
-
-                    HStack {
-                        Text("Duration (sec)")
-                        Spacer()
-                        TextField("Optional", text: $durationText)
-                            .keyboardType(.numberPad)
-                            .multilineTextAlignment(.trailing)
-                            .buddyNumeric()
-                    }
-                }
-
-                Section("Set Type") {
-                    Picker("Type", selection: $tag) {
-                        ForEach(SetTag.allCases) { item in
-                            Text(item.displayLabel).tag(item)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                }
-            }
-            .navigationTitle("Add Exercise")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Add") {
-                        saveExercise()
-                    }
-                    .fontWeight(.bold)
-                    .disabled(exerciseName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-        }
-    }
-
-    private func saveExercise() {
-        let trimmedName = exerciseName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty else { return }
-
-        let parsedWeight = Double(weightText.replacingOccurrences(of: ",", with: "."))
-        let weightKg = parsedWeight.flatMap { $0 > 0 ? store.preferredUnit.toKg($0) : nil }
-        let parsedDuration = Int(durationText).flatMap { $0 > 0 ? $0 : nil }
-        let finalReps = includeReps ? repsCount : nil
-
-        store.addManualExercise(
-            name: trimmedName,
-            sets: setsCount,
-            reps: finalReps,
-            weightKg: weightKg,
-            durationSeconds: parsedDuration,
-            tag: tag
-        )
-        BuddyHaptics.success()
-        dismiss()
     }
 }

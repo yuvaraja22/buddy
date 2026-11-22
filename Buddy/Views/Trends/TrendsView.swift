@@ -42,7 +42,7 @@ struct TrendsView: View {
             StatsCalculator.exerciseProgression(canonicalName: $0, sessions: sessions)
         } ?? []
         let sortedHistory = sessions
-            .filter { $0.isActive || $0.totalSets > 0 }
+            .filter { $0.isActive || $0.countsAsWorkout }
             .sorted { $0.startedAt > $1.startedAt }
 
         NavigationStack {
@@ -455,13 +455,15 @@ struct TrendsView: View {
     }
 
     private func sessionHistoryRow(_ session: WorkoutSession) -> some View {
-        let primaryMuscle = session.sortedEntries.first?.muscleGroup ?? .fullBody
-        let durationBadge = DurationFormatter.formatClock(seconds: max(1, session.durationSeconds))
+        let isCheckInOnly = (session.totalSets == 0 && session.isManualCheckInDay)
+        let badgeText = isCheckInOnly
+            ? "Check-in"
+            : DurationFormatter.formatClock(seconds: max(1, session.durationSeconds))
 
         return HStack(alignment: .top, spacing: 12) {
             WorkoutThumbnailView(
-                assetName: primaryMuscle.thumbnailAssetName,
-                bottomRightBadge: durationBadge,
+                assetName: session.primaryMuscleGroup.thumbnailAssetName,
+                bottomRightBadge: badgeText,
                 topLeftTag: session.isActive ? "LIVE" : nil,
                 isLiveTag: session.isActive,
                 width: 128,
@@ -475,26 +477,37 @@ struct TrendsView: View {
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
 
-                Text(session.startedAt.formatted(date: .abbreviated, time: .shortened))
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(BuddyTheme.mutedText)
-                    .lineLimit(1)
-
-                HStack(spacing: 5) {
-                    Text("\(session.totalSets) sets")
-                        .monospacedDigit()
-                    Text("·")
-                    if session.totalVolumeKg > 0 {
-                        Text(store.preferredUnit.formatVolume(kg: session.totalVolumeKg))
-                            .monospacedDigit()
-                    } else {
-                        Text("\(session.totalReps) reps")
-                            .monospacedDigit()
-                    }
-                }
-                .font(.system(size: 12, weight: .semibold))
+                Text(
+                    isCheckInOnly
+                        ? session.startedAt.formatted(date: .abbreviated, time: .omitted)
+                        : session.startedAt.formatted(date: .abbreviated, time: .shortened)
+                )
+                .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(BuddyTheme.mutedText)
                 .lineLimit(1)
+
+                if isCheckInOnly {
+                    Text(session.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Marked as trained" : session.notes)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(BuddyTheme.emeraldLive)
+                        .lineLimit(1)
+                } else {
+                    HStack(spacing: 5) {
+                        Text("\(session.totalSets) sets")
+                            .monospacedDigit()
+                        Text("·")
+                        if session.totalVolumeKg > 0 {
+                            Text(store.preferredUnit.formatVolume(kg: session.totalVolumeKg))
+                                .monospacedDigit()
+                        } else {
+                            Text("\(session.totalReps) reps")
+                                .monospacedDigit()
+                        }
+                    }
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(BuddyTheme.mutedText)
+                    .lineLimit(1)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 2)

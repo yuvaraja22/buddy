@@ -84,6 +84,9 @@ public final class WorkoutSession {
     public var title: String
     public var notes: String
     public var isActive: Bool
+    /// Optional for guaranteed SwiftData lightweight migration across existing installs.
+    /// Marks a user-checked calendar workout day that counts toward streaks even with 0 logged sets.
+    public var isManualCheckIn: Bool?
 
     @Relationship(deleteRule: .cascade, inverse: \ExerciseEntry.session)
     public var entries: [ExerciseEntry]
@@ -95,6 +98,7 @@ public final class WorkoutSession {
         title: String = "Workout",
         notes: String = "",
         isActive: Bool = true,
+        isManualCheckIn: Bool = false,
         entries: [ExerciseEntry] = []
     ) {
         self.id = id
@@ -103,7 +107,47 @@ public final class WorkoutSession {
         self.title = title
         self.notes = notes
         self.isActive = isActive
+        self.isManualCheckIn = isManualCheckIn ? true : nil
         self.entries = entries
+    }
+
+    public var isManualCheckInDay: Bool {
+        isManualCheckIn ?? false
+    }
+
+    /// True when this session represents real logged sets OR an explicit manual calendar check-in.
+    /// Filters out abandoned 0-set live timers cleanly across Calendar, Trends, Streaks, and Widgets.
+    public var countsAsWorkout: Bool {
+        totalSets > 0 || isManualCheckInDay
+    }
+
+    public var primaryMuscleGroup: MuscleGroup {
+        if let first = sortedEntries.first {
+            return first.muscleGroup
+        }
+        let lower = title.lowercased()
+        if lower.contains("leg") || lower.contains("lower") || lower.contains("quad") || lower.contains("glute") {
+            return .quads
+        }
+        if lower.contains("push") || lower.contains("chest") {
+            return .chest
+        }
+        if lower.contains("pull") || lower.contains("back") {
+            return .back
+        }
+        if lower.contains("shoulder") || lower.contains("delt") {
+            return .shoulders
+        }
+        if lower.contains("arm") || lower.contains("bicep") || lower.contains("tricep") {
+            return .biceps
+        }
+        if lower.contains("core") || lower.contains("ab") {
+            return .core
+        }
+        if lower.contains("cardio") || lower.contains("run") {
+            return .cardio
+        }
+        return .fullBody
     }
 
     public var sortedEntries: [ExerciseEntry] {
