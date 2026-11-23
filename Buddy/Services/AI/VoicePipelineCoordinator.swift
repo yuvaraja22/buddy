@@ -44,6 +44,13 @@ public final class VoicePipelineCoordinator {
         modelManager.isLLMDownloaded ? "Parsing with Qwen…" : "Parsing sets…"
     }
 
+    public var processingModeCaption: String {
+        if appleSpeechService.isUsingCloudEnhancedSpeech {
+            return "Apple Cloud-Enhanced Speech"
+        }
+        return "Processing 100% offline"
+    }
+
     private let audioRecorder: AudioRecorderService
     private let appleSpeechService: AppleSpeechService
     private let llmService: LocalLLMService
@@ -185,7 +192,11 @@ public final class VoicePipelineCoordinator {
             return
         }
 
-        let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
+        let speechMode = modelManager.selectedAppleSpeechMode
+        let availability = appleSpeechService.checkAvailability(
+            for: modelManager.selectedAppleSpeechLocale,
+            mode: speechMode
+        )
         guard availability.isReady else {
             isRecapCaptureMode = false
             recapTargetDate = nil
@@ -205,6 +216,9 @@ public final class VoicePipelineCoordinator {
             guard let self else { return }
             do {
                 let localeOption = self.modelManager.selectedAppleSpeechLocale
+                let recognitionMode = self.modelManager.selectedAppleSpeechMode
+                let captureOptions = self.modelManager.audioCaptureOptions
+                let parserContext = self.activeStoreForAutoStop?.promptContext() ?? ActiveSessionPromptContext()
                 let recentExercises = self.activeStoreForAutoStop?.activeSession?.sortedEntries.map(\.canonicalName) ?? []
                 let contextualStrings = AppleSpeechService.buildGymContextualStrings(recentExercises: recentExercises)
 
@@ -214,22 +228,26 @@ public final class VoicePipelineCoordinator {
 
                 // AudioRecorderService removes the old bus-0 tap and stops the engine BEFORE
                 // invoking onEngineRestarted, so starting a fresh SFSpeechAudioBufferRecognitionRequest
-                // safely adopts the new HFP hardware format and propagates any recognizer errors.
+                // safely adopts the new hardware format and propagates any recognizer errors.
                 self.audioRecorder.onEngineRestarted = { [weak self] in
                     guard let self, self.operationToken == token else { return }
                     try self.startAppleSpeechSession(
                         token: token,
                         localeOption: localeOption,
-                        contextualStrings: contextualStrings
+                        recognitionMode: recognitionMode,
+                        contextualStrings: contextualStrings,
+                        parserContext: parserContext
                     )
                 }
 
-                try await self.audioRecorder.startRecording { [weak self] in
+                try await self.audioRecorder.startRecording(options: captureOptions) { [weak self] in
                     guard let self, self.operationToken == token else { return }
                     try self.startAppleSpeechSession(
                         token: token,
                         localeOption: localeOption,
-                        contextualStrings: contextualStrings
+                        recognitionMode: recognitionMode,
+                        contextualStrings: contextualStrings,
+                        parserContext: parserContext
                     )
                 }
 
@@ -412,11 +430,15 @@ public final class VoicePipelineCoordinator {
     private func startAppleSpeechSession(
         token: UInt64,
         localeOption: AppleSpeechLocaleOption,
-        contextualStrings: [String]
+        recognitionMode: AppleSpeechRecognitionMode,
+        contextualStrings: [String],
+        parserContext: ActiveSessionPromptContext
     ) throws {
         try appleSpeechService.startStreaming(
             localeOption: localeOption,
-            contextualStrings: contextualStrings
+            recognitionMode: recognitionMode,
+            contextualStrings: contextualStrings,
+            parserContext: parserContext
         ) { [weak self] partial in
             guard let self, self.operationToken == token else { return }
             self.liveTranscript = partial
@@ -436,7 +458,8 @@ public final class VoicePipelineCoordinator {
 
         phase = .transcribing
         do {
-            let finalized = try await appleSpeechService.finishStreaming(timeoutSeconds: 1.2)
+            let timeout: TimeInterval = appleSpeechService.isUsingCloudEnhancedSpeech ? 1.6 : 1.2
+            let finalized = try await appleSpeechService.finishStreaming(timeoutSeconds: timeout)
             guard operationToken == token, !Task.isCancelled else { return }
 
             let candidate = finalized.isEmpty ? liveTranscript : finalized

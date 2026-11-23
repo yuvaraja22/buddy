@@ -468,7 +468,8 @@ struct CoachView: View {
         let activeEpoch = conversationEpoch
         let workoutContext = StatsCalculator.buildCoachContext(
             sessions: store.sessions,
-            preferredUnit: store.preferredUnit
+            preferredUnit: store.preferredUnit,
+            weeklyGoal: store.weeklyGoal
         )
 
         generationTask?.cancel()

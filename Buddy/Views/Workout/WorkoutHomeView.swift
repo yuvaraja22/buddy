@@ -48,6 +48,7 @@ struct WorkoutHomeView: View {
     let modelManager: ModelManager
     let appleSpeechService: AppleSpeechService
     let llmService: LocalLLMService
+    let cloudSync: FirebaseSyncService
     var isTabActive: Bool = true
     var dockClearance: CGFloat = 78
     var dismissSheetsToken: Int = 0
@@ -172,7 +173,8 @@ struct WorkoutHomeView: View {
                     store: store,
                     modelManager: modelManager,
                     appleSpeechService: appleSpeechService,
-                    llmService: llmService
+                    llmService: llmService,
+                    cloudSync: cloudSync
                 )
                 .buddyAppearance()
             }
@@ -185,8 +187,13 @@ struct WorkoutHomeView: View {
         let consistency = StatsCalculator.consistency(
             sessions: store.sessions,
             referenceDate: Date(),
-            weeklyGoal: 4
+            weeklyGoal: store.weeklyGoal
         )
+        let firstName = store.displayName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: \.isWhitespace)
+            .first
+            .map(String.init)
 
         return HStack(spacing: 10) {
             if let session = store.activeSession {
@@ -219,9 +226,10 @@ struct WorkoutHomeView: View {
                         .fill(consistency.currentStreakDays > 0 ? BuddyTheme.emeraldLive : BuddyTheme.mutedText)
                         .frame(width: 7, height: 7)
 
-                    Text("Buddy")
+                    Text(firstName ?? "Buddy")
                         .font(.system(size: 17, weight: .bold))
                         .foregroundStyle(.primary)
+                        .lineLimit(1)
 
                     Text("·")
                         .foregroundStyle(BuddyTheme.mutedText)
@@ -495,7 +503,7 @@ struct WorkoutHomeView: View {
         let consistency = StatsCalculator.consistency(
             sessions: store.sessions,
             referenceDate: Date(),
-            weeklyGoal: 4
+            weeklyGoal: store.weeklyGoal
         )
         let completedSessions = store.sessions
             .filter { !$0.isActive && $0.countsAsWorkout }

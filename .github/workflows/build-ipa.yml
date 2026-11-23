@@ -114,6 +114,9 @@ jobs:
             CODE_SIGNING_ALLOWED=NO
 
       - name: Archive unsigned Release iOS app
+        env:
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          FIREBASE_WEB_API_KEY: ${{ secrets.FIREBASE_WEB_API_KEY }}
         run: |
           set -o pipefail
           VERSION_FLAGS=()
@@ -121,6 +124,10 @@ jobs:
             TAG_VER="${GITHUB_REF_NAME#v}"
             VERSION_FLAGS+=(MARKETING_VERSION="$TAG_VER" CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}")
             echo "Building tagged release version: ${TAG_VER} (${GITHUB_RUN_NUMBER})"
+          fi
+          if [[ -n "${FIREBASE_PROJECT_ID:-}" && -n "${FIREBASE_WEB_API_KEY:-}" ]]; then
+            VERSION_FLAGS+=(BUDDY_FIREBASE_PROJECT_ID="$FIREBASE_PROJECT_ID" BUDDY_FIREBASE_API_KEY="$FIREBASE_WEB_API_KEY")
+            echo "Pre-configuring Firebase project from GitHub Actions secrets"
           fi
           xcodebuild archive \
             -project Buddy.xcodeproj \

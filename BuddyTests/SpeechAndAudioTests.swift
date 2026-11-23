@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftData
 import XCTest
 @testable import Buddy
@@ -195,5 +196,164 @@ final class SpeechAndAudioTests: XCTestCase {
         manager.selectedAppleSpeechLocale = .enIN
         let reloaded = ModelManager(defaults: defaults)
         XCTAssertEqual(reloaded.selectedAppleSpeechLocale, .enIN)
+    }
+
+    func testAudioSessionConfigurationPrefersBuiltInMicWithoutBluetoothHFP() {
+        // Default loud-gym profile: iPhone built-in mic + A2DP stereo music (no HFP call downgrade)
+        let builtInIsolated = AudioRecorderService.sessionConfiguration(
+            for: AudioCaptureOptions(enableVoiceIsolation: true, preferBuiltInMic: true)
+        )
+        XCTAssertEqual(builtInIsolated.mode, .default)
+        XCTAssertTrue(builtInIsolated.options.contains(.allowBluetoothA2DP))
+        XCTAssertTrue(builtInIsolated.options.contains(.mixWithOthers))
+        XCTAssertFalse(builtInIsolated.options.contains(.allowBluetooth))
+
+        // Bluetooth headset mic opted-in with voice isolation: `.voiceChat` + HFP enabled
+        let bluetoothIsolated = AudioRecorderService.sessionConfiguration(
+            for: AudioCaptureOptions(enableVoiceIsolation: true, preferBuiltInMic: false)
+        )
+        XCTAssertEqual(bluetoothIsolated.mode, .voiceChat)
+        XCTAssertTrue(bluetoothIsolated.options.contains(.allowBluetooth))
+        XCTAssertTrue(bluetoothIsolated.options.contains(.allowBluetoothA2DP))
+
+        // Bluetooth headset mic opted-in without voice isolation: `.default` + HFP enabled
+        let bluetoothPlain = AudioRecorderService.sessionConfiguration(
+            for: AudioCaptureOptions(enableVoiceIsolation: false, preferBuiltInMic: false)
+        )
+        XCTAssertEqual(bluetoothPlain.mode, .default)
+        XCTAssertTrue(bluetoothPlain.options.contains(.allowBluetooth))
+    }
+
+    func testSelectBestGymTranscriptionPrefersWorkoutValidAlternativeOverNoisyHomophone() {
+        let context = ActiveSessionPromptContext(preferredUnit: .kg)
+
+        // Alternative hypothesis has clean gym vocabulary vs corrupted top-1 homophones
+        let cleaned = AppleSpeechService.selectBestGymTranscription(
+            candidates: [
+                "bench price 60 kg 3 sex 10 wraps",
+                "bench press 60 kg 3 sets 10 reps"
+            ],
+            context: context
+        )
+        XCTAssertEqual(cleaned, "bench press 60 kg 3 sets 10 reps")
+
+        // Known catalog exercise beats unknown noisy mishearing
+        let knownCatalog = AppleSpeechService.selectBestGymTranscription(
+            candidates: [
+                "black spot 100 kg 3 sets 8 reps",
+                "hack squat 100 kg 3 sets 8 reps"
+            ],
+            context: context
+        )
+        XCTAssertEqual(knownCatalog, "hack squat 100 kg 3 sets 8 reps")
+
+        // Active session exercise context breaks ties in favor of the exercise currently being trained
+        let sessionContext = ActiveSessionPromptContext(
+            preferredUnit: .kg,
+            lastExerciseName: "Bench Press",
+            recentExercisesInSession: ["Bench Press"],
+            isSessionActive: true
+        )
+        let contextual = AppleSpeechService.selectBestGymTranscription(
+            candidates: [
+                "leg press 80 kg 10 reps",
+                "bench press 80 kg 10 reps"
+            ],
+            context: sessionContext
+        )
+        XCTAssertEqual(contextual, "bench press 80 kg 10 reps")
+
+        // Equal-quality candidates preserve Apple's top acoustic match
+        let tiePreserved = AppleSpeechService.selectBestGymTranscription(
+            candidates: [
+                "bench press 80 kg 5 reps",
+                "bench press 18 kg 5 reps"
+            ],
+            context: context
+        )
+        XCTAssertEqual(tiePreserved, "bench press 80 kg 5 reps")
+
+        // Partial live transcript before numbers arrive prefers known exercise phrase
+        let partial = AppleSpeechService.selectBestGymTranscription(
+            candidates: ["bench price", "bench press"],
+            context: context
+        )
+        XCTAssertEqual(partial, "bench press")
+    }
+
+    func testRuleBasedParserRepairsLoudGymPhoneticMishearings() {
+        let context = ActiveSessionPromptContext(preferredUnit: .kg)
+
+        let bench = RuleBasedWorkoutParser.parse("bench price 60 kg 3 sex 10 wraps", context: context)
+        XCTAssertEqual(bench.action, .logSets)
+        XCTAssertEqual(bench.items.first?.exerciseName, "Bench Press")
+        XCTAssertEqual(bench.items.first?.setCount, 3)
+        XCTAssertEqual(bench.items.first?.reps, 10)
+        XCTAssertEqual(bench.items.first?.weightValue ?? -1, 60, accuracy: 0.01)
+
+        let curl = RuleBasedWorkoutParser.parse("bicep girl 15 kg 3 sets 12 raps", context: context)
+        XCTAssertEqual(curl.action, .logSets)
+        XCTAssertEqual(curl.items.first?.exerciseName, "Bicep Curl")
+        XCTAssertEqual(curl.items.first?.setCount, 3)
+        XCTAssertEqual(curl.items.first?.reps, 12)
+        XCTAssertEqual(curl.items.first?.weightValue ?? -1, 15, accuracy: 0.01)
+
+        let pulldown = RuleBasedWorkoutParser.parse("let pulldown 55 kg 3 sits 10 reps", context: context)
+        XCTAssertEqual(pulldown.action, .logSets)
+        XCTAssertEqual(pulldown.items.first?.exerciseName, "Lat Pulldown")
+        XCTAssertEqual(pulldown.items.first?.setCount, 3)
+        XCTAssertEqual(pulldown.items.first?.reps, 10)
+        XCTAssertEqual(pulldown.items.first?.weightValue ?? -1, 55, accuracy: 0.01)
+
+        let raises = RuleBasedWorkoutParser.parse("lateral rays 12 kg 3 sets 15 wraps", context: context)
+        XCTAssertEqual(raises.action, .logSets)
+        XCTAssertEqual(raises.items.first?.exerciseName, "Lateral Raise")
+        XCTAssertEqual(raises.items.first?.setCount, 3)
+        XCTAssertEqual(raises.items.first?.reps, 15)
+        XCTAssertEqual(raises.items.first?.weightValue ?? -1, 12, accuracy: 0.01)
+
+        let hipThrust = RuleBasedWorkoutParser.parse("hip trust 100 kg 4 sets 8 reps", context: context)
+        XCTAssertEqual(hipThrust.action, .logSets)
+        XCTAssertEqual(hipThrust.items.first?.exerciseName, "Hip Thrust")
+        XCTAssertEqual(hipThrust.items.first?.setCount, 4)
+        XCTAssertEqual(hipThrust.items.first?.reps, 8)
+        XCTAssertEqual(hipThrust.items.first?.weightValue ?? -1, 100, accuracy: 0.01)
+    }
+
+    func testExerciseCatalogIsKnownExerciseDistinguishesCatalogFromRandomWords() {
+        XCTAssertTrue(ExerciseCatalog.isKnownExercise("Bench Press"))
+        XCTAssertTrue(ExerciseCatalog.isKnownExercise("rdl"))
+        XCTAssertTrue(ExerciseCatalog.isKnownExercise("Hack Squat"))
+        XCTAssertFalse(ExerciseCatalog.isKnownExercise("Black Spot"))
+        XCTAssertFalse(ExerciseCatalog.isKnownExercise("Bench Price"))
+    }
+
+    @MainActor
+    func testModelManagerPersistsLoudGymVoiceSettings() throws {
+        let suiteName = "com.yuvaraja.buddy.tests.gymvoice.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let manager = ModelManager(defaults: defaults)
+        XCTAssertEqual(manager.selectedAppleSpeechMode, .hybridAuto)
+        XCTAssertTrue(manager.enableGymNoiseIsolation)
+        XCTAssertTrue(manager.preferBuiltInMic)
+        XCTAssertEqual(
+            manager.audioCaptureOptions,
+            AudioCaptureOptions(enableVoiceIsolation: true, preferBuiltInMic: true)
+        )
+
+        manager.selectedAppleSpeechMode = .offlineOnly
+        manager.enableGymNoiseIsolation = false
+        manager.preferBuiltInMic = false
+
+        let reloaded = ModelManager(defaults: defaults)
+        XCTAssertEqual(reloaded.selectedAppleSpeechMode, .offlineOnly)
+        XCTAssertFalse(reloaded.enableGymNoiseIsolation)
+        XCTAssertFalse(reloaded.preferBuiltInMic)
+        XCTAssertEqual(
+            reloaded.audioCaptureOptions,
+            AudioCaptureOptions(enableVoiceIsolation: false, preferBuiltInMic: false)
+        )
     }
 }

@@ -19,6 +19,7 @@ struct RootTabView: View {
     let modelManager: ModelManager
     let appleSpeechService: AppleSpeechService
     let llmService: LocalLLMService
+    let cloudSync: FirebaseSyncService
 
     @State private var selectedTab: BuddyTab = .workout
     @State private var showModelSetup: Bool = false
@@ -42,6 +43,7 @@ struct RootTabView: View {
                     modelManager: modelManager,
                     appleSpeechService: appleSpeechService,
                     llmService: llmService,
+                    cloudSync: cloudSync,
                     isTabActive: selectedTab == .workout,
                     dockClearance: voiceDockHeight,
                     dismissSheetsToken: dismissWorkoutSheetsToken,
@@ -135,7 +137,10 @@ struct RootTabView: View {
         .task {
             modelManager.refreshDownloadState()
             appleSpeechService.refreshAuthorizationStatus()
-            let appleSpeechReady = appleSpeechService.isReadyForOfflineVoice(for: modelManager.selectedAppleSpeechLocale)
+            let appleSpeechReady = appleSpeechService.isReadyForVoice(
+                for: modelManager.selectedAppleSpeechLocale,
+                mode: modelManager.selectedAppleSpeechMode
+            )
             if !didHandleDeepLinkOnLaunch && !hasSeenOnboarding && !modelManager.isAllReady(appleSpeechReady: appleSpeechReady) {
                 hasSeenOnboarding = true
                 showModelSetup = true

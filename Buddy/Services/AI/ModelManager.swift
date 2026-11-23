@@ -142,11 +142,45 @@ private final class LLMDownloadDelegate: NSObject, URLSessionDownloadDelegate, @
 }
 
 public typealias AppleSpeechLocaleOption = ModelManager.AppleSpeechLocaleOption
+public typealias AppleSpeechRecognitionMode = ModelManager.AppleSpeechRecognitionMode
 public typealias LLMPreset = ModelManager.LLMPreset
 
 @Observable
 @MainActor
 public final class ModelManager {
+    public enum AppleSpeechRecognitionMode: String, CaseIterable, Identifiable, Codable, Sendable {
+        /// Uses Apple's higher-accuracy cloud-assisted speech model when online (better in loud gym
+        /// music and accents), and automatically falls back to on-device speech when offline.
+        case hybridAuto = "hybrid-auto"
+        /// Strictly enforces on-device recognition (`requiresOnDeviceRecognition = true`).
+        case offlineOnly = "offline-only"
+
+        public var id: String { rawValue }
+
+        public var displayName: String {
+            switch self {
+            case .hybridAuto: return "Enhanced (Auto)"
+            case .offlineOnly: return "Offline Only"
+            }
+        }
+
+        public var shortLabel: String {
+            switch self {
+            case .hybridAuto: return "Enhanced"
+            case .offlineOnly: return "On-Device"
+            }
+        }
+
+        public var subtitle: String {
+            switch self {
+            case .hybridAuto:
+                return "Uses Apple Cloud Speech in loud gyms with automatic offline fallback."
+            case .offlineOnly:
+                return "100% on-device Apple Speech. Audio never leaves your iPhone."
+            }
+        }
+    }
+
     public enum AppleSpeechLocaleOption: String, CaseIterable, Identifiable, Codable, Sendable {
         case auto = "auto"
         case enIN = "en-IN"
@@ -234,6 +268,9 @@ public final class ModelManager {
 
     private enum DefaultsKey {
         static let selectedAppleSpeechLocale = "buddy.models.appleSpeechLocale"
+        static let selectedAppleSpeechMode = "buddy.models.appleSpeechMode"
+        static let enableGymNoiseIsolation = "buddy.models.enableGymNoiseIsolation"
+        static let preferBuiltInMic = "buddy.models.preferBuiltInMic"
         static let selectedLLMPreset = "buddy.models.selectedLLMPreset"
         static let customLLMFileName = "buddy.models.customLLMFileName"
 
@@ -253,6 +290,34 @@ public final class ModelManager {
             guard !isInitializing else { return }
             defaults.set(selectedAppleSpeechLocale.rawValue, forKey: DefaultsKey.selectedAppleSpeechLocale)
         }
+    }
+
+    public var selectedAppleSpeechMode: AppleSpeechRecognitionMode = .hybridAuto {
+        didSet {
+            guard !isInitializing else { return }
+            defaults.set(selectedAppleSpeechMode.rawValue, forKey: DefaultsKey.selectedAppleSpeechMode)
+        }
+    }
+
+    public var enableGymNoiseIsolation: Bool = true {
+        didSet {
+            guard !isInitializing else { return }
+            defaults.set(enableGymNoiseIsolation, forKey: DefaultsKey.enableGymNoiseIsolation)
+        }
+    }
+
+    public var preferBuiltInMic: Bool = true {
+        didSet {
+            guard !isInitializing else { return }
+            defaults.set(preferBuiltInMic, forKey: DefaultsKey.preferBuiltInMic)
+        }
+    }
+
+    public var audioCaptureOptions: AudioCaptureOptions {
+        AudioCaptureOptions(
+            enableVoiceIsolation: enableGymNoiseIsolation,
+            preferBuiltInMic: preferBuiltInMic
+        )
     }
 
     public var selectedLLMPreset: LLMPreset = .qwen25_1_5B {
@@ -283,7 +348,7 @@ public final class ModelManager {
     public var activeLLMFileURL: URL?
     public var totalStorageUsedDescription: String = "0 MB"
 
-    /// Returns `true` when Apple On-Device Speech is available AND the local LLM is downloaded.
+    /// Returns `true` when Apple Speech is ready AND the local LLM is downloaded.
     public func isAllReady(appleSpeechReady: Bool) -> Bool {
         appleSpeechReady && isLLMDownloaded
     }
@@ -304,6 +369,19 @@ public final class ModelManager {
         if let storedLocale = defaults.string(forKey: DefaultsKey.selectedAppleSpeechLocale),
            let parsedLocale = AppleSpeechLocaleOption(rawValue: storedLocale) {
             self.selectedAppleSpeechLocale = parsedLocale
+        }
+
+        if let storedMode = defaults.string(forKey: DefaultsKey.selectedAppleSpeechMode),
+           let parsedMode = AppleSpeechRecognitionMode(rawValue: storedMode) {
+            self.selectedAppleSpeechMode = parsedMode
+        }
+
+        if defaults.object(forKey: DefaultsKey.enableGymNoiseIsolation) != nil {
+            self.enableGymNoiseIsolation = defaults.bool(forKey: DefaultsKey.enableGymNoiseIsolation)
+        }
+
+        if defaults.object(forKey: DefaultsKey.preferBuiltInMic) != nil {
+            self.preferBuiltInMic = defaults.bool(forKey: DefaultsKey.preferBuiltInMic)
         }
 
         if let storedLLM = defaults.string(forKey: DefaultsKey.selectedLLMPreset),

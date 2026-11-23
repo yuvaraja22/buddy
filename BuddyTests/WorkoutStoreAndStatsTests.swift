@@ -607,6 +607,116 @@ final class WorkoutStoreAndStatsTests: XCTestCase {
         XCTAssertEqual(store.activeSession?.totalSets, 9)
     }
 
+    func testWeeklyGoalAndProfilePreferencesPersistAndFlowToWidgetsAndCoach() throws {
+        let suiteName = "buddy.tests.profile.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let schema = Schema([WorkoutSession.self, ExerciseEntry.self, LoggedSet.self, CoachMessage.self])
+        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+        let container = try ModelContainer(for: schema, configurations: [config])
+
+        let store = WorkoutStore(modelContext: container.mainContext, defaults: defaults, enableSystemSync: false)
+        XCTAssertEqual(store.weeklyGoal, 4)
+
+        store.weeklyGoal = 9 // clamped to 7
+        XCTAssertEqual(store.weeklyGoal, 7)
+        store.weeklyGoal = 0 // clamped to 1
+        XCTAssertEqual(store.weeklyGoal, 1)
+        store.weeklyGoal = 5
+        store.displayName = "Yuva"
+
+        let reloadedStore = WorkoutStore(modelContext: container.mainContext, defaults: defaults, enableSystemSync: false)
+        XCTAssertEqual(reloadedStore.weeklyGoal, 5)
+        XCTAssertEqual(reloadedStore.displayName, "Yuva")
+
+        let snapshot = StatsCalculator.buildWidgetSnapshot(
+            sessions: reloadedStore.sessions,
+            preferredUnit: reloadedStore.preferredUnit,
+            weeklyGoal: reloadedStore.weeklyGoal
+        )
+        XCTAssertEqual(snapshot.weeklyGoal, 5)
+
+        let coachContext = StatsCalculator.buildCoachContext(
+            sessions: reloadedStore.sessions,
+            preferredUnit: reloadedStore.preferredUnit,
+            weeklyGoal: reloadedStore.weeklyGoal
+        )
+        XCTAssertTrue(coachContext.contains("5"))
+    }
+
+    func testCloudBackupFirestoreCodecRoundTripAndConflictSafeMergeWithTombstones() throws {
+        let schema = Schema([WorkoutSession.self, ExerciseEntry.self, LoggedSet.self, CoachMessage.self])
+
+        let suiteA = "buddy.tests.cloudA.\(UUID().uuidString)"
+        let defaultsA = try XCTUnwrap(UserDefaults(suiteName: suiteA))
+        defer { defaultsA.removePersistentDomain(forName: suiteA) }
+        let containerA = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)])
+        let storeA = WorkoutStore(modelContext: containerA.mainContext, defaults: defaultsA, enableSystemSync: false)
+
+        let suiteB = "buddy.tests.cloudB.\(UUID().uuidString)"
+        let defaultsB = try XCTUnwrap(UserDefaults(suiteName: suiteB))
+        defer { defaultsB.removePersistentDomain(forName: suiteB) }
+        let containerB = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)])
+        let storeB = WorkoutStore(modelContext: containerB.mainContext, defaults: defaultsB, enableSystemSync: false)
+
+        // Device A logs 2 workouts and customizes profile.
+        storeA.displayName = "Yuva"
+        storeA.weeklyGoal = 6
+        storeA.preferredUnit = .lbs
+
+        let cal = Calendar.current
+        let yesterday = try XCTUnwrap(cal.date(byAdding: .day, value: -1, to: Date()))
+        let checkIn = storeA.markDayAsTrained(on: yesterday, title: "Pull Day", notes: "Back & Biceps")
+        storeA.addManualExercise(
+            name: "Bench Press",
+            sets: 3,
+            reps: 10,
+            weightKg: 60,
+            durationSeconds: nil
+        )
+        _ = storeA.endActiveSession()
+
+        let exportedFromA = storeA.exportCloudBackup()
+        let firestoreBytes = try FirestoreDocumentCodec.encodeBackupDocument(exportedFromA)
+        let decodedFromFirestore = try XCTUnwrap(FirestoreDocumentCodec.decodeBackupDocument(from: firestoreBytes))
+        XCTAssertEqual(decodedFromFirestore.sessions.count, 2)
+        XCTAssertEqual(decodedFromFirestore.profile.weeklyGoal, 6)
+        XCTAssertEqual(decodedFromFirestore.profile.preferredUnit, .lbs)
+        XCTAssertEqual(decodedFromFirestore.profile.displayName, "Yuva")
+
+        // Fresh Device B merges Device A's Firestore backup and restores all workouts + profile.
+        let mergeOnB = storeB.mergeCloudBackup(decodedFromFirestore)
+        XCTAssertEqual(mergeOnB.importedSessions, 2)
+        XCTAssertTrue(mergeOnB.restoredProfile)
+        XCTAssertEqual(storeB.weeklyGoal, 6)
+        XCTAssertEqual(storeB.preferredUnit, .lbs)
+        XCTAssertEqual(storeB.displayName, "Yuva")
+        XCTAssertEqual(storeB.sessions.filter(\.countsAsWorkout).count, 2)
+
+        // Device B deletes yesterday's check-in and logs a new Leg Day session.
+        if let checkInOnB = storeB.sessions.first(where: { $0.id == checkIn.id }) {
+            storeB.deleteSession(checkInOnB)
+        }
+        let twoDaysAgo = try XCTUnwrap(cal.date(byAdding: .day, value: -2, to: Date()))
+        storeB.addManualExercise(name: "Squat", sets: 4, reps: 8, weightKg: 100, durationSeconds: nil, on: twoDaysAgo)
+
+        let exportedFromB = storeB.exportCloudBackup()
+        XCTAssertTrue(exportedFromB.deletedSessionIDs.contains(checkIn.id))
+
+        // Device A merges Device B's backup -> deletes tombstoned check-in & imports Squat session cleanly.
+        let mergeOnA = storeA.mergeCloudBackup(exportedFromB)
+        XCTAssertEqual(mergeOnA.deletedSessions, 1)
+        XCTAssertEqual(mergeOnA.importedSessions, 1)
+        XCTAssertFalse(storeA.sessions.contains(where: { $0.id == checkIn.id }))
+        XCTAssertTrue(storeA.sessions.contains(where: { $0.entries.contains(where: { $0.canonicalName == "Squat" }) }))
+
+        // Verify Firebase Auth friendly error mapping.
+        XCTAssertTrue(FirestoreDocumentCodec.friendlyAuthError(from: "EMAIL_EXISTS").contains("already exists"))
+        XCTAssertTrue(FirestoreDocumentCodec.friendlyAuthError(from: "INVALID_LOGIN_CREDENTIALS").contains("Invalid email or password"))
+        XCTAssertTrue(FirestoreDocumentCodec.friendlyAuthError(from: "OPERATION_NOT_ALLOWED").contains("Email/Password"))
+    }
+
     // MARK: - Fixture Helper
 
     private func makeSession(
