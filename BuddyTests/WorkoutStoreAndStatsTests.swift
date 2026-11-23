@@ -715,6 +715,122 @@ final class WorkoutStoreAndStatsTests: XCTestCase {
         XCTAssertTrue(FirestoreDocumentCodec.friendlyAuthError(from: "EMAIL_EXISTS").contains("already exists"))
         XCTAssertTrue(FirestoreDocumentCodec.friendlyAuthError(from: "INVALID_LOGIN_CREDENTIALS").contains("Invalid email or password"))
         XCTAssertTrue(FirestoreDocumentCodec.friendlyAuthError(from: "OPERATION_NOT_ALLOWED").contains("Email/Password"))
+        XCTAssertTrue(FirestoreDocumentCodec.friendlyAuthError(from: "INVALID_IDP_RESPONSE").contains("Google"))
+    }
+
+    func testGoogleOAuthPKCEAndConfigHelpers() throws {
+        // 1. Reversed Client ID & RFC 8252 single-slash redirect URI
+        let sampleClientID = " 1234567890-abc123xyz.apps.googleusercontent.com \n"
+        XCTAssertEqual(
+            GoogleOAuthHelper.reversedClientID(from: sampleClientID),
+            "com.googleusercontent.apps.1234567890-abc123xyz"
+        )
+        XCTAssertEqual(
+            GoogleOAuthHelper.redirectURI(for: sampleClientID),
+            "com.googleusercontent.apps.1234567890-abc123xyz:/oauth2redirect"
+        )
+        XCTAssertNil(GoogleOAuthHelper.reversedClientID(from: ""))
+        XCTAssertNil(GoogleOAuthHelper.reversedClientID(from: "not-a-google-client-id"))
+        XCTAssertNil(GoogleOAuthHelper.reversedClientID(from: ".apps.googleusercontent.com"))
+        XCTAssertNil(GoogleOAuthHelper.reversedClientID(from: "bad.prefix.apps.googleusercontent.com"))
+
+        // 2. RFC 7636 Appendix B official PKCE S256 test vector
+        let rfcVerifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        XCTAssertEqual(
+            GoogleOAuthHelper.codeChallenge(for: rfcVerifier),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        )
+
+        let generated = GoogleOAuthHelper.generatePKCE()
+        XCTAssertEqual(generated.verifier.count, 43)
+        XCTAssertEqual(generated.challenge, GoogleOAuthHelper.codeChallenge(for: generated.verifier))
+        XCTAssertFalse(generated.verifier.contains("+"))
+        XCTAssertFalse(generated.verifier.contains("/"))
+        XCTAssertFalse(generated.verifier.contains("="))
+
+        // 3. Authorization URL query construction
+        let state = GoogleOAuthHelper.generateState()
+        let authURL = try XCTUnwrap(
+            GoogleOAuthHelper.buildAuthorizationURL(
+                clientID: sampleClientID,
+                codeChallenge: generated.challenge,
+                state: state
+            )
+        )
+        let authComponents = try XCTUnwrap(URLComponents(url: authURL, resolvingAgainstBaseURL: false))
+        let queryMap = Dictionary(
+            uniqueKeysWithValues: (authComponents.queryItems ?? []).map { ($0.name, $0.value ?? "") }
+        )
+        XCTAssertEqual(queryMap["client_id"], "1234567890-abc123xyz.apps.googleusercontent.com")
+        XCTAssertEqual(queryMap["redirect_uri"], "com.googleusercontent.apps.1234567890-abc123xyz:/oauth2redirect")
+        XCTAssertEqual(queryMap["response_type"], "code")
+        XCTAssertEqual(queryMap["scope"], "openid email profile")
+        XCTAssertEqual(queryMap["code_challenge"], generated.challenge)
+        XCTAssertEqual(queryMap["code_challenge_method"], "S256")
+        XCTAssertEqual(queryMap["state"], state)
+        XCTAssertEqual(queryMap["prompt"], "select_account")
+
+        // 4. Redirect callback parsing & error handling
+        let goodCallback = try XCTUnwrap(
+            URL(string: "com.googleusercontent.apps.1234567890-abc123xyz:/oauth2redirect?state=\(state)&code=auth-code-999")
+        )
+        XCTAssertEqual(
+            try GoogleOAuthHelper.extractAuthorizationCode(from: goodCallback, expectedState: state),
+            "auth-code-999"
+        )
+
+        let badStateCallback = try XCTUnwrap(
+            URL(string: "com.googleusercontent.apps.1234567890-abc123xyz:/oauth2redirect?state=wrong-state&code=auth-code-999")
+        )
+        XCTAssertThrowsError(try GoogleOAuthHelper.extractAuthorizationCode(from: badStateCallback, expectedState: state)) { error in
+            XCTAssertEqual(error as? GoogleOAuthError, .stateMismatch)
+        }
+
+        let deniedCallback = try XCTUnwrap(
+            URL(string: "com.googleusercontent.apps.1234567890-abc123xyz:/oauth2redirect?error=access_denied&state=\(state)")
+        )
+        XCTAssertThrowsError(try GoogleOAuthHelper.extractAuthorizationCode(from: deniedCallback, expectedState: state)) { error in
+            XCTAssertEqual(error as? GoogleOAuthError, .cancelled)
+        }
+
+        let missingCodeCallback = try XCTUnwrap(
+            URL(string: "com.googleusercontent.apps.1234567890-abc123xyz:/oauth2redirect?state=\(state)")
+        )
+        XCTAssertThrowsError(try GoogleOAuthHelper.extractAuthorizationCode(from: missingCodeCallback, expectedState: state)) { error in
+            XCTAssertEqual(error as? GoogleOAuthError, .missingAuthorizationCode)
+        }
+
+        // 5. FirebaseConfig Google Sign-In readiness + FirebaseSyncService saveConfig state
+        let emailOnlyConfig = FirebaseConfig(projectID: "buddy-proj", webAPIKey: "AIzaTestKey")
+        XCTAssertTrue(emailOnlyConfig.isConfigured)
+        XCTAssertFalse(emailOnlyConfig.isGoogleSignInConfigured)
+
+        let googleConfig = FirebaseConfig(
+            projectID: "buddy-proj",
+            webAPIKey: "AIzaTestKey",
+            googleIOSClientID: sampleClientID
+        )
+        XCTAssertTrue(googleConfig.isGoogleSignInConfigured)
+        XCTAssertEqual(googleConfig.googleIOSClientID, "1234567890-abc123xyz.apps.googleusercontent.com")
+
+        let suite = "buddy.tests.googleConfig.\(UUID().uuidString)"
+        let isolatedDefaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { isolatedDefaults.removePersistentDomain(forName: suite) }
+
+        let syncService = FirebaseSyncService(defaults: isolatedDefaults)
+        defer { syncService.saveConfig(projectID: "", webAPIKey: "", googleIOSClientID: "") }
+
+        syncService.saveConfig(
+            projectID: "buddy-proj",
+            webAPIKey: "AIzaTestKey",
+            googleIOSClientID: sampleClientID
+        )
+        XCTAssertTrue(syncService.isConfigured)
+        XCTAssertTrue(syncService.isGoogleSignInConfigured)
+        XCTAssertEqual(
+            isolatedDefaults.string(forKey: "buddy.firebase.googleIOSClientID"),
+            "1234567890-abc123xyz.apps.googleusercontent.com"
+        )
     }
 
     // MARK: - Fixture Helper

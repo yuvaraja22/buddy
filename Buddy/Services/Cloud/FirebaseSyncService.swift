@@ -6,14 +6,20 @@ import Observation
 public struct FirebaseConfig: Codable, Equatable, Sendable {
     public var projectID: String
     public var webAPIKey: String
+    public var googleIOSClientID: String
 
-    public init(projectID: String = "", webAPIKey: String = "") {
+    public init(projectID: String = "", webAPIKey: String = "", googleIOSClientID: String = "") {
         self.projectID = projectID.trimmingCharacters(in: .whitespacesAndNewlines)
         self.webAPIKey = webAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.googleIOSClientID = googleIOSClientID.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     public var isConfigured: Bool {
         !projectID.isEmpty && !webAPIKey.isEmpty
+    }
+
+    public var isGoogleSignInConfigured: Bool {
+        isConfigured && GoogleOAuthHelper.reversedClientID(from: googleIOSClientID) != nil
     }
 
     /// Reads optional build-time Firebase config injected via Info.plist (e.g. GitHub Actions secrets).
@@ -22,10 +28,17 @@ public struct FirebaseConfig: Codable, Equatable, Sendable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let apiKey = (bundle.object(forInfoDictionaryKey: "BUDDY_FIREBASE_API_KEY") as? String ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let googleClientID = (bundle.object(forInfoDictionaryKey: "BUDDY_FIREBASE_GOOGLE_IOS_CLIENT_ID") as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         // Ignore unexpanded Xcode build variable placeholders if present.
         let cleanProject = projectID.hasPrefix("$(") ? "" : projectID
         let cleanKey = apiKey.hasPrefix("$(") ? "" : apiKey
-        return FirebaseConfig(projectID: cleanProject, webAPIKey: cleanKey)
+        let cleanGoogleID = googleClientID.hasPrefix("$(") ? "" : googleClientID
+        return FirebaseConfig(
+            projectID: cleanProject,
+            webAPIKey: cleanKey,
+            googleIOSClientID: cleanGoogleID
+        )
     }
 }
 
@@ -147,7 +160,10 @@ public enum FirestoreDocumentCodec {
             return "Your Firebase Web API Key looks invalid. Check Project Settings in Firebase Console."
         }
         if code.contains("OPERATION_NOT_ALLOWED") {
-            return "Enable Email/Password sign-in under Firebase Console → Authentication → Sign-in method."
+            return "Enable Google or Email/Password sign-in under Firebase Console → Authentication → Sign-in method."
+        }
+        if code.contains("INVALID_IDP_RESPONSE") {
+            return "Google sign-in token was rejected by Firebase. Make sure Google Sign-In is enabled in Firebase Authentication and your iOS Client ID matches this project."
         }
         if code.contains("USER_DISABLED") {
             return "This Firebase user account has been disabled."
@@ -164,6 +180,7 @@ public enum FirestoreDocumentCodec {
 @MainActor
 public final class FirebaseSyncService {
     private static let configProjectKey = "buddy.firebase.projectID"
+    private static let configGoogleClientIDKey = "buddy.firebase.googleIOSClientID"
     private static let configAPIKeyAccount = "firebase_web_api_key"
     private static let authSessionAccount = "firebase_auth_session"
     private static let autoSyncDefaultsKey = "buddy.firebase.autoSyncEnabled"
@@ -174,7 +191,10 @@ public final class FirebaseSyncService {
     service cloud.firestore {
       match /databases/{database}/documents {
         match /users/{userId}/{document=**} {
-          allow read, write: if request.auth != nil && request.auth.uid == userId;
+          allow read, write: if request.auth != nil
+            && request.auth.uid == userId
+            && request.auth.token.email_verified == true
+            && exists(/databases/$(database)/documents/allowlist/$(request.auth.token.email));
         }
       }
     }
@@ -194,11 +214,13 @@ public final class FirebaseSyncService {
     }
 
     public var isConfigured: Bool { config.isConfigured }
+    public var isGoogleSignInConfigured: Bool { config.isGoogleSignInConfigured }
     public var isSignedIn: Bool { authSession != nil }
     public var userEmail: String? { authSession?.email }
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let session: URLSession
+    @ObservationIgnored private let googleWebAuthPresenter = GoogleWebAuthPresenter()
     @ObservationIgnored private var debounceTask: Task<Void, Never>?
     @ObservationIgnored private var isSyncInFlight: Bool = false
     @ObservationIgnored private var pendingResyncStore: WorkoutStore?
@@ -215,8 +237,16 @@ public final class FirebaseSyncService {
         let infoConfig = FirebaseConfig.fromInfoPlist()
         let savedProject = defaults.string(forKey: Self.configProjectKey) ?? ""
         let savedKey = KeychainHelper.loadString(account: Self.configAPIKeyAccount) ?? ""
+        let savedGoogleClientID = defaults.string(forKey: Self.configGoogleClientIDKey) ?? ""
         if !savedProject.isEmpty && !savedKey.isEmpty {
-            self.config = FirebaseConfig(projectID: savedProject, webAPIKey: savedKey)
+            let effectiveGoogleID = !savedGoogleClientID.isEmpty
+                ? savedGoogleClientID
+                : (savedProject == infoConfig.projectID ? infoConfig.googleIOSClientID : "")
+            self.config = FirebaseConfig(
+                projectID: savedProject,
+                webAPIKey: savedKey,
+                googleIOSClientID: effectiveGoogleID
+            )
         } else {
             self.config = infoConfig
         }
@@ -243,16 +273,26 @@ public final class FirebaseSyncService {
 
     // MARK: - Configuration
 
-    public func saveConfig(projectID: String, webAPIKey: String) {
-        let updated = FirebaseConfig(projectID: projectID, webAPIKey: webAPIKey)
+    public func saveConfig(projectID: String, webAPIKey: String, googleIOSClientID: String = "") {
+        let updated = FirebaseConfig(
+            projectID: projectID,
+            webAPIKey: webAPIKey,
+            googleIOSClientID: googleIOSClientID
+        )
         let projectChanged = (updated.projectID != config.projectID || updated.webAPIKey != config.webAPIKey)
         config = updated
 
         if updated.isConfigured {
             defaults.set(updated.projectID, forKey: Self.configProjectKey)
             KeychainHelper.saveString(updated.webAPIKey, account: Self.configAPIKeyAccount)
+            if !updated.googleIOSClientID.isEmpty {
+                defaults.set(updated.googleIOSClientID, forKey: Self.configGoogleClientIDKey)
+            } else {
+                defaults.removeObject(forKey: Self.configGoogleClientIDKey)
+            }
         } else {
             defaults.removeObject(forKey: Self.configProjectKey)
+            defaults.removeObject(forKey: Self.configGoogleClientIDKey)
             KeychainHelper.delete(account: Self.configAPIKeyAccount)
         }
 
@@ -264,6 +304,79 @@ public final class FirebaseSyncService {
     }
 
     // MARK: - Authentication
+
+    /// Signs in via Google OAuth 2.0 + PKCE (`ASWebAuthenticationSession`) and exchanges the
+    /// Google ID token for a Firebase Auth session using `accounts:signInWithIdp`.
+    public func signInWithGoogle(store: WorkoutStore) async {
+        guard config.isConfigured else {
+            authError = FirebaseSyncError.notConfigured.localizedDescription
+            return
+        }
+        guard let callbackScheme = GoogleOAuthHelper.reversedClientID(from: config.googleIOSClientID),
+              let redirectURI = GoogleOAuthHelper.redirectURI(for: config.googleIOSClientID) else {
+            authError = GoogleOAuthError.invalidClientID.localizedDescription
+            return
+        }
+
+        isAuthenticating = true
+        authError = nil
+        authInfoMessage = nil
+        defer { isAuthenticating = false }
+
+        do {
+            let pkce = GoogleOAuthHelper.generatePKCE()
+            let state = GoogleOAuthHelper.generateState()
+            guard let authURL = GoogleOAuthHelper.buildAuthorizationURL(
+                clientID: config.googleIOSClientID,
+                codeChallenge: pkce.challenge,
+                state: state
+            ) else {
+                throw GoogleOAuthError.invalidClientID
+            }
+
+            let callbackURL = try await googleWebAuthPresenter.authenticate(
+                url: authURL,
+                callbackURLScheme: callbackScheme
+            )
+            let authCode = try GoogleOAuthHelper.extractAuthorizationCode(
+                from: callbackURL,
+                expectedState: state
+            )
+
+            let googleIDToken = try await exchangeGoogleCodeForIDToken(
+                code: authCode,
+                codeVerifier: pkce.verifier,
+                clientID: config.googleIOSClientID,
+                redirectURI: redirectURI
+            )
+
+            let firebaseResult = try await signInWithFirebaseIdp(googleIDToken: googleIDToken)
+            let ttl = TimeInterval(Int(firebaseResult.expiresIn) ?? 3600)
+            let newSession = FirebaseAuthSession(
+                uid: firebaseResult.localId,
+                email: firebaseResult.email ?? "",
+                idToken: firebaseResult.idToken,
+                refreshToken: firebaseResult.refreshToken,
+                expiresAt: Date().addingTimeInterval(ttl)
+            )
+            persistAuthSession(newSession)
+
+            // Auto-fill Buddy profile display name from Google on first sign-in if empty.
+            if store.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               let googleName = firebaseResult.displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !googleName.isEmpty {
+                store.displayName = googleName
+            }
+
+            // Immediately merge & upload workouts upon Google sign-in.
+            _ = await syncNow(store: store)
+        } catch GoogleOAuthError.cancelled {
+            // User dismissed the Safari sign-in sheet cleanly — keep UI quiet.
+            authError = nil
+        } catch {
+            authError = error.localizedDescription
+        }
+    }
 
     public func signUp(email: String, password: String, store: WorkoutStore) async {
         await authenticate(endpoint: "accounts:signUp", email: email, password: password, store: store)
@@ -436,11 +549,98 @@ public final class FirebaseSyncService {
         let localId: String
     }
 
+    private struct GoogleTokenResponse: Decodable {
+        let id_token: String?
+        let error: String?
+        let error_description: String?
+    }
+
+    private struct IdpAuthResponsePayload: Decodable {
+        let idToken: String
+        let email: String?
+        let refreshToken: String
+        let expiresIn: String
+        let localId: String
+        let displayName: String?
+    }
+
     private struct RefreshResponsePayload: Decodable {
         let id_token: String
         let refresh_token: String
         let expires_in: String
         let user_id: String
+    }
+
+    private func exchangeGoogleCodeForIDToken(
+        code: String,
+        codeVerifier: String,
+        clientID: String,
+        redirectURI: String
+    ) async throws -> String {
+        guard let url = URL(string: GoogleOAuthHelper.tokenEndpoint) else {
+            throw GoogleOAuthError.invalidClientID
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+
+        let formParams: [(String, String)] = [
+            ("client_id", clientID.trimmingCharacters(in: .whitespacesAndNewlines)),
+            ("code", code),
+            ("code_verifier", codeVerifier),
+            ("grant_type", "authorization_code"),
+            ("redirect_uri", redirectURI)
+        ]
+        let bodyString = formParams
+            .map { "\($0.0)=\(percentEncodeFormValue($0.1))" }
+            .joined(separator: "&")
+        request.httpBody = Data(bodyString.utf8)
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw FirebaseSyncError.networkError("Invalid response from Google OAuth.")
+        }
+
+        let decoded = try? JSONDecoder().decode(GoogleTokenResponse.self, from: data)
+        guard (200...299).contains(http.statusCode) else {
+            let detail = decoded?.error_description ?? decoded?.error ?? "HTTP \(http.statusCode)"
+            throw GoogleOAuthError.providerError(detail)
+        }
+
+        guard let idToken = decoded?.id_token, !idToken.isEmpty else {
+            throw GoogleOAuthError.providerError("Google did not return an ID token.")
+        }
+        return idToken
+    }
+
+    private func signInWithFirebaseIdp(googleIDToken: String) async throws -> IdpAuthResponsePayload {
+        let encodedKey = percentEncodeQuery(config.webAPIKey)
+        guard let url = URL(string: "https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key=\(encodedKey)") else {
+            throw FirebaseSyncError.notConfigured
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let postBody = "id_token=\(percentEncodeFormValue(googleIDToken))&providerId=google.com"
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "postBody": postBody,
+            "requestUri": "http://localhost",
+            "returnIdpCredential": true,
+            "returnSecureToken": true
+        ])
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw FirebaseSyncError.networkError("Invalid response from Firebase Auth.")
+        }
+        guard (200...299).contains(http.statusCode) else {
+            let rawMessage = parseFirebaseErrorMessage(from: data) ?? "HTTP \(http.statusCode)"
+            throw FirebaseSyncError.invalidCredentials(FirestoreDocumentCodec.friendlyAuthError(from: rawMessage))
+        }
+
+        return try JSONDecoder().decode(IdpAuthResponsePayload.self, from: data)
     }
 
     private func authenticate(
@@ -521,7 +721,7 @@ public final class FirebaseSyncService {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        let encodedRefresh = percentEncodeQuery(current.refreshToken)
+        let encodedRefresh = percentEncodeFormValue(current.refreshToken)
         request.httpBody = Data("grant_type=refresh_token&refresh_token=\(encodedRefresh)".utf8)
 
         let (data, response) = try await session.data(for: request)
@@ -579,7 +779,8 @@ public final class FirebaseSyncService {
         guard (200...299).contains(http.statusCode) else {
             let detail = parseFirebaseErrorMessage(from: data) ?? "HTTP \(http.statusCode)"
             if http.statusCode == 403 {
-                throw FirebaseSyncError.firestoreError("Permission denied. Make sure Cloud Firestore is enabled and the user-scoped Security Rules are published.")
+                let accountLabel = auth.email.isEmpty ? "this account" : auth.email
+                throw FirebaseSyncError.firestoreError("Access denied for \(accountLabel). Make sure your Gmail is added to Firestore → allowlist and Security Rules are published.")
             }
             throw FirebaseSyncError.firestoreError(detail)
         }
@@ -613,7 +814,8 @@ public final class FirebaseSyncService {
         guard (200...299).contains(http.statusCode) else {
             let detail = parseFirebaseErrorMessage(from: data) ?? "HTTP \(http.statusCode)"
             if http.statusCode == 403 {
-                throw FirebaseSyncError.firestoreError("Permission denied. Check your Firestore Security Rules in Firebase Console.")
+                let accountLabel = auth.email.isEmpty ? "this account" : auth.email
+                throw FirebaseSyncError.firestoreError("Access denied for \(accountLabel). Make sure your Gmail is added to Firestore → allowlist and Security Rules are published.")
             }
             throw FirebaseSyncError.firestoreError(detail)
         }
@@ -639,6 +841,11 @@ public final class FirebaseSyncService {
         var allowed = CharacterSet.urlQueryAllowed
         allowed.remove(charactersIn: "&+=?")
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
+    private func percentEncodeFormValue(_ value: String) -> String {
+        let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        return value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? value
     }
 
     private func percentEncodePath(_ value: String) -> String {
