@@ -101,6 +101,32 @@ private final class AudioNotificationObserverToken: @unchecked Sendable {
     }
 }
 
+/// Controls hardware noise suppression and microphone routing for loud gym environments.
+public struct AudioCaptureOptions: Equatable, Sendable {
+    /// Activates Apple's hardware Voice Processing I/O (`setVoiceProcessingEnabled(true)` + AGC)
+    /// to suppress loud gym music, bass, and clanking plates while keeping other audio ducking minimal.
+    public var enableVoiceIsolation: Bool
+    /// Routes recording to the iPhone's close-talk beamforming microphone while keeping
+    /// `.allowBluetoothA2DP` enabled so AirPods continue playing stereo music without HFP downgrade.
+    public var preferBuiltInMic: Bool
+
+    public init(enableVoiceIsolation: Bool = true, preferBuiltInMic: Bool = true) {
+        self.enableVoiceIsolation = enableVoiceIsolation
+        self.preferBuiltInMic = preferBuiltInMic
+    }
+}
+
+/// Pure representation of the `AVAudioSession` mode & category options selected for a capture profile.
+public struct AudioSessionConfiguration: Equatable, @unchecked Sendable {
+    public let mode: AVAudioSession.Mode
+    public let options: AVAudioSession.CategoryOptions
+
+    public init(mode: AVAudioSession.Mode, options: AVAudioSession.CategoryOptions) {
+        self.mode = mode
+        self.options = options
+    }
+}
+
 @Observable
 @MainActor
 public final class AudioRecorderService {
@@ -120,6 +146,7 @@ public final class AudioRecorderService {
     @ObservationIgnored public var onEngineRestarted: (@MainActor () throws -> Void)?
 
     @ObservationIgnored private var audioEngine: AVAudioEngine?
+    @ObservationIgnored private var currentCaptureOptions: AudioCaptureOptions = AudioCaptureOptions()
     private let durationTracker = LockedDurationTracker(maxDurationSeconds: maxRecordingSeconds)
     private let audioBufferHandler = LockedAudioBufferHandler()
     @ObservationIgnored private var recordingStartDate: Date?
@@ -133,7 +160,28 @@ public final class AudioRecorderService {
         installInterruptionObserver()
     }
 
-    /// Sets or clears the realtime PCM buffer callback forwarded to Apple On-Device Speech.
+    /// Computes the optimal `AVAudioSession` mode and category options for the requested capture profile.
+    ///
+    /// When `preferBuiltInMic` is enabled, uses `.default` mode + `.allowBluetoothA2DP` (omitting
+    /// `.allowBluetooth` HFP) because `.voiceChat` implicitly re-enables Bluetooth HFP call mode.
+    /// Noise suppression is still applied at the hardware DSP level via `setVoiceProcessingEnabled(true)`.
+    public nonisolated static func sessionConfiguration(
+        for options: AudioCaptureOptions
+    ) -> AudioSessionConfiguration {
+        if options.preferBuiltInMic {
+            return AudioSessionConfiguration(
+                mode: .default,
+                options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothA2DP]
+            )
+        }
+
+        return AudioSessionConfiguration(
+            mode: options.enableVoiceIsolation ? .voiceChat : .default,
+            options: [.mixWithOthers, .defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
+        )
+    }
+
+    /// Sets or clears the realtime PCM buffer callback forwarded to Apple Speech.
     public func setAudioBufferHandler(_ handler: (@Sendable (AVAudioPCMBuffer) -> Void)?) {
         audioBufferHandler.set(handler)
     }
@@ -157,10 +205,11 @@ public final class AudioRecorderService {
         }
     }
 
-    /// Activates `AVAudioSession`, invokes `onSessionActivated` (so Apple On-Device Speech starts
-    /// *after* the audio session is active and *before* buffers flow), and starts `AVAudioEngine`
-    /// with a zero-allocation realtime tap.
+    /// Activates `AVAudioSession`, configures gym mic routing & hardware noise isolation,
+    /// invokes `onSessionActivated` (so Apple Speech starts *after* the audio session is active
+    /// and *before* buffers flow), and starts `AVAudioEngine` with a zero-allocation realtime tap.
     public func startRecording(
+        options: AudioCaptureOptions = AudioCaptureOptions(),
         onSessionActivated: (@MainActor () throws -> Void)? = nil
     ) async throws {
         let granted = await requestPermission()
@@ -171,17 +220,27 @@ public final class AudioRecorderService {
         teardownEngine(deactivateSession: false)
         durationTracker.reset()
         configRecoveryAttempts = 0
+        currentCaptureOptions = options
 
         let session = AVAudioSession.sharedInstance()
+        let config = Self.sessionConfiguration(for: options)
         do {
-            // `.default` mode enables iOS hardware mic AGC, directional beamforming, and voice
-            // front-end conditioning for clean recognition even in a gym.
-            try session.setCategory(
-                .playAndRecord,
-                mode: .default,
-                options: [.mixWithOthers, .defaultToSpeaker, .allowBluetooth]
-            )
+            do {
+                try session.setCategory(
+                    .playAndRecord,
+                    mode: config.mode,
+                    options: config.options
+                )
+            } catch {
+                // Fallback to `.default` mode if a specific audio route rejects `.voiceChat`.
+                try session.setCategory(
+                    .playAndRecord,
+                    mode: .default,
+                    options: config.options
+                )
+            }
             try session.setActive(true, options: [])
+            configurePreferredMicrophoneInput(session: session, preferBuiltInMic: options.preferBuiltInMic)
         } catch {
             throw AudioRecorderError.engineStartFailed(error.localizedDescription)
         }
@@ -223,9 +282,44 @@ public final class AudioRecorderService {
 
     // MARK: - Private Helpers
 
+    private func configurePreferredMicrophoneInput(session: AVAudioSession, preferBuiltInMic: Bool) {
+        if preferBuiltInMic {
+            if let builtInMic = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
+                try? session.setPreferredInput(builtInMic)
+            }
+        } else {
+            try? session.setPreferredInput(nil)
+        }
+    }
+
     private func configureAndStartEngine(_ engine: AVAudioEngine) throws {
         let inputNode = engine.inputNode
         inputNode.removeTap(onBus: 0)
+
+        if currentCaptureOptions.enableVoiceIsolation {
+            // Must be enabled BEFORE querying outputFormat(forBus: 0) or installing the tap,
+            // because Voice Processing I/O reconfigures the hardware input format (typically mono float32).
+            do {
+                if !inputNode.isVoiceProcessingEnabled {
+                    try inputNode.setVoiceProcessingEnabled(true)
+                }
+                inputNode.isVoiceProcessingAGCEnabled = true
+                // Keep gym music playing on AirPods undisturbed while still suppressing mic noise.
+                inputNode.voiceProcessingOtherAudioDuckingConfiguration =
+                    AVAudioVoiceProcessingOtherAudioDuckingConfiguration(
+                        enableAdvancedDucking: false,
+                        duckingLevel: .min
+                    )
+            } catch {
+                // Gracefully fall back to unprocessed capture on Simulator or unsupported routes.
+                if inputNode.isVoiceProcessingEnabled {
+                    try? inputNode.setVoiceProcessingEnabled(false)
+                }
+            }
+        } else if inputNode.isVoiceProcessingEnabled {
+            try? inputNode.setVoiceProcessingEnabled(false)
+        }
+
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
@@ -363,6 +457,9 @@ public final class AudioRecorderService {
         if let engine = audioEngine {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
+            if engine.inputNode.isVoiceProcessingEnabled {
+                try? engine.inputNode.setVoiceProcessingEnabled(false)
+            }
             audioEngine = nil
         }
 
@@ -377,7 +474,9 @@ public final class AudioRecorderService {
     }
 
     private func deactivateAudioSession() {
-        try? AVAudioSession.sharedInstance().setActive(
+        let session = AVAudioSession.sharedInstance()
+        try? session.setPreferredInput(nil)
+        try? session.setActive(
             false,
             options: .notifyOthersOnDeactivation
         )

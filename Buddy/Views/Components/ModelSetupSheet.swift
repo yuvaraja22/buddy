@@ -22,7 +22,10 @@ struct ModelSetupSheet: View {
     var body: some View {
         let _ = sceneRefreshTick
         let preset = activeLLMPreset
-        let isVoiceReady = appleSpeechService.isReadyForOfflineVoice(for: modelManager.selectedAppleSpeechLocale)
+        let isVoiceReady = appleSpeechService.isReadyForVoice(
+            for: modelManager.selectedAppleSpeechLocale,
+            mode: modelManager.selectedAppleSpeechMode
+        )
         let isLLMReady = modelManager.isDownloaded(preset)
         let isAllReady = isVoiceReady && isLLMReady
 
@@ -110,7 +113,10 @@ struct ModelSetupSheet: View {
 
     private var speechCard: some View {
         let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
-        let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
+        let availability = appleSpeechService.checkAvailability(
+            for: modelManager.selectedAppleSpeechLocale,
+            mode: modelManager.selectedAppleSpeechMode
+        )
         let ready = !isDenied && availability.isReady
         let statusText = isDenied
             ? "Speech Recognition permission is turned off. Enable it in iOS Settings → Buddy."
@@ -131,7 +137,7 @@ struct ModelSetupSheet: View {
 
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 6) {
-                            Text("Apple On-Device Speech")
+                            Text("Apple Speech (Gym Tuned)")
                                 .font(.system(size: 15.5, weight: .bold))
                                 .foregroundStyle(.primary)
 
@@ -143,7 +149,7 @@ struct ModelSetupSheet: View {
                                 .foregroundStyle(ready ? BuddyTheme.emeraldLive : BuddyTheme.amberStreak)
                         }
 
-                        Text("Instant offline speech-to-text with live captions tuned for 105 gym exercises and your accent.")
+                        Text("Hardware noise isolation, close-talk iPhone mic routing, and cloud-enhanced Apple Speech with automatic offline fallback.")
                             .font(.caption)
                             .foregroundStyle(BuddyTheme.mutedText)
                             .fixedSize(horizontal: false, vertical: true)

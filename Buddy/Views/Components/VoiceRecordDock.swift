@@ -254,7 +254,7 @@ struct VoiceRecordDock: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
             } else {
-                Text("Processing 100% offline")
+                Text(pipeline.processingModeCaption)
                     .font(.caption2)
                     .foregroundStyle(BuddyTheme.mutedText)
                     .lineLimit(1)

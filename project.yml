@@ -55,8 +55,8 @@ targets:
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         NSSupportsLiveActivities: true
-        NSMicrophoneUsageDescription: "Buddy uses your microphone offline in the gym to transcribe and log your workout sets locally. Audio never leaves your iPhone."
-        NSSpeechRecognitionUsageDescription: "Buddy uses Apple on-device speech recognition offline in the gym to transcribe your spoken workout sets locally. Audio never leaves your iPhone."
+        NSMicrophoneUsageDescription: "Buddy uses your microphone with hardware noise isolation in the gym to transcribe and log your workout sets."
+        NSSpeechRecognitionUsageDescription: "Buddy uses Apple Speech Recognition (with optional offline-only mode in Settings) to transcribe your spoken workout sets in the gym."
         ITSAppUsesNonExemptEncryption: false
         BUDDY_FIREBASE_PROJECT_ID: $(BUDDY_FIREBASE_PROJECT_ID)
         BUDDY_FIREBASE_API_KEY: $(BUDDY_FIREBASE_API_KEY)

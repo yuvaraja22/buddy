@@ -183,7 +183,52 @@ public enum RuleBasedWorkoutParser {
             with: "$1.5 $2"
         )
 
+        text = normalizeNoisyGymMishearings(in: text)
+
         return collapseWhitespace(text)
+    }
+
+    /// Repairs high-frequency Apple Speech phonetic mishearings that occur over loud gym music
+    /// and clanking plates (strictly context-gated so normal exercise words are never corrupted).
+    private static func normalizeNoisyGymMishearings(in raw: String) -> String {
+        var text = raw
+
+        // 1. Numeric-context workout unit & counter homophones
+        let numericReplacements: [(pattern: String, template: String)] = [
+            (#"\b(\d+)\s+(?:sex|sits|cents)\b"#, "$1 sets"),
+            (#"\b(\d+)\s+(?:wraps|raps|rips|rebs|refs)\b"#, "$1 reps"),
+            (#"\b(\d+)\s+(?:wrap|rap|rip|reb|ref)\b"#, "$1 rep"),
+            (#"\b(\d+(?:\.\d+)?)\s+(?:key\s+g|k\s*j|k\s*d)\b"#, "$1 kg"),
+            (#"\b(\d+(?:\.\d+)?)\s+(?:elbs|elves|el\s*bees?)\b"#, "$1 lbs")
+        ]
+        for rule in numericReplacements {
+            text = replaceMatches(pattern: rule.pattern, in: text, with: rule.template)
+        }
+
+        // 2. Unambiguous multi-word gym exercise mishearings
+        let phraseReplacements: [(pattern: String, template: String)] = [
+            (#"\b(?:bench\s+price|branch\s+press)\b"#, "bench press"),
+            (#"\bromanian\s+dead\s+(?:leaf|leaves|lips)\b"#, "romanian deadlift"),
+            (#"\bdead\s+(?:leaf|leaves|lips)\b"#, "deadlift"),
+            (#"\b(?:latin|let|lap|lad)\s+pull\s*downs?\b"#, "lat pulldown"),
+            (#"\bin\s+client\s+(press|bench|dumbbell|dumbbells|db|barbell|fly|flies|curl|curls|walk|row)\b"#, "incline $1"),
+            (#"\bdumb\s+bells\b"#, "dumbbells"),
+            (#"\bdumb\s+bell\b"#, "dumbbell"),
+            (#"\bbar\s+bell\b"#, "barbell"),
+            (#"\b(bicep|biceps|hammer|preacher|leg|hamstring|ez\s+bar|barbell|dumbbell|cable)\s+girls?\b"#, "$1 curl"),
+            (#"\b(lateral|side|front|calf|calves|leg|hanging\s+leg)\s+(?:rays|race)\b"#, "$1 raise"),
+            (#"\bcough\s+raises?\b"#, "calf raise"),
+            (#"\bcable\s+flights?\b"#, "cable fly"),
+            (#"\bface\s+(?:poles?|pool)\b"#, "face pull"),
+            (#"\bhip\s+trusts?\b"#, "hip thrust"),
+            (#"\bbull\s+garian\b"#, "bulgarian"),
+            (#"\btriceps?\s+push\s+downs?\b"#, "tricep pushdown")
+        ]
+        for rule in phraseReplacements {
+            text = replaceMatches(pattern: rule.pattern, in: text, with: rule.template)
+        }
+
+        return text
     }
 
     private static func normalizeNumberWords(in text: String) -> String {

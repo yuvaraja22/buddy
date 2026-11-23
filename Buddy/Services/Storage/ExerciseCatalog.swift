@@ -757,6 +757,47 @@ public enum ExerciseCatalog {
         return (formatted, formatted, inferred)
     }
 
+    /// Returns `true` when `rawName` matches a known canonical exercise or alias in Buddy's catalog
+    /// (rather than falling back to an unknown title-cased phrase). Used by speech hypothesis reranking.
+    public static func isKnownExercise(_ rawName: String) -> Bool {
+        let cleaned = cleanRawName(rawName)
+        guard !cleaned.isEmpty else { return false }
+
+        let normQuery = normalize(cleaned)
+        let singQuery = singularizePhrase(normQuery)
+        let queryTokens = Set(singQuery.split(separator: " ").map(String.init))
+
+        if indexedVariants.contains(where: { $0.normalized == normQuery || $0.singularized == singQuery }) {
+            return true
+        }
+
+        guard !queryTokens.isEmpty else { return false }
+        var bestScore: Double = 0
+
+        for variant in indexedVariants where !variant.tokens.isEmpty {
+            let intersection = queryTokens.intersection(variant.tokens)
+            guard !intersection.isEmpty else { continue }
+
+            let unionCount = queryTokens.union(variant.tokens).count
+            var score = Double(intersection.count) / Double(unionCount)
+
+            let minTokens = min(queryTokens.count, variant.tokens.count)
+            if minTokens >= 2 && (singQuery.contains(variant.singularized) || variant.singularized.contains(singQuery)) {
+                score += 0.12
+            } else if minTokens == 1 && queryTokens.count == 1 && variant.tokens.count == 2 {
+                if variant.singularized.hasPrefix(singQuery) && singQuery.count >= 5 {
+                    score += 0.15
+                }
+            }
+
+            if score > bestScore {
+                bestScore = score
+            }
+        }
+
+        return bestScore >= 0.65
+    }
+
     /// Comma-separated list of top canonical exercise names for local LLM prompt grounding.
     public static func promptHint(limit: Int = 30) -> String {
         let count = max(0, min(limit, all.count))

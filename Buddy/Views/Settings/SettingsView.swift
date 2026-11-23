@@ -402,12 +402,15 @@ struct SettingsView: View {
         let aiLabel = modelManager.isLLMDownloaded
             ? modelManager.selectedLLMPreset.displayName
             : "Instant Parser"
-        return "Apple Speech · \(aiLabel)"
+        return "Apple Speech (\(modelManager.selectedAppleSpeechMode.shortLabel)) · \(aiLabel)"
     }
 
     private var voiceAndAIRowDotColor: Color {
         let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
-        let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
+        let availability = appleSpeechService.checkAvailability(
+            for: modelManager.selectedAppleSpeechLocale,
+            mode: modelManager.selectedAppleSpeechMode
+        )
         return (isDenied || !availability.isReady) ? BuddyTheme.amberStreak : BuddyTheme.emeraldLive
     }
 
@@ -472,19 +475,63 @@ private struct VoiceAndAISettingsView: View {
     }
 
     private var speechCard: some View {
-        let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
+        let mode = modelManager.selectedAppleSpeechMode
+        let availability = appleSpeechService.checkAvailability(
+            for: modelManager.selectedAppleSpeechLocale,
+            mode: mode
+        )
         let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
+        let readyPillText: String = {
+            if isDenied { return "Permission Off" }
+            if !availability.isReady { return "Setup Needed" }
+            return mode == .offlineOnly ? "Offline Ready" : "Ready"
+        }()
 
         return NativeCard(padding: 15, cornerRadius: 14) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    sectionEyebrow("APPLE ON-DEVICE SPEECH")
+                    sectionEyebrow("APPLE SPEECH & GYM AUDIO")
                     Spacer()
                     statusDotPill(
-                        text: isDenied ? "Permission Off" : (availability.isReady ? "Offline Ready" : "Setup Needed"),
+                        text: readyPillText,
                         color: (isDenied || !availability.isReady) ? BuddyTheme.amberStreak : BuddyTheme.emeraldLive
                     )
                 }
+
+                // Recognition Mode selector (Enhanced Auto vs Offline Only)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Recognition Mode")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color.primary)
+
+                    HStack(spacing: 6) {
+                        ForEach(AppleSpeechRecognitionMode.allCases) { option in
+                            let selected = (mode == option)
+                            Button {
+                                BuddyHaptics.selection()
+                                modelManager.selectedAppleSpeechMode = option
+                            } label: {
+                                Text(option.displayName)
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .foregroundStyle(selected ? BuddyTheme.inkInverse : Color.primary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 9)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                            .fill(selected ? BuddyTheme.inkPrimary : BuddyTheme.chipSurface)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
+                    Text(mode.subtitle)
+                        .font(.caption)
+                        .foregroundStyle(BuddyTheme.mutedText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Divider().overlay(BuddyTheme.hairlineBorder)
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Voice Accent / Locale")
@@ -513,6 +560,55 @@ private struct VoiceAndAISettingsView: View {
                             }
                         }
                     }
+                }
+
+                Divider().overlay(BuddyTheme.hairlineBorder)
+
+                // Loud Gym Audio Capture Toggles
+                VStack(alignment: .leading, spacing: 11) {
+                    Toggle(
+                        isOn: Binding(
+                            get: { modelManager.enableGymNoiseIsolation },
+                            set: { newValue in
+                                BuddyHaptics.selection()
+                                modelManager.enableGymNoiseIsolation = newValue
+                            }
+                        )
+                    ) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Gym Noise Isolation")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(Color.primary)
+                            Text("Apple hardware voice processing suppresses loud gym music and clanks.")
+                                .font(.caption)
+                                .foregroundStyle(BuddyTheme.mutedText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .tint(BuddyTheme.emeraldLive)
+
+                    Divider().overlay(BuddyTheme.hairlineBorder)
+
+                    Toggle(
+                        isOn: Binding(
+                            get: { modelManager.preferBuiltInMic },
+                            set: { newValue in
+                                BuddyHaptics.selection()
+                                modelManager.preferBuiltInMic = newValue
+                            }
+                        )
+                    ) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Prefer iPhone Mic")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(Color.primary)
+                            Text("Keeps AirPods in stereo music mode and records from iPhone's close-talk mic instead of low-bitrate Bluetooth call audio.")
+                                .font(.caption)
+                                .foregroundStyle(BuddyTheme.mutedText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .tint(BuddyTheme.emeraldLive)
                 }
 
                 HStack(alignment: .top, spacing: 8) {
@@ -739,10 +835,16 @@ private struct VoiceAndAISettingsView: View {
     }
 
     private var runtimeCard: some View {
+        let mode = modelManager.selectedAppleSpeechMode
         let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
-        let availability = appleSpeechService.checkAvailability(for: modelManager.selectedAppleSpeechLocale)
+        let availability = appleSpeechService.checkAvailability(
+            for: modelManager.selectedAppleSpeechLocale,
+            mode: mode
+        )
         let speechColor: Color = (isDenied || !availability.isReady) ? BuddyTheme.amberStreak : BuddyTheme.emeraldLive
-        let speechLabel: String = isDenied ? "Permission Needed" : (!availability.isReady ? "Offline Pack Needed" : "Apple On-Device")
+        let speechLabel: String = isDenied
+            ? "Permission Needed"
+            : (!availability.isReady ? "Setup Needed" : "Apple \(mode.shortLabel)")
 
         return NativeCard(padding: 15, cornerRadius: 14) {
             VStack(alignment: .leading, spacing: 12) {
