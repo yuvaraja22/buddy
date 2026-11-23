@@ -43,6 +43,7 @@ targets:
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
         BUDDY_FIREBASE_PROJECT_ID: ""
         BUDDY_FIREBASE_API_KEY: ""
+        BUDDY_FIREBASE_GOOGLE_IOS_CLIENT_ID: ""
     info:
       path: Buddy/Resources/Info.plist
       properties:
@@ -60,6 +61,7 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         BUDDY_FIREBASE_PROJECT_ID: $(BUDDY_FIREBASE_PROJECT_ID)
         BUDDY_FIREBASE_API_KEY: $(BUDDY_FIREBASE_API_KEY)
+        BUDDY_FIREBASE_GOOGLE_IOS_CLIENT_ID: $(BUDDY_FIREBASE_GOOGLE_IOS_CLIENT_ID)
         ALTAppGroups:
           - group.com.yuvaraja.buddy
         CFBundleURLTypes:

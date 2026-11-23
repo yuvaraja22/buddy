@@ -117,6 +117,7 @@ jobs:
         env:
           FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
           FIREBASE_WEB_API_KEY: ${{ secrets.FIREBASE_WEB_API_KEY }}
+          FIREBASE_GOOGLE_IOS_CLIENT_ID: ${{ secrets.FIREBASE_GOOGLE_IOS_CLIENT_ID }}
         run: |
           set -o pipefail
           VERSION_FLAGS=()
@@ -128,6 +129,10 @@ jobs:
           if [[ -n "${FIREBASE_PROJECT_ID:-}" && -n "${FIREBASE_WEB_API_KEY:-}" ]]; then
             VERSION_FLAGS+=(BUDDY_FIREBASE_PROJECT_ID="$FIREBASE_PROJECT_ID" BUDDY_FIREBASE_API_KEY="$FIREBASE_WEB_API_KEY")
             echo "Pre-configuring Firebase project from GitHub Actions secrets"
+          fi
+          if [[ -n "${FIREBASE_GOOGLE_IOS_CLIENT_ID:-}" ]]; then
+            VERSION_FLAGS+=(BUDDY_FIREBASE_GOOGLE_IOS_CLIENT_ID="$FIREBASE_GOOGLE_IOS_CLIENT_ID")
+            echo "Pre-configuring Google Sign-In iOS Client ID from GitHub Actions secret"
           fi
           xcodebuild archive \
             -project Buddy.xcodeproj \

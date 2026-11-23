@@ -11,9 +11,11 @@ struct CloudSyncSettingsView: View {
     @State private var authMode: AuthMode = .signIn
     @State private var emailText: String = ""
     @State private var passwordText: String = ""
+    @State private var showEmailPasswordAuth: Bool = false
 
     @State private var projectIDDraft: String = ""
     @State private var webAPIKeyDraft: String = ""
+    @State private var googleClientIDDraft: String = ""
     @State private var isEditingProjectConfig: Bool = false
     @State private var showSetupGuide: Bool = false
     @State private var didCopyRules: Bool = false
@@ -35,7 +37,7 @@ struct CloudSyncSettingsView: View {
                 if cloudSync.isSignedIn {
                     signedInSyncCard
                 } else if cloudSync.isConfigured {
-                    emailAuthCard
+                    signInCard
                 }
 
                 firebaseConfigCard
@@ -54,6 +56,7 @@ struct CloudSyncSettingsView: View {
         .onAppear {
             projectIDDraft = cloudSync.config.projectID
             webAPIKeyDraft = cloudSync.config.webAPIKey
+            googleClientIDDraft = cloudSync.config.googleIOSClientID
             isEditingProjectConfig = !cloudSync.isConfigured
         }
         .fileExporter(
@@ -193,126 +196,202 @@ struct CloudSyncSettingsView: View {
         }
     }
 
-    // MARK: - Email / Password Sign-In Card
+    // MARK: - Google & Email/Password Sign-In Card
 
-    private var emailAuthCard: some View {
-        let canSubmit = !emailText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && passwordText.count >= 6
-            && !cloudSync.isAuthenticating
-
-        return NativeCard(padding: 15, cornerRadius: 14) {
+    private var signInCard: some View {
+        NativeCard(padding: 15, cornerRadius: 14) {
             VStack(alignment: .leading, spacing: 12) {
                 sectionEyebrow("FIREBASE ACCOUNT")
 
-                HStack(spacing: 6) {
-                    ForEach(AuthMode.allCases, id: \.self) { mode in
-                        let selected = (authMode == mode)
-                        Button {
-                            BuddyHaptics.selection()
-                            authMode = mode
-                            cloudSync.authError = nil
-                            cloudSync.authInfoMessage = nil
-                        } label: {
-                            Text(mode.rawValue)
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(selected ? BuddyTheme.inkInverse : Color.primary)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 9)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                        .fill(selected ? BuddyTheme.inkPrimary : BuddyTheme.chipSurface)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-
-                VStack(spacing: 10) {
-                    TextField("Email address", text: $emailText)
-                        .keyboardType(.emailAddress)
-                        .textContentType(.emailAddress)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled(true)
-                        .font(.system(size: 14.5, weight: .medium))
-                        .foregroundStyle(Color.primary)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 11)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(BuddyTheme.elevatedSurface)
-                        )
-
-                    SecureField("Password (6+ characters)", text: $passwordText)
-                        .textContentType(authMode == .signUp ? .newPassword : .password)
-                        .font(.system(size: 14.5, weight: .medium))
-                        .foregroundStyle(Color.primary)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 11)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(BuddyTheme.elevatedSurface)
-                        )
-                }
-
-                if let error = cloudSync.authError {
-                    Text(error)
+                if cloudSync.isGoogleSignInConfigured {
+                    Text("Sign in with an allowlisted Google account to automatically back up and restore your workouts.")
                         .font(.caption)
-                        .foregroundStyle(BuddyTheme.destructive)
+                        .foregroundStyle(BuddyTheme.mutedText)
                         .fixedSize(horizontal: false, vertical: true)
-                }
 
-                if let info = cloudSync.authInfoMessage {
-                    Text(info)
-                        .font(.caption)
-                        .foregroundStyle(BuddyTheme.emeraldLive)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                Button {
-                    BuddyHaptics.mediumImpact()
-                    Task {
-                        if authMode == .signIn {
-                            await cloudSync.signIn(email: emailText, password: passwordText, store: store)
-                        } else {
-                            await cloudSync.signUp(email: emailText, password: passwordText, store: store)
-                        }
-                        if cloudSync.isSignedIn {
-                            passwordText = ""
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 7) {
-                        if cloudSync.isAuthenticating {
-                            ProgressView()
-                                .controlSize(.small)
-                                .tint(BuddyTheme.inkInverse)
-                        }
-                        Text(authMode == .signIn ? "Sign In & Sync" : "Create Account & Sync")
-                            .font(.system(size: 14.5, weight: .bold))
-                    }
-                    .foregroundStyle(canSubmit ? BuddyTheme.inkInverse : BuddyTheme.mutedText)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 13)
-                    .background(Capsule().fill(canSubmit ? BuddyTheme.inkPrimary : BuddyTheme.elevatedSurface))
-                }
-                .buttonStyle(.plain)
-                .disabled(!canSubmit)
-
-                if authMode == .signIn {
                     Button {
-                        BuddyHaptics.lightImpact()
+                        BuddyHaptics.mediumImpact()
                         Task {
-                            await cloudSync.sendPasswordReset(email: emailText)
+                            await cloudSync.signInWithGoogle(store: store)
                         }
                     } label: {
-                        Text("Forgot password?")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(BuddyTheme.mutedText)
+                        HStack(spacing: 9) {
+                            if cloudSync.isAuthenticating {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .tint(BuddyTheme.inkInverse)
+                            } else {
+                                Text("G")
+                                    .font(.system(size: 14, weight: .black, design: .rounded))
+                                    .foregroundStyle(BuddyTheme.inkPrimary)
+                                    .frame(width: 22, height: 22)
+                                    .background(Circle().fill(BuddyTheme.inkInverse))
+                            }
+                            Text(cloudSync.isAuthenticating ? "Signing In…" : "Continue with Google")
+                                .font(.system(size: 14.5, weight: .bold))
+                        }
+                        .foregroundStyle(BuddyTheme.inkInverse)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 13)
+                        .background(Capsule().fill(BuddyTheme.inkPrimary))
                     }
                     .buttonStyle(.plain)
                     .disabled(cloudSync.isAuthenticating)
+
+                    authFeedbackMessages
+
+                    Divider().overlay(BuddyTheme.hairlineBorder)
+
+                    Button {
+                        BuddyHaptics.lightImpact()
+                        withAnimation(.snappy(duration: 0.2)) {
+                            showEmailPasswordAuth.toggle()
+                        }
+                    } label: {
+                        HStack {
+                            Text(showEmailPasswordAuth ? "Hide Email & Password" : "Use Email & Password instead")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(BuddyTheme.mutedText)
+                            Spacer()
+                            Image(systemName: showEmailPasswordAuth ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 10.5, weight: .bold))
+                                .foregroundStyle(BuddyTheme.mutedText)
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    if showEmailPasswordAuth {
+                        emailPasswordForm(showFeedback: false)
+                    }
+                } else {
+                    emailPasswordForm(showFeedback: true)
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var authFeedbackMessages: some View {
+        if let error = cloudSync.authError {
+            Text(error)
+                .font(.caption)
+                .foregroundStyle(BuddyTheme.destructive)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        if let info = cloudSync.authInfoMessage {
+            Text(info)
+                .font(.caption)
+                .foregroundStyle(BuddyTheme.emeraldLive)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var canSubmitEmailAuth: Bool {
+        !emailText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && passwordText.count >= 6
+            && !cloudSync.isAuthenticating
+    }
+
+    @ViewBuilder
+    private func emailPasswordForm(showFeedback: Bool) -> some View {
+        HStack(spacing: 6) {
+            ForEach(AuthMode.allCases, id: \.self) { mode in
+                let selected = (authMode == mode)
+                Button {
+                    BuddyHaptics.selection()
+                    authMode = mode
+                    cloudSync.authError = nil
+                    cloudSync.authInfoMessage = nil
+                } label: {
+                    Text(mode.rawValue)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(selected ? BuddyTheme.inkInverse : Color.primary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .fill(selected ? BuddyTheme.inkPrimary : BuddyTheme.chipSurface)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+
+        VStack(spacing: 10) {
+            TextField("Email address", text: $emailText)
+                .keyboardType(.emailAddress)
+                .textContentType(.emailAddress)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                .font(.system(size: 14.5, weight: .medium))
+                .foregroundStyle(Color.primary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 11)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(BuddyTheme.elevatedSurface)
+                )
+
+            SecureField("Password (6+ characters)", text: $passwordText)
+                .textContentType(authMode == .signUp ? .newPassword : .password)
+                .font(.system(size: 14.5, weight: .medium))
+                .foregroundStyle(Color.primary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 11)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(BuddyTheme.elevatedSurface)
+                )
+        }
+
+        if showFeedback {
+            authFeedbackMessages
+        }
+
+        Button {
+            BuddyHaptics.mediumImpact()
+            Task {
+                if authMode == .signIn {
+                    await cloudSync.signIn(email: emailText, password: passwordText, store: store)
+                } else {
+                    await cloudSync.signUp(email: emailText, password: passwordText, store: store)
+                }
+                if cloudSync.isSignedIn {
+                    passwordText = ""
+                }
+            }
+        } label: {
+            HStack(spacing: 7) {
+                if cloudSync.isAuthenticating {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(BuddyTheme.inkInverse)
+                }
+                Text(authMode == .signIn ? "Sign In & Sync" : "Create Account & Sync")
+                    .font(.system(size: 14.5, weight: .bold))
+            }
+            .foregroundStyle(canSubmitEmailAuth ? BuddyTheme.inkInverse : BuddyTheme.mutedText)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 13)
+            .background(Capsule().fill(canSubmitEmailAuth ? BuddyTheme.inkPrimary : BuddyTheme.elevatedSurface))
+        }
+        .buttonStyle(.plain)
+        .disabled(!canSubmitEmailAuth)
+
+        if authMode == .signIn {
+            Button {
+                BuddyHaptics.lightImpact()
+                Task {
+                    await cloudSync.sendPasswordReset(email: emailText)
+                }
+            } label: {
+                Text("Forgot password?")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(BuddyTheme.mutedText)
+            }
+            .buttonStyle(.plain)
+            .disabled(cloudSync.isAuthenticating)
         }
     }
 
@@ -332,6 +411,7 @@ struct CloudSyncSettingsView: View {
                             BuddyHaptics.lightImpact()
                             projectIDDraft = cloudSync.config.projectID
                             webAPIKeyDraft = cloudSync.config.webAPIKey
+                            googleClientIDDraft = cloudSync.config.googleIOSClientID
                             withAnimation(.snappy(duration: 0.2)) {
                                 isEditingProjectConfig = true
                             }
@@ -351,12 +431,12 @@ struct CloudSyncSettingsView: View {
                             .foregroundStyle(Color.primary)
                             .lineLimit(1)
                         Spacer()
-                        Text("Spark Free Tier")
+                        Text(cloudSync.isGoogleSignInConfigured ? "Google Sign-In Ready" : "Spark Free Tier")
                             .font(.caption2.weight(.semibold))
-                            .foregroundStyle(BuddyTheme.mutedText)
+                            .foregroundStyle(cloudSync.isGoogleSignInConfigured ? BuddyTheme.emeraldLive : BuddyTheme.mutedText)
                     }
                 } else {
-                    Text("Connect your free Firebase Spark project using its Project ID and Web API Key (stored securely on-device).")
+                    Text("Connect your free Firebase Spark project using its Project ID, Web API Key, and optional Google iOS Client ID (stored securely on-device).")
                         .font(.caption)
                         .foregroundStyle(BuddyTheme.mutedText)
 
@@ -384,12 +464,28 @@ struct CloudSyncSettingsView: View {
                                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                                     .fill(BuddyTheme.elevatedSurface)
                             )
+
+                        TextField("Google iOS Client ID (optional, ….apps.googleusercontent.com)", text: $googleClientIDDraft)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled(true)
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(Color.primary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(BuddyTheme.elevatedSurface)
+                            )
                     }
 
                     HStack(spacing: 8) {
                         Button {
                             BuddyHaptics.success()
-                            cloudSync.saveConfig(projectID: projectIDDraft, webAPIKey: webAPIKeyDraft)
+                            cloudSync.saveConfig(
+                                projectID: projectIDDraft,
+                                webAPIKey: webAPIKeyDraft,
+                                googleIOSClientID: googleClientIDDraft
+                            )
                             withAnimation(.snappy(duration: 0.2)) {
                                 isEditingProjectConfig = !cloudSync.isConfigured
                             }
@@ -447,10 +543,10 @@ struct CloudSyncSettingsView: View {
                 if showSetupGuide {
                     VStack(alignment: .leading, spacing: 8) {
                         setupStep("1", "Create a free Spark project at console.firebase.google.com.")
-                        setupStep("2", "Authentication → Sign-in method → Enable Email/Password.")
-                        setupStep("3", "Firestore Database → Create database (Production mode).")
-                        setupStep("4", "Firestore → Rules → Paste & Publish the rules below.")
-                        setupStep("5", "Project Settings → General → Copy Project ID & Web API Key.")
+                        setupStep("2", "Authentication → Sign-in method → Enable Google (and/or Email/Password).")
+                        setupStep("3", "Google Cloud Console → APIs & Services → Credentials → Create iOS OAuth Client ID (com.yuvaraja.buddy).")
+                        setupStep("4", "Firestore Database → Create database, add an 'allowlist' collection with each allowed Gmail as Document ID, and publish the rules below.")
+                        setupStep("5", "Project Settings → General → Copy Project ID, Web API Key, and your iOS Client ID.")
 
                         Text(FirebaseSyncService.recommendedFirestoreRules)
                             .font(.system(size: 11, design: .monospaced))

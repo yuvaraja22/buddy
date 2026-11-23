@@ -385,7 +385,9 @@ struct SettingsView: View {
             return "Firebase · \(cloudSync.userEmail ?? "Connected")"
         }
         if cloudSync.isConfigured {
-            return "Firebase · Tap to sign in"
+            return cloudSync.isGoogleSignInConfigured
+                ? "Google Sign-In · Tap to sync"
+                : "Firebase · Tap to sign in"
         }
         return "Firebase & JSON Export"
     }
