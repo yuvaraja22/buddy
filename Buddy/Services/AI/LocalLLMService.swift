@@ -73,6 +73,9 @@ public final class LocalLLMService {
     public var loadedModelName: String?
     public var lastMemoryNotice: String?
 
+    /// Invoked right before loading the GGUF model so Buddy can release WhisperKit CoreML RAM first.
+    @ObservationIgnored public var onBeforeLoadModel: (@MainActor () async -> Void)?
+
     private let modelManager: ModelManager
     @ObservationIgnored private var llm: LLM?
     @ObservationIgnored private var loadedFilePath: String?
@@ -108,6 +111,10 @@ public final class LocalLLMService {
         if llm != nil {
             releaseLoadedModel()
         }
+
+        // Release any active WhisperKit CoreML weights before mapping Qwen GGUF into RAM.
+        await onBeforeLoadModel?()
+        try Task.checkCancellation()
 
         pendingMemoryUnload = false
         isLoading = true
@@ -180,9 +187,28 @@ public final class LocalLLMService {
         isLoaded = false
     }
 
+    /// Returns `true` when `RuleBasedWorkoutParser` extracted a complete, unambiguous command
+    /// (so Buddy can log immediately in <1 ms without evicting WhisperKit from RAM to load Qwen).
+    public nonisolated static func isConfidentRuleParse(_ intent: WorkoutCommandIntent) -> Bool {
+        switch intent.action {
+        case .updateLastSet, .deleteLastSet, .deleteLastExercise, .endSession:
+            return true
+        case .logSets:
+            guard !intent.items.isEmpty else { return false }
+            return intent.items.allSatisfy { item in
+                let hasExercise = !item.exerciseName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                let hasQuantity = (item.reps ?? 0) > 0 || (item.durationSeconds ?? 0) > 0
+                return hasExercise && hasQuantity
+            }
+        case .unknown:
+            return false
+        }
+    }
+
     public func parseVoiceTranscript(
         _ transcript: String,
-        context: ActiveSessionPromptContext
+        context: ActiveSessionPromptContext,
+        preferInstantParserWhenConfident: Bool = false
     ) async -> WorkoutCommandIntent {
         let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -194,6 +220,10 @@ public final class LocalLLMService {
         }
 
         let ruleFallback = RuleBasedWorkoutParser.parse(trimmed, context: context)
+
+        if preferInstantParserWhenConfident && Self.isConfidentRuleParse(ruleFallback) {
+            return ruleFallback
+        }
 
         guard modelManager.isLLMDownloaded else {
             return ruleFallback

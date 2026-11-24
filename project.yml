@@ -18,6 +18,9 @@ settings:
     ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: YES
 
 packages:
+  ArgmaxOSS:
+    url: https://github.com/argmaxinc/argmax-oss-swift.git
+    exactVersion: 1.1.1
   LLM:
     url: https://github.com/eastriverlee/LLM.swift.git
     exactVersion: 3.0.3
@@ -70,6 +73,8 @@ targets:
             CFBundleURLSchemes:
               - buddy
     dependencies:
+      - package: ArgmaxOSS
+        product: WhisperKit
       - package: LLM
         product: LLM
       - target: BuddyWidgets

@@ -9,6 +9,7 @@ struct BuddyApp: App {
     @State private var modelManager: ModelManager
     @State private var audioRecorder: AudioRecorderService
     @State private var appleSpeechService: AppleSpeechService
+    @State private var whisperService: WhisperTranscriptionService
     @State private var llmService: LocalLLMService
     @State private var pipeline: VoicePipelineCoordinator
     @State private var workoutStore: WorkoutStore
@@ -29,10 +30,26 @@ struct BuddyApp: App {
         let manager = ModelManager()
         let recorder = AudioRecorderService()
         let appleSpeech = AppleSpeechService()
+        let whisper = WhisperTranscriptionService(modelManager: manager)
         let llm = LocalLLMService(modelManager: manager)
+
+        // Strict mutual RAM exclusion: Whisper Large v3 Turbo and Qwen LLM never occupy RAM
+        // simultaneously, keeping peak footprint safely under SideStore's iOS Jetsam ceiling.
+        whisper.onBeforeLoadModel = { [weak llm] in
+            guard let llm, llm.isLoaded || llm.isLoading else { return }
+            llm.unload()
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+        llm.onBeforeLoadModel = { [weak whisper] in
+            guard let whisper, whisper.isLoaded || whisper.isLoading || whisper.isPrewarming else { return }
+            await whisper.unload()
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+
         let coordinator = VoicePipelineCoordinator(
             audioRecorder: recorder,
             appleSpeechService: appleSpeech,
+            whisperService: whisper,
             llmService: llm,
             modelManager: manager
         )
@@ -47,6 +64,7 @@ struct BuddyApp: App {
         _modelManager = State(initialValue: manager)
         _audioRecorder = State(initialValue: recorder)
         _appleSpeechService = State(initialValue: appleSpeech)
+        _whisperService = State(initialValue: whisper)
         _llmService = State(initialValue: llm)
         _pipeline = State(initialValue: coordinator)
         _workoutStore = State(initialValue: store)
@@ -60,6 +78,7 @@ struct BuddyApp: App {
                 pipeline: pipeline,
                 modelManager: modelManager,
                 appleSpeechService: appleSpeechService,
+                whisperService: whisperService,
                 llmService: llmService,
                 cloudSync: cloudSync
             )
@@ -78,6 +97,10 @@ struct BuddyApp: App {
             case .background:
                 pipeline.handleEnteredBackground(store: workoutStore)
                 llmService.stopCoachGeneration()
+                llmService.unload()
+                Task { @MainActor in
+                    await whisperService.unloadIfIdle()
+                }
                 WidgetRefreshHelper.sync(store: workoutStore)
             case .active:
                 BuddyAppearance.applyToAllWindows(preferredAppearance)

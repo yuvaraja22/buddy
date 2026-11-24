@@ -19,29 +19,72 @@ public enum AudioRecorderError: LocalizedError, Sendable {
     }
 }
 
-/// Thread-safe duration tracker updated directly on CoreAudio's realtime tap with zero heap allocations.
-private final class LockedDurationTracker: @unchecked Sendable {
+/// Thread-safe bounded raw mono Float32 accumulator segmented by hardware sample rate.
+/// When `shouldStoreSamples` is `false` (Apple Speech mode), only duration is tracked so the
+/// realtime CoreAudio tap performs zero heap allocations.
+private final class LockedRawAudioBuffer: @unchecked Sendable {
+    struct Segment: Sendable {
+        let sampleRate: Double
+        var samples: [Float]
+    }
+
     private let lock = NSLock()
+    private var segments: [Segment] = []
     private var accumulatedSeconds: TimeInterval = 0
+    private var shouldStoreSamples: Bool = false
     private let maxDurationSeconds: TimeInterval
 
     init(maxDurationSeconds: TimeInterval) {
         self.maxDurationSeconds = maxDurationSeconds
     }
 
-    func reset() {
+    func reset(storeSamples: Bool) {
         lock.lock()
+        segments.removeAll(keepingCapacity: false)
         accumulatedSeconds = 0
+        shouldStoreSamples = storeSamples
         lock.unlock()
     }
 
-    func record(frameCount: Int, sampleRate: Double) {
+    func record(buffer: AVAudioPCMBuffer, sampleRate: Double) {
+        let frameCount = Int(buffer.frameLength)
         guard frameCount > 0, sampleRate > 0 else { return }
+
         lock.lock()
-        accumulatedSeconds = min(
-            maxDurationSeconds,
-            accumulatedSeconds + (Double(frameCount) / sampleRate)
-        )
+        let remainingSeconds = maxDurationSeconds - accumulatedSeconds
+        guard remainingSeconds > 0 else {
+            lock.unlock()
+            return
+        }
+
+        let maxAllowedFrames = Int((remainingSeconds * sampleRate).rounded(.down))
+        let countToCopy = min(frameCount, max(0, maxAllowedFrames))
+        guard countToCopy > 0 else {
+            lock.unlock()
+            return
+        }
+
+        let store = shouldStoreSamples
+        if !store {
+            accumulatedSeconds = min(maxDurationSeconds, accumulatedSeconds + (Double(countToCopy) / sampleRate))
+            lock.unlock()
+            return
+        }
+
+        let monoSlice = Self.extractMonoFloatSamples(from: buffer, maxFrames: countToCopy)
+        if !monoSlice.isEmpty {
+            if let lastIndex = segments.indices.last,
+               abs(segments[lastIndex].sampleRate - sampleRate) < 1.0 {
+                segments[lastIndex].samples.append(contentsOf: monoSlice)
+            } else {
+                var initial: [Float] = []
+                initial.reserveCapacity(max(Int(sampleRate * 4), monoSlice.count))
+                initial.append(contentsOf: monoSlice)
+                segments.append(Segment(sampleRate: sampleRate, samples: initial))
+            }
+        }
+
+        accumulatedSeconds = min(maxDurationSeconds, accumulatedSeconds + (Double(countToCopy) / sampleRate))
         lock.unlock()
     }
 
@@ -52,16 +95,71 @@ private final class LockedDurationTracker: @unchecked Sendable {
         return duration
     }
 
-    func drain() -> TimeInterval {
+    func drain() -> (duration: TimeInterval, segments: [Segment]) {
         lock.lock()
         let duration = accumulatedSeconds
+        let capturedSegments = segments
+        segments.removeAll(keepingCapacity: false)
         accumulatedSeconds = 0
+        shouldStoreSamples = false
         lock.unlock()
-        return duration
+        return (duration, capturedSegments)
+    }
+
+    private static func extractMonoFloatSamples(from buffer: AVAudioPCMBuffer, maxFrames: Int) -> [Float] {
+        let channelCount = Int(buffer.format.channelCount)
+        guard maxFrames > 0, channelCount > 0 else { return [] }
+
+        var output = [Float](repeating: 0, count: maxFrames)
+        let invChannels = 1.0 / Float(channelCount)
+
+        if let floatChannels = buffer.floatChannelData {
+            if channelCount == 1 {
+                let ptr = floatChannels[0]
+                for frame in 0..<maxFrames {
+                    output[frame] = ptr[frame]
+                }
+            } else {
+                for frame in 0..<maxFrames {
+                    var sum: Float = 0
+                    for channel in 0..<channelCount {
+                        sum += floatChannels[channel][frame]
+                    }
+                    output[frame] = sum * invChannels
+                }
+            }
+            return output
+        }
+
+        if let int16Channels = buffer.int16ChannelData {
+            let scale = 1.0 / (Float(Int16.max) * Float(channelCount))
+            for frame in 0..<maxFrames {
+                var sum: Float = 0
+                for channel in 0..<channelCount {
+                    sum += Float(int16Channels[channel][frame])
+                }
+                output[frame] = sum * scale
+            }
+            return output
+        }
+
+        if let int32Channels = buffer.int32ChannelData {
+            let scale = 1.0 / (Float(Int32.max) * Float(channelCount))
+            for frame in 0..<maxFrames {
+                var sum: Float = 0
+                for channel in 0..<channelCount {
+                    sum += Float(int32Channels[channel][frame])
+                }
+                output[frame] = sum * scale
+            }
+            return output
+        }
+
+        return []
     }
 }
 
-/// Thread-safe holder for the live PCM buffer listener (consumed by Apple On-Device Speech).
+/// Thread-safe holder for the live PCM buffer listener (consumed by Apple Speech).
 private final class LockedAudioBufferHandler: @unchecked Sendable {
     private let lock = NSLock()
     private var handler: (@Sendable (AVAudioPCMBuffer) -> Void)?
@@ -130,7 +228,9 @@ public struct AudioSessionConfiguration: Equatable, @unchecked Sendable {
 @Observable
 @MainActor
 public final class AudioRecorderService {
-    /// Supports uninterrupted 3-minute full-session post-gym voice recaps alongside AppleSpeechService rollover.
+    /// Target mono sample rate required by OpenAI Whisper / WhisperKit CoreML models.
+    public static let targetSampleRate: Double = 16_000
+    /// Supports uninterrupted 3-minute full-session post-gym voice recaps.
     public static let maxRecordingSeconds: TimeInterval = 180
     private static let visualizerBarCount: Int = 24
 
@@ -147,7 +247,7 @@ public final class AudioRecorderService {
 
     @ObservationIgnored private var audioEngine: AVAudioEngine?
     @ObservationIgnored private var currentCaptureOptions: AudioCaptureOptions = AudioCaptureOptions()
-    private let durationTracker = LockedDurationTracker(maxDurationSeconds: maxRecordingSeconds)
+    private let rawAudioBuffer = LockedRawAudioBuffer(maxDurationSeconds: maxRecordingSeconds)
     private let audioBufferHandler = LockedAudioBufferHandler()
     @ObservationIgnored private var recordingStartDate: Date?
     @ObservationIgnored private var durationTask: Task<Void, Never>?
@@ -207,9 +307,11 @@ public final class AudioRecorderService {
 
     /// Activates `AVAudioSession`, configures gym mic routing & hardware noise isolation,
     /// invokes `onSessionActivated` (so Apple Speech starts *after* the audio session is active
-    /// and *before* buffers flow), and starts `AVAudioEngine` with a zero-allocation realtime tap.
+    /// and *before* buffers flow), and starts `AVAudioEngine`.
+    /// Set `captureRawSamples = true` when recording for offline WhisperKit transcription.
     public func startRecording(
         options: AudioCaptureOptions = AudioCaptureOptions(),
+        captureRawSamples: Bool = false,
         onSessionActivated: (@MainActor () throws -> Void)? = nil
     ) async throws {
         let granted = await requestPermission()
@@ -218,7 +320,7 @@ public final class AudioRecorderService {
         }
 
         teardownEngine(deactivateSession: false)
-        durationTracker.reset()
+        rawAudioBuffer.reset(storeSamples: captureRawSamples)
         configRecoveryAttempts = 0
         currentCaptureOptions = options
 
@@ -269,15 +371,155 @@ public final class AudioRecorderService {
         startDurationTimer()
     }
 
-    /// Stops recording and returns the captured audio duration in seconds.
+    /// Stops recording and returns the captured audio duration in seconds (used by Apple Speech mode).
     public func stopRecording() -> TimeInterval {
         teardownEngine(deactivateSession: true)
-        return durationTracker.drain()
+        return rawAudioBuffer.drain().duration
+    }
+
+    /// Stops recording and resamples captured hardware-rate mono audio to 16 kHz Float32 off-MainActor
+    /// for WhisperKit transcription.
+    public func stopRecordingAndDrain16kHzSamples() async -> (duration: TimeInterval, samples: [Float]) {
+        teardownEngine(deactivateSession: true)
+        let drained = rawAudioBuffer.drain()
+        guard !drained.segments.isEmpty else {
+            return (drained.duration, [])
+        }
+
+        let segments = drained.segments
+        let samples16k: [Float] = await Task.detached(priority: .userInitiated) {
+            var combined: [Float] = []
+            for segment in segments {
+                let resampled = Self.resampleTo16kHz(
+                    samples: segment.samples,
+                    fromSampleRate: segment.sampleRate
+                )
+                combined.append(contentsOf: resampled)
+            }
+            return combined
+        }.value
+
+        return (drained.duration, samples16k)
     }
 
     public func cancelRecording() {
         teardownEngine(deactivateSession: true)
-        durationTracker.reset()
+        rawAudioBuffer.reset(storeSamples: false)
+    }
+
+    // MARK: - Single-Pass Offline 16 kHz Resampling
+
+    /// Resamples mono Float32 samples to 16 kHz in ONE continuous `AVAudioConverter` pass
+    /// (sequential `.haveData` slices followed by `.endOfStream`) so polyphase FIR filter state
+    /// never stalls or glitches at buffer boundaries.
+    public nonisolated static func resampleTo16kHz(
+        samples: [Float],
+        fromSampleRate sourceSampleRate: Double
+    ) -> [Float] {
+        guard !samples.isEmpty, sourceSampleRate > 0 else { return [] }
+        if abs(sourceSampleRate - targetSampleRate) < 1.0 {
+            return samples
+        }
+
+        guard let inputFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sourceSampleRate,
+            channels: 1,
+            interleaved: false
+        ),
+        let outputFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: targetSampleRate,
+            channels: 1,
+            interleaved: false
+        ),
+        let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
+            return linearResampleFallback(samples: samples, from: sourceSampleRate, to: targetSampleRate)
+        }
+
+        let estimatedOutputFrames = Int(ceil(Double(samples.count) * (targetSampleRate / sourceSampleRate))) + 64
+        var result: [Float] = []
+        result.reserveCapacity(max(estimatedOutputFrames, 64))
+
+        let inputChunkSize = 16_384
+        var inputOffset = 0
+        let outputChunkCapacity: AVAudioFrameCount = 8_192
+
+        guard let outputBuffer = AVAudioPCMBuffer(
+            pcmFormat: outputFormat,
+            frameCapacity: outputChunkCapacity
+        ) else {
+            return linearResampleFallback(samples: samples, from: sourceSampleRate, to: targetSampleRate)
+        }
+
+        while true {
+            outputBuffer.frameLength = 0
+            var conversionError: NSError?
+
+            let status = converter.convert(to: outputBuffer, error: &conversionError) { requestedFrames, outStatus in
+                if inputOffset >= samples.count {
+                    outStatus.pointee = .endOfStream
+                    return nil
+                }
+
+                let framesToProvide = min(Int(requestedFrames), min(inputChunkSize, samples.count - inputOffset))
+                guard framesToProvide > 0,
+                      let chunkBuffer = AVAudioPCMBuffer(
+                        pcmFormat: inputFormat,
+                        frameCapacity: AVAudioFrameCount(framesToProvide)
+                      ),
+                      let channelData = chunkBuffer.floatChannelData?[0] else {
+                    outStatus.pointee = .endOfStream
+                    return nil
+                }
+
+                chunkBuffer.frameLength = AVAudioFrameCount(framesToProvide)
+                samples.withUnsafeBufferPointer { sourcePtr in
+                    if let base = sourcePtr.baseAddress {
+                        channelData.update(from: base.advanced(by: inputOffset), count: framesToProvide)
+                    }
+                }
+                inputOffset += framesToProvide
+                outStatus.pointee = .haveData
+                return chunkBuffer
+            }
+
+            if conversionError != nil || status == .error {
+                return linearResampleFallback(samples: samples, from: sourceSampleRate, to: targetSampleRate)
+            }
+
+            let produced = Int(outputBuffer.frameLength)
+            if produced > 0, let outPtr = outputBuffer.floatChannelData?[0] {
+                result.append(contentsOf: UnsafeBufferPointer(start: outPtr, count: produced))
+            }
+
+            if status == .endOfStream || produced == 0 {
+                break
+            }
+        }
+
+        return result
+    }
+
+    private nonisolated static func linearResampleFallback(
+        samples: [Float],
+        from sourceRate: Double,
+        to targetRate: Double
+    ) -> [Float] {
+        guard !samples.isEmpty, sourceRate > 0, targetRate > 0 else { return [] }
+        let ratio = sourceRate / targetRate
+        let outputCount = max(1, Int((Double(samples.count) / ratio).rounded()))
+        var output = [Float](repeating: 0, count: outputCount)
+        let lastIndex = samples.count - 1
+
+        for i in 0..<outputCount {
+            let srcPos = Double(i) * ratio
+            let idx0 = min(lastIndex, Int(srcPos))
+            let idx1 = min(lastIndex, idx0 + 1)
+            let frac = Float(srcPos - Double(idx0))
+            output[i] = samples[idx0] * (1.0 - frac) + samples[idx1] * frac
+        }
+        return output
     }
 
     // MARK: - Private Helpers
@@ -329,7 +571,7 @@ public final class AudioRecorderService {
         Self.installRealtimeTap(
             on: inputNode,
             inputFormat: inputFormat,
-            durationTracker: durationTracker,
+            rawAudioBuffer: rawAudioBuffer,
             bufferHandler: audioBufferHandler
         ) { [weak self] level in
             Task { @MainActor [weak self] in
@@ -387,7 +629,7 @@ public final class AudioRecorderService {
 
     private func handleEngineConfigurationChange(_ engine: AVAudioEngine) {
         let elapsed = recordingStartDate.map { Date().timeIntervalSince($0) } ?? 0
-        let bufferedDuration = durationTracker.totalSeconds
+        let bufferedDuration = rawAudioBuffer.totalSeconds
 
         // AirPods / Bluetooth headsets negotiate A2DP -> HFP ~50–250ms after engine.start().
         // Remove the old bus-0 tap and stop the engine FIRST so no trailing buffer in the old
@@ -483,11 +725,11 @@ public final class AudioRecorderService {
     }
 
     /// Installs the audio tap outside `@MainActor` isolation so CoreAudio's realtime
-    /// thread performs zero heap allocations and never triggers a main-actor assertion.
+    /// thread never triggers a main-actor assertion.
     private nonisolated static func installRealtimeTap(
         on inputNode: AVAudioInputNode,
         inputFormat: AVAudioFormat,
-        durationTracker: LockedDurationTracker,
+        rawAudioBuffer: LockedRawAudioBuffer,
         bufferHandler: LockedAudioBufferHandler,
         onLevel: @escaping @Sendable (Float) -> Void
     ) {
@@ -498,7 +740,7 @@ public final class AudioRecorderService {
             guard frameCount > 0 else { return }
 
             bufferHandler.forward(buffer)
-            durationTracker.record(frameCount: frameCount, sampleRate: hardwareSampleRate)
+            rawAudioBuffer.record(buffer: buffer, sampleRate: hardwareSampleRate)
 
             let rms = computeRMSInPlace(from: buffer)
             let decibels = 20 * log10(max(rms, 1e-5))

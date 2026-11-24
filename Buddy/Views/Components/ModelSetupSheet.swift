@@ -6,6 +6,7 @@ struct ModelSetupSheet: View {
 
     let modelManager: ModelManager
     let appleSpeechService: AppleSpeechService
+    let whisperService: WhisperTranscriptionService
 
     @State private var sceneRefreshTick: Int = 0
 
@@ -22,7 +23,9 @@ struct ModelSetupSheet: View {
     var body: some View {
         let _ = sceneRefreshTick
         let preset = activeLLMPreset
-        let isVoiceReady = appleSpeechService.isReadyForVoice(
+        let whisperPreset = modelManager.selectedWhisperPreset
+        let isWhisperReady = modelManager.isDownloaded(whisperPreset)
+        let isVoiceReady = isWhisperReady || appleSpeechService.isReadyForVoice(
             for: modelManager.selectedAppleSpeechLocale,
             mode: modelManager.selectedAppleSpeechMode
         )
@@ -45,6 +48,23 @@ struct ModelSetupSheet: View {
                     heroHeader(isVoiceReady: isVoiceReady)
 
                     VStack(spacing: 12) {
+                        modelRowCard(
+                            icon: "waveform.circle.fill",
+                            title: whisperPreset.displayName,
+                            subtitle: whisperPreset.subtitle,
+                            sizeText: formatSizeMB(whisperPreset.approximateSizeMB),
+                            isDownloaded: isWhisperReady,
+                            isDownloading: modelManager.isDownloadingWhisper || modelManager.isOptimizingWhisper,
+                            progress: modelManager.whisperDownloadProgress,
+                            onDownload: {
+                                Task {
+                                    await modelManager.downloadWhisperModel(whisperPreset) { downloadedPreset in
+                                        try await whisperService.prewarmDownloadedModel(downloadedPreset)
+                                    }
+                                }
+                            }
+                        )
+
                         speechCard
 
                         modelRowCard(
