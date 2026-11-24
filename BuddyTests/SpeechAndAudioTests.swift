@@ -176,7 +176,7 @@ final class SpeechAndAudioTests: XCTestCase {
     }
 
     @MainActor
-    func testModelManagerPersistsSpeechEngineWhisperPresetAndPrewarmState() throws {
+    func testModelManagerPersistsSpeechEngineParakeetPresetAndMigratesLegacyWhisper() throws {
         let suiteName = "com.yuvaraja.buddy.tests.speech.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -184,85 +184,86 @@ final class SpeechAndAudioTests: XCTestCase {
         let eightGB: UInt64 = 8 * 1_073_741_824
         let manager = ModelManager(
             defaults: defaults,
-            osBuildMarker: "iOS 18.5 (22F76)",
             physicalMemoryBytes: eightGB
         )
         XCTAssertEqual(manager.selectedSpeechEngine, .appleSpeech)
-        XCTAssertEqual(manager.selectedWhisperPreset, .largeV3Turbo)
+        XCTAssertEqual(manager.selectedParakeetPreset, .v2)
         XCTAssertEqual(manager.effectiveSpeechEngine, .appleSpeech)
         XCTAssertEqual(manager.selectedAppleSpeechLocale, .auto)
-        XCTAssertFalse(manager.isPrewarmed(.largeV3Turbo))
         XCTAssertFalse(manager.isAllReady(appleSpeechReady: false))
 
-        // Selecting WhisperKit before downloading still falls back cleanly to Apple Speech.
-        manager.selectedSpeechEngine = .whisperKit
-        manager.selectedWhisperPreset = .largeV3TurboCompact
+        // Selecting Parakeet before downloading still falls back cleanly to Apple Speech.
+        manager.selectedSpeechEngine = .parakeet
+        manager.selectedParakeetPreset = .v3
         manager.selectedAppleSpeechLocale = .enIN
-        manager.markPrewarmed(.largeV3TurboCompact)
         XCTAssertEqual(manager.effectiveSpeechEngine, .appleSpeech)
-        XCTAssertTrue(manager.isPrewarmed(.largeV3TurboCompact))
 
-        let reloadedSameOS = ModelManager(
+        let reloaded = ModelManager(
             defaults: defaults,
-            osBuildMarker: "iOS 18.5 (22F76)",
             physicalMemoryBytes: eightGB
         )
-        XCTAssertEqual(reloadedSameOS.selectedSpeechEngine, .whisperKit)
-        XCTAssertEqual(reloadedSameOS.selectedWhisperPreset, .largeV3TurboCompact)
-        XCTAssertEqual(reloadedSameOS.selectedAppleSpeechLocale, .enIN)
-        XCTAssertTrue(reloadedSameOS.isPrewarmed(.largeV3TurboCompact))
+        XCTAssertEqual(reloaded.selectedSpeechEngine, .parakeet)
+        XCTAssertEqual(reloaded.selectedParakeetPreset, .v3)
+        XCTAssertEqual(reloaded.selectedAppleSpeechLocale, .enIN)
 
-        // iOS updates invalidate CoreML ANE caches, so prewarm state must reset on a new OS build.
-        let reloadedNewOS = ModelManager(
+        // Legacy `"whisperkit"` setting from earlier builds migrates cleanly to `.appleSpeech`.
+        defaults.set("whisperkit", forKey: "buddy.models.speechEngine")
+        defaults.set("openai_whisper-large-v3_turbo", forKey: "buddy.models.selectedWhisperPreset")
+        let migrated = ModelManager(
             defaults: defaults,
-            osBuildMarker: "iOS 19.0 (23A100)",
             physicalMemoryBytes: eightGB
         )
-        XCTAssertFalse(reloadedNewOS.isPrewarmed(.largeV3TurboCompact))
+        XCTAssertEqual(migrated.selectedSpeechEngine, .appleSpeech)
+        XCTAssertEqual(defaults.string(forKey: "buddy.models.speechEngine"), SpeechEngine.appleSpeech.rawValue)
+        XCTAssertNil(defaults.object(forKey: "buddy.models.selectedWhisperPreset"))
     }
 
     @MainActor
-    func testModelManagerSelectsRAMSafeDefaultWhisperPreset() throws {
+    func testModelManagerSelectsRAMSafeDefaultParakeetPreset() throws {
+        let suite3 = "com.yuvaraja.buddy.tests.ram3.\(UUID().uuidString)"
         let suite4 = "com.yuvaraja.buddy.tests.ram4.\(UUID().uuidString)"
         let suite6 = "com.yuvaraja.buddy.tests.ram6.\(UUID().uuidString)"
         let suite8 = "com.yuvaraja.buddy.tests.ram8.\(UUID().uuidString)"
+        let defaults3 = try XCTUnwrap(UserDefaults(suiteName: suite3))
         let defaults4 = try XCTUnwrap(UserDefaults(suiteName: suite4))
         let defaults6 = try XCTUnwrap(UserDefaults(suiteName: suite6))
         let defaults8 = try XCTUnwrap(UserDefaults(suiteName: suite8))
         defer {
+            defaults3.removePersistentDomain(forName: suite3)
             defaults4.removePersistentDomain(forName: suite4)
             defaults6.removePersistentDomain(forName: suite6)
             defaults8.removePersistentDomain(forName: suite8)
         }
 
         let gib: UInt64 = 1_073_741_824
-        XCTAssertEqual(ModelManager.recommendedWhisperPreset(forPhysicalMemoryBytes: 4 * gib), .smallEn)
-        XCTAssertEqual(ModelManager.recommendedWhisperPreset(forPhysicalMemoryBytes: 6 * gib), .largeV3TurboCompact)
-        XCTAssertEqual(ModelManager.recommendedWhisperPreset(forPhysicalMemoryBytes: 8 * gib), .largeV3Turbo)
+        XCTAssertEqual(ModelManager.recommendedParakeetPreset(forPhysicalMemoryBytes: 3 * gib), .compact110m)
+        XCTAssertEqual(ModelManager.recommendedParakeetPreset(forPhysicalMemoryBytes: 4 * gib), .v2)
+        XCTAssertEqual(ModelManager.recommendedParakeetPreset(forPhysicalMemoryBytes: 6 * gib), .v2)
+        XCTAssertEqual(ModelManager.recommendedParakeetPreset(forPhysicalMemoryBytes: 8 * gib), .v2)
+
+        let m3 = ModelManager(defaults: defaults3, physicalMemoryBytes: 3 * gib)
+        XCTAssertEqual(m3.selectedParakeetPreset, .compact110m)
 
         let m4 = ModelManager(defaults: defaults4, physicalMemoryBytes: 4 * gib)
-        XCTAssertEqual(m4.selectedWhisperPreset, .smallEn)
-        XCTAssertTrue(m4.isLowRAMDeviceForLargeWhisper)
+        XCTAssertEqual(m4.selectedParakeetPreset, .v2)
 
         let m6 = ModelManager(defaults: defaults6, physicalMemoryBytes: 6 * gib)
-        XCTAssertEqual(m6.selectedWhisperPreset, .largeV3TurboCompact)
-        XCTAssertFalse(m6.isLowRAMDeviceForLargeWhisper)
+        XCTAssertEqual(m6.selectedParakeetPreset, .v2)
 
         let m8 = ModelManager(defaults: defaults8, physicalMemoryBytes: 8 * gib)
-        XCTAssertEqual(m8.selectedWhisperPreset, .largeV3Turbo)
-        XCTAssertFalse(m8.isLowRAMDeviceForLargeWhisper)
+        XCTAssertEqual(m8.selectedParakeetPreset, .v2)
     }
 
     @MainActor
-    func testModelMemoryCoordinatorSerializesConcurrentWhisperAndLLMLoads() async throws {
+    func testModelMemoryCoordinatorSerializesConcurrentLocalSpeechAndLLMLoads() async throws {
         let coordinator = ModelMemoryCoordinator()
-        var whisperResident = false
+        var localSpeechResident = false
         var llmResident = false
         var peakConcurrentModels = 0
 
-        let whisperTask = Task { @MainActor in
+        let speechTask = Task { @MainActor in
             try await coordinator.runExclusiveLoad(
-                for: .whisper,
+                for: .localSpeech,
                 unloadOther: {
                     if llmResident {
                         try? await Task.sleep(for: .milliseconds(25))
@@ -271,11 +272,11 @@ final class SpeechAndAudioTests: XCTestCase {
                     }
                 },
                 operation: {
-                    XCTAssertFalse(llmResident, "LLM must be completely unloaded before Whisper loads")
-                    whisperResident = true
-                    peakConcurrentModels = max(peakConcurrentModels, (whisperResident ? 1 : 0) + (llmResident ? 1 : 0))
+                    XCTAssertFalse(llmResident, "LLM must be completely unloaded before Parakeet loads")
+                    localSpeechResident = true
+                    peakConcurrentModels = max(peakConcurrentModels, (localSpeechResident ? 1 : 0) + (llmResident ? 1 : 0))
                     try? await Task.sleep(for: .milliseconds(35))
-                    return "whisper"
+                    return "parakeet"
                 }
             )
         }
@@ -284,93 +285,65 @@ final class SpeechAndAudioTests: XCTestCase {
             try await coordinator.runExclusiveLoad(
                 for: .llm,
                 unloadOther: {
-                    if whisperResident {
+                    if localSpeechResident {
                         try? await Task.sleep(for: .milliseconds(25))
-                        whisperResident = false
-                        coordinator.markUnloaded(.whisper)
+                        localSpeechResident = false
+                        coordinator.markUnloaded(.localSpeech)
                     }
                 },
                 operation: {
-                    XCTAssertFalse(whisperResident, "Whisper must be completely unloaded before LLM loads")
+                    XCTAssertFalse(localSpeechResident, "Parakeet must be completely unloaded before LLM loads")
                     llmResident = true
-                    peakConcurrentModels = max(peakConcurrentModels, (whisperResident ? 1 : 0) + (llmResident ? 1 : 0))
+                    peakConcurrentModels = max(peakConcurrentModels, (localSpeechResident ? 1 : 0) + (llmResident ? 1 : 0))
                     try? await Task.sleep(for: .milliseconds(35))
                     return "llm"
                 }
             )
         }
 
-        let first = try await whisperTask.value
+        let first = try await speechTask.value
         let second = try await llmTask.value
-        XCTAssertEqual(first, "whisper")
+        XCTAssertEqual(first, "parakeet")
         XCTAssertEqual(second, "llm")
-        XCTAssertEqual(peakConcurrentModels, 1, "Whisper and Qwen must never be resident simultaneously")
-        XCTAssertEqual((whisperResident ? 1 : 0) + (llmResident ? 1 : 0), 1)
+        XCTAssertEqual(peakConcurrentModels, 1, "Parakeet and Qwen must never be resident simultaneously")
+        XCTAssertEqual((localSpeechResident ? 1 : 0) + (llmResident ? 1 : 0), 1)
 
         coordinator.markUnloaded(coordinator.activeOwner)
         XCTAssertEqual(coordinator.activeOwner, .none)
     }
 
-    func testWhisperHelpersPadShortClipsSanitizeArtifactsAndKeepPromptSafe() {
-        // Short 0.25s clip (4000 samples @ 16kHz) is padded to 20,000 samples (1.25s) with zeros.
+    func testParakeetHelpersPadShortClipsFilterSilenceAndSanitizeArtifacts() {
+        // Short 0.25s clip (4,000 samples @ 16 kHz) is padded to 8,000 samples (0.5s) with zeros.
         let shortClip = Array(repeating: Float(0.25), count: 4_000)
-        let padded = WhisperTranscriptionService.prepareAudioSamplesForWhisper(shortClip)
-        XCTAssertEqual(padded.count, 20_000)
+        let padded = ParakeetTranscriptionService.prepareAudioSamplesForParakeet(shortClip)
+        XCTAssertEqual(padded.count, 8_000)
         XCTAssertEqual(padded[3_999], 0.25, accuracy: 0.0001)
         XCTAssertEqual(padded[4_000], 0.0, accuracy: 0.0001)
 
-        // Clips >= 20,000 samples are returned unchanged.
+        // Clips >= 8,000 samples are returned unchanged.
         let longClip = Array(repeating: Float(0.1), count: 24_000)
-        XCTAssertEqual(WhisperTranscriptionService.prepareAudioSamplesForWhisper(longClip).count, 24_000)
+        XCTAssertEqual(ParakeetTranscriptionService.prepareAudioSamplesForParakeet(longClip).count, 24_000)
 
-        // Control tokens, bracketed sound tags, and parenthetical audio labels are stripped cleanly.
-        let dirty = "<|startoftranscript|> [MUSIC] Incline dumbbell press 30 kg 3 sets 10 reps (clanking) [BLANK_AUDIO] <|endoftext|>"
-        XCTAssertEqual(
-            WhisperTranscriptionService.cleanTranscript(dirty),
-            "Incline dumbbell press 30 kg 3 sets 10 reps"
-        )
-
-        // Gym bias prompt prioritizes active exercises, stays compact, and excludes destructive words.
-        let prompt = WhisperTranscriptionService.buildGymBiasPrompt(
-            recentExercises: ["Cable Lateral Raise", "Bench Press", "bench press"]
-        )
-        XCTAssertTrue(prompt.contains("Cable Lateral Raise"))
-        XCTAssertTrue(prompt.contains("RDL"))
-        XCTAssertLessThan(prompt.count, 220, "Bias prompt must remain compact to stay well under WhisperKit's 111-token suffix cap")
-        let lowerPrompt = prompt.lowercased()
-        XCTAssertFalse(lowerPrompt.contains("delete"))
-        XCTAssertFalse(lowerPrompt.contains("finish"))
-        XCTAssertFalse(lowerPrompt.contains("end workout"))
-    }
-
-    func testWhisperSilenceGuardAndCompactPromptBudget() {
-        XCTAssertFalse(WhisperTranscriptionService.hasAudibleSpeech(in: []))
-        XCTAssertFalse(WhisperTranscriptionService.hasAudibleSpeech(in: Array(repeating: Float(0), count: 16_000)))
-        XCTAssertFalse(WhisperTranscriptionService.hasAudibleSpeech(in: Array(repeating: Float(0.0001), count: 16_000)))
+        // Silence guard rejects dead air and faint room noise, accepts speech and brief transients.
+        XCTAssertFalse(ParakeetTranscriptionService.hasAudibleSpeech(in: []))
+        XCTAssertFalse(ParakeetTranscriptionService.hasAudibleSpeech(in: Array(repeating: Float(0), count: 16_000)))
+        XCTAssertFalse(ParakeetTranscriptionService.hasAudibleSpeech(in: Array(repeating: Float(0.0001), count: 16_000)))
 
         let speechWave: [Float] = (0..<16_000).map { idx in
             sin(Float(2.0 * Double.pi * 220.0 * Double(idx) / 16_000.0)) * 0.05
         }
-        XCTAssertTrue(WhisperTranscriptionService.hasAudibleSpeech(in: speechWave))
+        XCTAssertTrue(ParakeetTranscriptionService.hasAudibleSpeech(in: speechWave))
 
         var transientClip = Array(repeating: Float(0), count: 16_000)
         transientClip[8_000] = 0.02
-        XCTAssertTrue(WhisperTranscriptionService.hasAudibleSpeech(in: transientClip))
+        XCTAssertTrue(ParakeetTranscriptionService.hasAudibleSpeech(in: transientClip))
 
-        // Long active exercise list must preserve the first 5 exercises at the front and cap total length.
-        let crowdedPrompt = WhisperTranscriptionService.buildGymBiasPrompt(recentExercises: [
-            "Bulgarian Split Squat",
-            "Seated Cable Row",
-            "Overhead Tricep Extension",
-            "Incline Smith Machine Press",
-            "Preacher Curl",
-            "Calf Raise",
-            "Face Pull"
-        ])
-        XCTAssertTrue(crowdedPrompt.contains("Bulgarian Split Squat"))
-        XCTAssertTrue(crowdedPrompt.contains("Preacher Curl"))
-        XCTAssertFalse(crowdedPrompt.contains("Calf Raise"))
-        XCTAssertLessThan(crowdedPrompt.count, 240)
+        // Special tokens and bracketed tags are stripped cleanly.
+        let dirty = "<|startoftranscript|> <unk> [MUSIC] Incline dumbbell press 30 kg 3 sets 10 reps [BLANK_AUDIO] <|endoftext|>"
+        XCTAssertEqual(
+            ParakeetTranscriptionService.cleanTranscript(dirty),
+            "Incline dumbbell press 30 kg 3 sets 10 reps"
+        )
     }
 
     func testAudioInterleavedStereoExtractionAndRMS() throws {

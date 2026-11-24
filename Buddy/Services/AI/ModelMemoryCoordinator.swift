@@ -1,13 +1,13 @@
 import Foundation
 
-/// Serializes heavy on-device model residency handoffs between WhisperKit (CoreML/ANE) and
+/// Serializes heavy on-device model residency handoffs between Parakeet CoreML (local speech) and
 /// LocalLLMService (Qwen GGUF) so both models can never pass pre-load checks simultaneously
 /// or overlap in RAM on SideStore free Apple ID builds (no `increased-memory-limit` entitlement).
 @MainActor
 public final class ModelMemoryCoordinator {
     public enum ResidentModel: Equatable, Sendable {
         case none
-        case whisper
+        case localSpeech
         case llm
     }
 

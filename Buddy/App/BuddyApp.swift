@@ -9,7 +9,7 @@ struct BuddyApp: App {
     @State private var modelManager: ModelManager
     @State private var audioRecorder: AudioRecorderService
     @State private var appleSpeechService: AppleSpeechService
-    @State private var whisperService: WhisperTranscriptionService
+    @State private var parakeetService: ParakeetTranscriptionService
     @State private var llmService: LocalLLMService
     @State private var pipeline: VoicePipelineCoordinator
     @State private var workoutStore: WorkoutStore
@@ -31,24 +31,24 @@ struct BuddyApp: App {
         let recorder = AudioRecorderService()
         let appleSpeech = AppleSpeechService()
         let memoryCoordinator = ModelMemoryCoordinator()
-        let whisper = WhisperTranscriptionService(modelManager: manager)
+        let parakeet = ParakeetTranscriptionService(modelManager: manager)
         let llm = LocalLLMService(modelManager: manager)
 
-        // Serialized mutual RAM exclusion: Whisper Large v3 Turbo and Qwen LLM await complete
-        // teardown of the opposing model through ModelMemoryCoordinator before allocating memory.
-        whisper.memoryCoordinator = memoryCoordinator
-        whisper.onUnloadOpposingModel = { [weak llm] in
+        // Serialized mutual RAM exclusion: Parakeet CoreML (~120 MB) and Qwen GGUF (~1.1 GB)
+        // coordinate handoffs through ModelMemoryCoordinator to maximize SideStore RAM headroom.
+        parakeet.memoryCoordinator = memoryCoordinator
+        parakeet.onUnloadOpposingModel = { [weak llm] in
             await llm?.unloadAndWait()
         }
         llm.memoryCoordinator = memoryCoordinator
-        llm.onUnloadOpposingModel = { [weak whisper] in
-            await whisper?.unloadAndWait()
+        llm.onUnloadOpposingModel = { [weak parakeet] in
+            await parakeet?.unloadAndWait()
         }
 
         let coordinator = VoicePipelineCoordinator(
             audioRecorder: recorder,
             appleSpeechService: appleSpeech,
-            whisperService: whisper,
+            parakeetService: parakeet,
             llmService: llm,
             modelManager: manager
         )
@@ -63,7 +63,7 @@ struct BuddyApp: App {
         _modelManager = State(initialValue: manager)
         _audioRecorder = State(initialValue: recorder)
         _appleSpeechService = State(initialValue: appleSpeech)
-        _whisperService = State(initialValue: whisper)
+        _parakeetService = State(initialValue: parakeet)
         _llmService = State(initialValue: llm)
         _pipeline = State(initialValue: coordinator)
         _workoutStore = State(initialValue: store)
@@ -77,7 +77,7 @@ struct BuddyApp: App {
                 pipeline: pipeline,
                 modelManager: modelManager,
                 appleSpeechService: appleSpeechService,
-                whisperService: whisperService,
+                parakeetService: parakeetService,
                 llmService: llmService,
                 cloudSync: cloudSync
             )
@@ -98,7 +98,7 @@ struct BuddyApp: App {
                 llmService.stopCoachGeneration()
                 llmService.unload()
                 Task { @MainActor in
-                    await whisperService.unloadIfIdle()
+                    await parakeetService.unloadIfIdle()
                 }
                 WidgetRefreshHelper.sync(store: workoutStore)
             case .active:

@@ -1,13 +1,13 @@
+import FluidAudio
 import Foundation
 import Observation
+import os
 import UIKit
-import WhisperKit
 
 public enum ModelManagerError: LocalizedError, Sendable {
     case invalidDownloadURL
     case badHTTPStatus(Int)
     case invalidGGUFFile(String)
-    case whisperTokenizerMissing(String)
     case cancelled
 
     public var errorDescription: String? {
@@ -17,8 +17,6 @@ public enum ModelManagerError: LocalizedError, Sendable {
         case .badHTTPStatus(let code):
             return "Model download failed with HTTP status \(code). Check your internet connection and try again."
         case .invalidGGUFFile(let reason):
-            return reason
-        case .whisperTokenizerMissing(let reason):
             return reason
         case .cancelled:
             return "Download cancelled."
@@ -147,7 +145,7 @@ private final class LLMDownloadDelegate: NSObject, URLSessionDownloadDelegate, @
 }
 
 public typealias SpeechEngine = ModelManager.SpeechEngine
-public typealias WhisperPreset = ModelManager.WhisperPreset
+public typealias ParakeetPreset = ModelManager.ParakeetPreset
 public typealias AppleSpeechLocaleOption = ModelManager.AppleSpeechLocaleOption
 public typealias AppleSpeechRecognitionMode = ModelManager.AppleSpeechRecognitionMode
 public typealias LLMPreset = ModelManager.LLMPreset
@@ -156,107 +154,89 @@ public typealias LLMPreset = ModelManager.LLMPreset
 @MainActor
 public final class ModelManager {
     public enum SpeechEngine: String, CaseIterable, Identifiable, Codable, Sendable {
-        case whisperKit = "whisperkit"
+        case parakeet = "parakeet"
         case appleSpeech = "apple"
 
         public var id: String { rawValue }
 
         public var displayName: String {
             switch self {
-            case .whisperKit: return "WhisperKit (Local)"
+            case .parakeet: return "Parakeet (Local)"
             case .appleSpeech: return "Apple Speech"
             }
         }
 
         public var shortLabel: String {
             switch self {
-            case .whisperKit: return "Whisper"
+            case .parakeet: return "Parakeet"
             case .appleSpeech: return "Apple"
             }
         }
 
         public var subtitle: String {
             switch self {
-            case .whisperKit:
-                return "OpenAI Whisper running 100% offline on Apple Neural Engine with gym vocabulary prompting."
+            case .parakeet:
+                return "NVIDIA Parakeet TDT running 100% offline on Apple Neural Engine (~120 MB RAM, instant load, beats Whisper Large v3)."
             case .appleSpeech:
                 return "Zero-download built-in iOS speech with live captions and cloud/offline fallback."
             }
         }
     }
 
-    public enum WhisperPreset: String, CaseIterable, Identifiable, Codable, Sendable {
-        case largeV3Turbo = "openai_whisper-large-v3-v20240930_626MB"
-        case largeV3TurboCompact = "openai_whisper-large-v3-v20240930_547MB"
-        case smallEn = "openai_whisper-small.en_217MB"
+    public enum ParakeetPreset: String, CaseIterable, Identifiable, Codable, Sendable {
+        case v2 = "parakeet-tdt-0.6b-v2"
+        case v3 = "parakeet-tdt-0.6b-v3"
+        case compact110m = "parakeet-tdt-ctc-110m"
 
         public var id: String { rawValue }
 
-        public var variantGlob: String {
-            switch self {
-            case .largeV3Turbo: return "large-v3-v20240930_626MB"
-            case .largeV3TurboCompact: return "large-v3-v20240930_547MB"
-            case .smallEn: return "small.en_217MB"
-            }
-        }
-
         public var displayName: String {
             switch self {
-            case .largeV3Turbo: return "Whisper Large v3 Turbo"
-            case .largeV3TurboCompact: return "Whisper Large v3 Compact"
-            case .smallEn: return "Whisper Small (English)"
+            case .v2: return "Parakeet TDT v2 (English)"
+            case .v3: return "Parakeet TDT v3 (Multilingual)"
+            case .compact110m: return "Parakeet Compact 110M"
             }
         }
 
         public var shortDisplayName: String {
             switch self {
-            case .largeV3Turbo: return "Whisper Large v3"
-            case .largeV3TurboCompact: return "Whisper Large 547MB"
-            case .smallEn: return "Whisper Small"
+            case .v2: return "Parakeet v2"
+            case .v3: return "Parakeet v3"
+            case .compact110m: return "Parakeet 110M"
             }
         }
 
         public var subtitle: String {
             switch self {
-            case .largeV3Turbo:
-                return "Best accuracy for loud gyms & global accents (8 GB+ iPhone recommended)"
-            case .largeV3TurboCompact:
-                return "Same Large v3 Turbo accuracy with ~80 MB lighter RAM (great for 6 GB iPhones)"
-            case .smallEn:
-                return "Fastest load & ultra-low RAM (recommended on 4 GB / older iPhones)"
+            case .v2:
+                return "Highest English accuracy (2.1% WER) · ~110 MB RAM · ~4s setup"
+            case .v3:
+                return "English + 24 European languages (2.27% WER) · ~120 MB RAM"
+            case .compact110m:
+                return "Ultra-light 110M model · ~70 MB RAM · smallest download"
             }
         }
 
         public var approximateSizeMB: Int {
             switch self {
-            case .largeV3Turbo: return 626
-            case .largeV3TurboCompact: return 547
-            case .smallEn: return 217
+            case .v2: return 476
+            case .v3: return 480
+            case .compact110m: return 130
             }
         }
 
-        public var isLargeModel: Bool {
+        var asrModelVersion: AsrModelVersion {
             switch self {
-            case .largeV3Turbo, .largeV3TurboCompact: return true
-            case .smallEn: return false
+            case .v2: return .v2
+            case .v3: return .v3
+            case .compact110m: return .tdtCtc110m
             }
         }
 
-        public var languageCode: String? {
-            "en"
-        }
-
-        var whisperModelVariant: ModelVariant {
+        var expectedCompileComponentCount: Int {
             switch self {
-            case .largeV3Turbo, .largeV3TurboCompact: return .largev3
-            case .smallEn: return .smallEn
-            }
-        }
-
-        public var tokenizerRepoName: String {
-            switch self {
-            case .largeV3Turbo, .largeV3TurboCompact: return "openai/whisper-large-v3"
-            case .smallEn: return "openai/whisper-small.en"
+            case .compact110m: return 3
+            case .v2, .v3: return 4
             }
         }
     }
@@ -378,9 +358,7 @@ public final class ModelManager {
 
     private enum DefaultsKey {
         static let selectedSpeechEngine = "buddy.models.speechEngine"
-        static let selectedWhisperPreset = "buddy.models.selectedWhisperPreset"
-        static let whisperRelativePaths = "buddy.models.whisperRelativePaths"
-        static let prewarmedWhisperVariants = "buddy.models.prewarmedWhisperVariants"
+        static let selectedParakeetPreset = "buddy.models.selectedParakeetPreset"
         static let selectedAppleSpeechLocale = "buddy.models.appleSpeechLocale"
         static let selectedAppleSpeechMode = "buddy.models.appleSpeechMode"
         static let enableGymNoiseIsolation = "buddy.models.enableGymNoiseIsolation"
@@ -390,7 +368,7 @@ public final class ModelManager {
     }
 
     public let modelsRootDirectory: URL
-    public let whisperBaseDirectory: URL
+    public let parakeetBaseDirectory: URL
     public let llmBaseDirectory: URL
 
     @ObservationIgnored private var isInitializing: Bool = true
@@ -402,10 +380,10 @@ public final class ModelManager {
         }
     }
 
-    public var selectedWhisperPreset: WhisperPreset = .largeV3Turbo {
+    public var selectedParakeetPreset: ParakeetPreset = .v2 {
         didSet {
             guard !isInitializing else { return }
-            defaults.set(selectedWhisperPreset.rawValue, forKey: DefaultsKey.selectedWhisperPreset)
+            defaults.set(selectedParakeetPreset.rawValue, forKey: DefaultsKey.selectedParakeetPreset)
             refreshDownloadState()
         }
     }
@@ -465,98 +443,104 @@ public final class ModelManager {
         }
     }
 
-    public var whisperDownloadProgress: Double = 0
-    public var isDownloadingWhisper: Bool = false
-    public var isOptimizingWhisper: Bool = false
-    public var whisperDownloadStatusText: String = ""
-    public var isWhisperDownloaded: Bool = false
-    public var activeWhisperFolderURL: URL?
+    public var parakeetDownloadProgress: Double = 0
+    public var isDownloadingParakeet: Bool = false
+    public var parakeetDownloadStatusText: String = ""
+    public var isParakeetDownloaded: Bool = false
+    public var activeParakeetFolderURL: URL?
 
     public var llmDownloadProgress: Double = 0
     public var isDownloadingLLM: Bool = false
-    public var whisperError: String?
+    public var parakeetError: String?
     public var llmError: String?
 
     /// Combined error view for callers that display a single error banner.
     public var downloadError: String? {
-        whisperError ?? llmError
+        parakeetError ?? llmError
     }
 
     public var isLLMDownloaded: Bool = false
     public var activeLLMFileURL: URL?
     public var totalStorageUsedDescription: String = "0 MB"
 
-    /// Uses WhisperKit whenever it is selected AND its weights/tokenizer are present locally;
+    /// Uses Parakeet TDT whenever it is selected AND its CoreML weights + vocabulary are cached locally;
     /// otherwise falls back cleanly to Apple Speech so recording always works immediately.
     public var effectiveSpeechEngine: SpeechEngine {
-        if selectedSpeechEngine == .whisperKit && isWhisperDownloaded {
-            return .whisperKit
+        if selectedSpeechEngine == .parakeet && isParakeetDownloaded {
+            return .parakeet
         }
         return .appleSpeech
     }
 
     public let deviceRAMGB: Double
 
-    /// `true` on 4 GB RAM iPhones (e.g. iPhone 11/12/SE2/SE3) where SideStore's Jetsam ceiling
-    /// makes `Whisper Small (217 MB)` much safer than 547–626 MB Large v3 variants.
-    public var isLowRAMDeviceForLargeWhisper: Bool {
-        deviceRAMGB < 5.5
+    /// Real-time remaining iOS Jetsam memory budget in megabytes (`os_proc_available_memory()`).
+    /// Returns `nil` when unavailable (e.g., on Simulator when reported as 0).
+    public var availableMemoryMB: Int? {
+        #if os(iOS) && !targetEnvironment(simulator)
+        let bytes = os_proc_available_memory()
+        guard bytes > 0 else { return nil }
+        return Int(bytes / 1_048_576)
+        #else
+        return nil
+        #endif
     }
 
-    /// Selects a RAM-safe default Whisper preset for first-time setup on SideStore builds.
-    public nonisolated static func recommendedWhisperPreset(
+    /// Selects a RAM-safe default Parakeet preset for first-time setup on SideStore builds.
+    /// Parakeet TDT v2 uses only ~110 MB peak RAM (safe on all 4 GB+ iPhones).
+    public nonisolated static func recommendedParakeetPreset(
         forPhysicalMemoryBytes bytes: UInt64 = ProcessInfo.processInfo.physicalMemory
-    ) -> WhisperPreset {
+    ) -> ParakeetPreset {
         let gb = Double(bytes) / 1_073_741_824.0
-        if gb < 5.5 {
-            return .smallEn
+        if gb < 3.5 {
+            return .compact110m
         }
-        if gb < 7.5 {
-            return .largeV3TurboCompact
-        }
-        return .largeV3Turbo
+        return .v2
     }
 
-    /// Returns `true` when either WhisperKit or Apple Speech is ready AND the local LLM is downloaded.
+    /// Returns `true` when either Parakeet or Apple Speech is ready AND the local LLM is downloaded.
     public func isAllReady(appleSpeechReady: Bool) -> Bool {
-        let voiceReady = (effectiveSpeechEngine == .whisperKit) || appleSpeechReady
+        let voiceReady = (effectiveSpeechEngine == .parakeet) || appleSpeechReady
         return voiceReady && isLLMDownloaded
     }
 
     private let defaults: UserDefaults
-    private let currentOSBuildMarker: String
-    @ObservationIgnored private var activeWhisperDownloadTask: Task<Void, Never>?
-    @ObservationIgnored private var activeWhisperDownloadID: UUID?
-    @ObservationIgnored private var whisperBackgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+    @ObservationIgnored private var activeParakeetDownloadTask: Task<Void, Never>?
+    @ObservationIgnored private var activeParakeetDownloadID: UUID?
+    @ObservationIgnored private var parakeetCompiledComponents: Set<String> = []
+    @ObservationIgnored private var parakeetBackgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     @ObservationIgnored private var activeLLMDownloadSession: URLSession?
     @ObservationIgnored private var activeLLMDownloadTask: URLSessionDownloadTask?
     @ObservationIgnored private var activeLLMDownloadID: UUID?
 
     public init(
         defaults: UserDefaults = .standard,
-        osBuildMarker: String = ProcessInfo.processInfo.operatingSystemVersionString,
         physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
     ) {
         self.defaults = defaults
-        self.currentOSBuildMarker = osBuildMarker
         self.deviceRAMGB = Double(physicalMemoryBytes) / 1_073_741_824.0
 
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         self.modelsRootDirectory = appSupport.appendingPathComponent("BuddyModels", isDirectory: true)
-        self.whisperBaseDirectory = modelsRootDirectory.appendingPathComponent("Whisper", isDirectory: true)
+        self.parakeetBaseDirectory = MLModelConfigurationUtils.defaultModelsDirectory(for: nil)
         self.llmBaseDirectory = modelsRootDirectory.appendingPathComponent("LLM", isDirectory: true)
 
-        if let storedEngine = defaults.string(forKey: DefaultsKey.selectedSpeechEngine),
-           let parsedEngine = SpeechEngine(rawValue: storedEngine) {
-            self.selectedSpeechEngine = parsedEngine
+        if let storedEngine = defaults.string(forKey: DefaultsKey.selectedSpeechEngine) {
+            if let parsedEngine = SpeechEngine(rawValue: storedEngine) {
+                self.selectedSpeechEngine = parsedEngine
+            } else {
+                // Migrate legacy `"whisperkit"` setting cleanly to `.appleSpeech` until Parakeet is downloaded.
+                self.selectedSpeechEngine = .appleSpeech
+                defaults.set(SpeechEngine.appleSpeech.rawValue, forKey: DefaultsKey.selectedSpeechEngine)
+            }
         }
 
-        if let storedWhisper = defaults.string(forKey: DefaultsKey.selectedWhisperPreset),
-           let parsedWhisper = WhisperPreset(rawValue: storedWhisper) {
-            self.selectedWhisperPreset = parsedWhisper
+        if let storedParakeet = defaults.string(forKey: DefaultsKey.selectedParakeetPreset),
+           let parsedParakeet = ParakeetPreset(rawValue: storedParakeet) {
+            self.selectedParakeetPreset = parsedParakeet
         } else {
-            self.selectedWhisperPreset = Self.recommendedWhisperPreset(forPhysicalMemoryBytes: physicalMemoryBytes)
+            self.selectedParakeetPreset = Self.recommendedParakeetPreset(forPhysicalMemoryBytes: physicalMemoryBytes)
         }
 
         if let storedLocale = defaults.string(forKey: DefaultsKey.selectedAppleSpeechLocale),
@@ -586,207 +570,127 @@ public final class ModelManager {
         self.isInitializing = false
 
         ensureModelDirectories()
+        cleanupLegacyWhisperCacheIfPresent()
         refreshDownloadState()
     }
 
-    public func isDownloaded(_ preset: WhisperPreset) -> Bool {
-        resolvedWhisperFolderURL(for: preset) != nil
+    public func isDownloaded(_ preset: ParakeetPreset) -> Bool {
+        resolvedParakeetFolderURL(for: preset) != nil
     }
 
     public func isDownloaded(_ preset: LLMPreset) -> Bool {
         resolvedLLMFileURL(for: preset) != nil
     }
 
-    /// Tracks whether CoreML ANE specialization already completed for `preset` on the current iOS version.
-    public func isPrewarmed(_ preset: WhisperPreset) -> Bool {
-        let map = defaults.dictionary(forKey: DefaultsKey.prewarmedWhisperVariants) as? [String: String] ?? [:]
-        return map[preset.rawValue] == currentOSBuildMarker
-    }
-
-    public func markPrewarmed(_ preset: WhisperPreset) {
-        var map = defaults.dictionary(forKey: DefaultsKey.prewarmedWhisperVariants) as? [String: String] ?? [:]
-        map[preset.rawValue] = currentOSBuildMarker
-        defaults.set(map, forKey: DefaultsKey.prewarmedWhisperVariants)
-    }
-
-    public func clearPrewarmed(_ preset: WhisperPreset) {
-        var map = defaults.dictionary(forKey: DefaultsKey.prewarmedWhisperVariants) as? [String: String] ?? [:]
-        map.removeValue(forKey: preset.rawValue)
-        defaults.set(map, forKey: DefaultsKey.prewarmedWhisperVariants)
-    }
-
-    /// Downloads the WhisperKit CoreML model + offline tokenizer, then optionally runs a one-time
-    /// sequential Neural Engine prewarm so the first gym mic tap is fast and memory-safe.
-    public func downloadWhisperModel(
-        _ preset: WhisperPreset? = nil,
-        onOptimizeModel: (@MainActor (WhisperPreset) async throws -> Void)? = nil
+    /// Downloads the Parakeet TDT CoreML bundle + vocabulary and warms the ~4-second Neural Engine
+    /// compilation in one lightweight step (~100–130 MB RAM, SideStore safe).
+    public func downloadParakeetModel(
+        _ preset: ParakeetPreset? = nil,
+        onBeforeDownload: (@MainActor () async -> Void)? = nil
     ) async {
-        guard !isDownloadingWhisper && !isOptimizingWhisper else { return }
+        guard !isDownloadingParakeet else { return }
 
-        let targetPreset = preset ?? selectedWhisperPreset
-        if selectedWhisperPreset != targetPreset {
-            selectedWhisperPreset = targetPreset
+        let targetPreset = preset ?? selectedParakeetPreset
+        if selectedParakeetPreset != targetPreset {
+            selectedParakeetPreset = targetPreset
         }
 
         ensureModelDirectories()
         let downloadID = UUID()
-        activeWhisperDownloadID = downloadID
-        isDownloadingWhisper = true
-        isOptimizingWhisper = false
-        whisperDownloadProgress = 0
-        whisperDownloadStatusText = "Downloading \(targetPreset.shortDisplayName)…"
-        whisperError = nil
+        activeParakeetDownloadID = downloadID
+        parakeetCompiledComponents.removeAll()
+        isDownloadingParakeet = true
+        parakeetDownloadProgress = 0
+        parakeetDownloadStatusText = "Preparing \(targetPreset.shortDisplayName)…"
+        parakeetError = nil
 
-        beginWhisperBackgroundTask(forDownloadID: downloadID)
+        beginParakeetBackgroundTask(forDownloadID: downloadID)
 
         let task = Task<Void, Never> { @MainActor [weak self] in
             guard let self else { return }
             defer {
-                if self.activeWhisperDownloadID == downloadID {
-                    self.isDownloadingWhisper = false
-                    self.isOptimizingWhisper = false
-                    self.activeWhisperDownloadTask = nil
-                    self.activeWhisperDownloadID = nil
-                    self.endWhisperBackgroundTask()
+                if self.activeParakeetDownloadID == downloadID {
+                    self.isDownloadingParakeet = false
+                    self.activeParakeetDownloadTask = nil
+                    self.activeParakeetDownloadID = nil
+                    self.parakeetCompiledComponents.removeAll()
+                    self.endParakeetBackgroundTask()
                 }
             }
 
             do {
-                let folderURL: URL
-                do {
-                    folderURL = try await WhisperKit.download(
-                        variant: targetPreset.rawValue,
-                        downloadBase: self.whisperBaseDirectory,
-                        useBackgroundSession: false,
-                        from: "argmaxinc/whisperkit-coreml"
-                    ) { [weak self] progress in
-                        let fraction = min(0.88, max(0.0, progress.fractionCompleted * 0.88))
-                        Task { @MainActor [weak self] in
-                            guard let self, self.activeWhisperDownloadID == downloadID else { return }
-                            self.whisperDownloadProgress = fraction
-                        }
-                    }
-                } catch {
-                    if Self.isCancellationError(error) || Task.isCancelled || self.activeWhisperDownloadID != downloadID {
-                        throw CancellationError()
-                    }
-                    // Fallback to shorter glob if upstream folder naming changes.
-                    folderURL = try await WhisperKit.download(
-                        variant: targetPreset.variantGlob,
-                        downloadBase: self.whisperBaseDirectory,
-                        useBackgroundSession: false,
-                        from: "argmaxinc/whisperkit-coreml"
-                    ) { [weak self] progress in
-                        let fraction = min(0.88, max(0.0, progress.fractionCompleted * 0.88))
-                        Task { @MainActor [weak self] in
-                            guard let self, self.activeWhisperDownloadID == downloadID else { return }
-                            self.whisperDownloadProgress = fraction
-                        }
-                    }
-                }
-
-                guard self.activeWhisperDownloadID == downloadID, !Task.isCancelled else {
+                // Free any resident LLM before downloading/compiling so SideStore keeps maximum RAM headroom.
+                await onBeforeDownload?()
+                guard self.activeParakeetDownloadID == downloadID, !Task.isCancelled else {
                     throw CancellationError()
                 }
 
-                // Pre-cache tokenizer + config files while online so Airplane Mode works 100% offline.
-                self.whisperDownloadProgress = 0.90
-                self.whisperDownloadStatusText = "Caching offline tokenizer…"
-                _ = try await ModelUtilities.loadTokenizer(
-                    for: targetPreset.whisperModelVariant,
-                    tokenizerFolder: self.whisperBaseDirectory,
-                    additionalSearchPaths: [folderURL]
+                let version = targetPreset.asrModelVersion
+                let downloadedDir = try await AsrModels.download(
+                    to: nil,
+                    force: false,
+                    version: version,
+                    progressHandler: { [weak self] progress in
+                        Task { @MainActor [weak self] in
+                            guard let self, self.activeParakeetDownloadID == downloadID else { return }
+                            self.applyParakeetDownloadProgress(progress, preset: targetPreset)
+                        }
+                    }
                 )
 
-                guard self.activeWhisperDownloadID == downloadID, !Task.isCancelled else {
+                guard self.activeParakeetDownloadID == downloadID, !Task.isCancelled else {
                     throw CancellationError()
                 }
 
-                guard self.hasCachedTokenizer(for: targetPreset, modelFolder: folderURL) else {
-                    throw ModelManagerError.whisperTokenizerMissing(
-                        "Whisper tokenizer files were not cached locally. Check your Wi-Fi connection and retry."
-                    )
-                }
-
-                self.excludeFromBackup(self.whisperBaseDirectory)
-                self.excludeFromBackup(folderURL)
-                self.saveWhisperRelativePath(for: targetPreset, folderURL: folderURL)
-                self.clearPrewarmed(targetPreset)
-                self.refreshDownloadState()
-
-                // One-time sequential ANE specialization while still in Settings so the first gym
-                // recording responds cleanly without a long compile pause or peak-RAM spike.
-                if let onOptimizeModel {
-                    self.isDownloadingWhisper = false
-                    self.isOptimizingWhisper = true
-                    self.whisperDownloadProgress = 0.94
-                    self.whisperDownloadStatusText = "Optimizing for Neural Engine (one-time)…"
-                    do {
-                        try await onOptimizeModel(targetPreset)
-                    } catch {
-                        if Self.isCancellationError(error) || Task.isCancelled || self.activeWhisperDownloadID != downloadID {
-                            throw CancellationError()
-                        }
-                        // Model weights are downloaded cleanly; surface optimization warning without failing download.
-                        self.whisperError = "Model downloaded, but Neural Engine pre-optimization paused: \(error.localizedDescription)"
-                    }
-                }
-
-                guard self.activeWhisperDownloadID == downloadID, !Task.isCancelled else {
-                    throw CancellationError()
-                }
-
-                self.whisperDownloadProgress = 1.0
-                self.whisperDownloadStatusText = ""
-                self.selectedSpeechEngine = .whisperKit
+                self.excludeFromBackup(self.parakeetBaseDirectory)
+                self.excludeFromBackup(downloadedDir)
+                self.parakeetDownloadProgress = 1.0
+                self.parakeetDownloadStatusText = ""
+                self.selectedSpeechEngine = .parakeet
                 self.refreshDownloadState()
             } catch {
-                guard self.activeWhisperDownloadID == downloadID else { return }
+                guard self.activeParakeetDownloadID == downloadID else { return }
                 if Self.isCancellationError(error) || Task.isCancelled {
-                    self.whisperDownloadProgress = 0
-                    self.whisperDownloadStatusText = ""
+                    self.parakeetDownloadProgress = 0
+                    self.parakeetDownloadStatusText = ""
                     self.refreshDownloadState()
                 } else {
-                    self.whisperError = "Whisper download failed: \(error.localizedDescription)"
-                    self.whisperDownloadProgress = 0
-                    self.whisperDownloadStatusText = ""
+                    self.parakeetError = "Parakeet download failed: \(error.localizedDescription)"
+                    self.parakeetDownloadProgress = 0
+                    self.parakeetDownloadStatusText = ""
                     self.refreshDownloadState()
                 }
             }
         }
 
-        activeWhisperDownloadTask = task
+        activeParakeetDownloadTask = task
         await task.value
     }
 
-    public func cancelWhisperDownload() {
-        let taskToCancel = activeWhisperDownloadTask
-        activeWhisperDownloadID = nil
-        activeWhisperDownloadTask = nil
-        isDownloadingWhisper = false
-        isOptimizingWhisper = false
-        whisperDownloadProgress = 0
-        whisperDownloadStatusText = ""
+    public func cancelParakeetDownload() {
+        let taskToCancel = activeParakeetDownloadTask
+        activeParakeetDownloadID = nil
+        activeParakeetDownloadTask = nil
+        parakeetCompiledComponents.removeAll()
+        isDownloadingParakeet = false
+        parakeetDownloadProgress = 0
+        parakeetDownloadStatusText = ""
         taskToCancel?.cancel()
-        endWhisperBackgroundTask()
-        cleanupIncompleteWhisperCache()
+        endParakeetBackgroundTask()
         refreshDownloadState()
     }
 
-    public func deleteWhisperModel(_ preset: WhisperPreset? = nil) {
-        let targetPreset = preset ?? selectedWhisperPreset
-        if let folderURL = resolvedWhisperFolderURL(for: targetPreset) {
-            try? FileManager.default.removeItem(at: folderURL)
+    public func deleteParakeetModel(_ preset: ParakeetPreset? = nil) {
+        let targetPreset = preset ?? selectedParakeetPreset
+        let cacheDir = AsrModels.defaultCacheDirectory(for: targetPreset.asrModelVersion)
+        if FileManager.default.fileExists(atPath: cacheDir.path) {
+            try? FileManager.default.removeItem(at: cacheDir)
         }
-        removeWhisperRelativePath(for: targetPreset)
-        clearPrewarmed(targetPreset)
-        cleanupIncompleteWhisperCache()
-        cleanupOrphanedTokenizer(for: targetPreset)
-        whisperDownloadProgress = 0
-        whisperDownloadStatusText = ""
-        whisperError = nil
+        parakeetDownloadProgress = 0
+        parakeetDownloadStatusText = ""
+        parakeetError = nil
         refreshDownloadState()
-        if selectedSpeechEngine == .whisperKit && !isWhisperDownloaded {
+        if selectedSpeechEngine == .parakeet && !isParakeetDownloaded {
             selectedSpeechEngine = .appleSpeech
         }
     }
@@ -954,63 +858,26 @@ public final class ModelManager {
     }
 
     public func refreshDownloadState() {
-        let whisperFolder = resolvedWhisperFolderURL(for: selectedWhisperPreset)
-        activeWhisperFolderURL = whisperFolder
-        isWhisperDownloaded = (whisperFolder != nil)
+        let parakeetFolder = resolvedParakeetFolderURL(for: selectedParakeetPreset)
+        activeParakeetFolderURL = parakeetFolder
+        isParakeetDownloaded = (parakeetFolder != nil)
 
         let llmFile = resolvedLLMFileURL(for: selectedLLMPreset)
         activeLLMFileURL = llmFile
         isLLMDownloaded = (llmFile != nil)
 
-        totalStorageUsedDescription = Self.formattedDirectorySize(at: modelsRootDirectory)
+        totalStorageUsedDescription = Self.formattedTotalStorageUsed(
+            directories: [modelsRootDirectory, parakeetBaseDirectory]
+        )
     }
 
-    public func resolvedWhisperFolderURL(for preset: WhisperPreset) -> URL? {
-        let fileManager = FileManager.default
-
-        // 1. Check persisted relative path under Whisper base directory.
-        if let stored = defaults.dictionary(forKey: DefaultsKey.whisperRelativePaths) as? [String: String],
-           let relative = stored[preset.rawValue], !relative.isEmpty {
-            let candidate = whisperBaseDirectory.appendingPathComponent(relative, isDirectory: true)
-            if Self.isValidWhisperFolder(candidate) && hasCachedTokenizer(for: preset, modelFolder: candidate) {
-                return candidate
-            }
-        }
-
-        // 2. Check standard HuggingFace Hub cache structure created by WhisperKit.download.
-        let standardCandidates: [URL] = [
-            whisperBaseDirectory
-                .appendingPathComponent("models", isDirectory: true)
-                .appendingPathComponent("argmaxinc", isDirectory: true)
-                .appendingPathComponent("whisperkit-coreml", isDirectory: true)
-                .appendingPathComponent(preset.rawValue, isDirectory: true),
-            whisperBaseDirectory.appendingPathComponent(preset.rawValue, isDirectory: true)
-        ]
-
-        for candidate in standardCandidates where Self.isValidWhisperFolder(candidate) && hasCachedTokenizer(for: preset, modelFolder: candidate) {
-            return candidate
-        }
-
-        // 3. Fallback scan inside Whisper base directory.
-        guard let enumerator = fileManager.enumerator(
-            at: whisperBaseDirectory,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        ) else {
+    public func resolvedParakeetFolderURL(for preset: ParakeetPreset) -> URL? {
+        let version = preset.asrModelVersion
+        let cacheDir = AsrModels.defaultCacheDirectory(for: version)
+        guard AsrModels.modelsExist(at: cacheDir, version: version) else {
             return nil
         }
-
-        for case let url as URL in enumerator {
-            let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-            guard isDir else { continue }
-            if url.lastPathComponent == preset.rawValue
-                && Self.isValidWhisperFolder(url)
-                && hasCachedTokenizer(for: preset, modelFolder: url) {
-                return url
-            }
-        }
-
-        return nil
+        return cacheDir
     }
 
     // MARK: - Private Filesystem & Persistence Helpers
@@ -1019,20 +886,52 @@ public final class ModelManager {
         llmBaseDirectory.appendingPathComponent("Custom", isDirectory: true)
     }
 
-    private func beginWhisperBackgroundTask(forDownloadID downloadID: UUID) {
-        endWhisperBackgroundTask()
-        whisperBackgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "BuddyWhisperDownload") { [weak self] in
+    private func applyParakeetDownloadProgress(_ progress: DownloadProgress, preset: ParakeetPreset) {
+        let totalSpecs = max(1, preset.expectedCompileComponentCount)
+        let slice = 0.94 / Double(totalSpecs)
+
+        switch progress.phase {
+        case .listing:
+            let completedSpecs = min(parakeetCompiledComponents.count, totalSpecs - 1)
+            let mapped = 0.02 + Double(completedSpecs) * slice
+            parakeetDownloadProgress = max(parakeetDownloadProgress, min(0.98, mapped))
+            parakeetDownloadStatusText = "Checking \(preset.shortDisplayName) (\(completedSpecs + 1)/\(totalSpecs))…"
+
+        case .downloading(let completedFiles, let totalFiles):
+            let completedSpecs = min(parakeetCompiledComponents.count, totalSpecs - 1)
+            let subFraction = min(max(progress.fractionCompleted, 0), 1) * 0.85
+            let mapped = 0.02 + (Double(completedSpecs) + subFraction) * slice
+            parakeetDownloadProgress = max(parakeetDownloadProgress, min(0.98, mapped))
+            if totalFiles > 0 {
+                parakeetDownloadStatusText = "Downloading \(preset.shortDisplayName) (\(completedSpecs + 1)/\(totalSpecs) · \(min(completedFiles, totalFiles))/\(totalFiles))…"
+            } else {
+                parakeetDownloadStatusText = "Downloading \(preset.shortDisplayName) (\(completedSpecs + 1)/\(totalSpecs))…"
+            }
+
+        case .compiling(let modelName):
+            let cleanName = modelName.replacingOccurrences(of: ".mlmodelc", with: "")
+            parakeetCompiledComponents.insert(cleanName)
+            let compiledCount = min(parakeetCompiledComponents.count, totalSpecs)
+            let mapped = 0.02 + Double(compiledCount) * slice
+            parakeetDownloadProgress = max(parakeetDownloadProgress, min(0.98, mapped))
+            parakeetDownloadStatusText = "Warming Neural Engine (\(cleanName) · \(compiledCount)/\(totalSpecs))…"
+        }
+    }
+
+    private func beginParakeetBackgroundTask(forDownloadID downloadID: UUID) {
+        endParakeetBackgroundTask()
+        parakeetBackgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "BuddyParakeetDownload") { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self, self.activeWhisperDownloadID == downloadID else { return }
-                self.endWhisperBackgroundTask()
+                guard let self, self.activeParakeetDownloadID == downloadID else { return }
+                self.endParakeetBackgroundTask()
             }
         }
     }
 
-    private func endWhisperBackgroundTask() {
-        let taskID = whisperBackgroundTaskID
+    private func endParakeetBackgroundTask() {
+        let taskID = parakeetBackgroundTaskID
         guard taskID != .invalid else { return }
-        whisperBackgroundTaskID = .invalid
+        parakeetBackgroundTaskID = .invalid
         UIApplication.shared.endBackgroundTask(taskID)
     }
 
@@ -1045,11 +944,27 @@ public final class ModelManager {
 
     private func ensureModelDirectories() {
         let fileManager = FileManager.default
-        for directory in [modelsRootDirectory, whisperBaseDirectory, llmBaseDirectory, customLLMDirectory] {
+        for directory in [modelsRootDirectory, parakeetBaseDirectory, llmBaseDirectory, customLLMDirectory] {
             if !fileManager.fileExists(atPath: directory.path) {
                 try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
             }
             excludeFromBackup(directory)
+        }
+    }
+
+    /// Reclaims disk space (~626 MB) left behind by earlier WhisperKit builds when upgrading to Parakeet.
+    private func cleanupLegacyWhisperCacheIfPresent() {
+        let legacyWhisperDir = modelsRootDirectory.appendingPathComponent("Whisper", isDirectory: true)
+        if FileManager.default.fileExists(atPath: legacyWhisperDir.path) {
+            try? FileManager.default.removeItem(at: legacyWhisperDir)
+        }
+        for legacyKey in [
+            "buddy.models.selectedWhisperPreset",
+            "buddy.models.whisperRelativePaths",
+            "buddy.models.prewarmedWhisperPresets",
+            "buddy.models.prewarmOSBuild"
+        ] {
+            defaults.removeObject(forKey: legacyKey)
         }
     }
 
@@ -1058,93 +973,6 @@ public final class ModelManager {
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
         try? mutableURL.setResourceValues(values)
-    }
-
-    private func saveWhisperRelativePath(for preset: WhisperPreset, folderURL: URL) {
-        var stored = defaults.dictionary(forKey: DefaultsKey.whisperRelativePaths) as? [String: String] ?? [:]
-        let basePath = whisperBaseDirectory.standardizedFileURL.path
-        let folderPath = folderURL.standardizedFileURL.path
-        if folderPath.hasPrefix(basePath) {
-            let relative = String(folderPath.dropFirst(basePath.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            stored[preset.rawValue] = relative
-        } else {
-            stored[preset.rawValue] = folderURL.lastPathComponent
-        }
-        defaults.set(stored, forKey: DefaultsKey.whisperRelativePaths)
-    }
-
-    private func removeWhisperRelativePath(for preset: WhisperPreset) {
-        var stored = defaults.dictionary(forKey: DefaultsKey.whisperRelativePaths) as? [String: String] ?? [:]
-        stored.removeValue(forKey: preset.rawValue)
-        defaults.set(stored, forKey: DefaultsKey.whisperRelativePaths)
-    }
-
-    /// Verifies BOTH `tokenizer.json` and `tokenizer_config.json` exist locally (both are required
-    /// by `AutoTokenizer.from(modelFolder:)` for 100% offline Airplane Mode loading).
-    private func hasCachedTokenizer(for preset: WhisperPreset, modelFolder: URL) -> Bool {
-        let fileManager = FileManager.default
-        let tokenizerRepoName = preset.tokenizerRepoName
-        let candidateFolders: [URL] = [
-            whisperBaseDirectory
-                .appendingPathComponent("models", isDirectory: true)
-                .appendingPathComponent(tokenizerRepoName, isDirectory: true),
-            modelFolder
-        ]
-        return candidateFolders.contains { folder in
-            let tokenizerFile = folder.appendingPathComponent("tokenizer.json", isDirectory: false)
-            let configFile = folder.appendingPathComponent("tokenizer_config.json", isDirectory: false)
-            return fileManager.fileExists(atPath: tokenizerFile.path)
-                && fileManager.fileExists(atPath: configFile.path)
-        }
-    }
-
-    /// Sweeps partial `.incomplete` Hub download cache files so cancelled or deleted downloads
-    /// never bloat `BuddyModels/Whisper` storage.
-    private func cleanupIncompleteWhisperCache() {
-        let fileManager = FileManager.default
-        let hubCacheDir = whisperBaseDirectory
-            .appendingPathComponent("models", isDirectory: true)
-            .appendingPathComponent("argmaxinc", isDirectory: true)
-            .appendingPathComponent("whisperkit-coreml", isDirectory: true)
-            .appendingPathComponent(".cache", isDirectory: true)
-
-        guard fileManager.fileExists(atPath: hubCacheDir.path),
-              let enumerator = fileManager.enumerator(at: hubCacheDir, includingPropertiesForKeys: nil) else {
-            return
-        }
-
-        for case let fileURL as URL in enumerator where fileURL.pathExtension == "incomplete" {
-            try? fileManager.removeItem(at: fileURL)
-        }
-    }
-
-    /// Removes the cached HuggingFace tokenizer folder if no other installed Whisper preset needs it.
-    private func cleanupOrphanedTokenizer(for deletedPreset: WhisperPreset) {
-        let repoName = deletedPreset.tokenizerRepoName
-        let stillNeeded = WhisperPreset.allCases.contains { other in
-            other != deletedPreset && other.tokenizerRepoName == repoName && isDownloaded(other)
-        }
-        guard !stillNeeded else { return }
-
-        let tokenizerFolder = whisperBaseDirectory
-            .appendingPathComponent("models", isDirectory: true)
-            .appendingPathComponent(repoName, isDirectory: true)
-        try? FileManager.default.removeItem(at: tokenizerFolder)
-    }
-
-    private static func isValidWhisperFolder(_ url: URL) -> Bool {
-        let fileManager = FileManager.default
-        var isDir: ObjCBool = false
-        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
-            return false
-        }
-        let hasMel = fileManager.fileExists(atPath: url.appendingPathComponent("MelSpectrogram.mlmodelc").path)
-            || fileManager.fileExists(atPath: url.appendingPathComponent("MelSpectrogram.mlpackage").path)
-        let hasEncoder = fileManager.fileExists(atPath: url.appendingPathComponent("AudioEncoder.mlmodelc").path)
-            || fileManager.fileExists(atPath: url.appendingPathComponent("AudioEncoder.mlpackage").path)
-        let hasDecoder = fileManager.fileExists(atPath: url.appendingPathComponent("TextDecoder.mlmodelc").path)
-            || fileManager.fileExists(atPath: url.appendingPathComponent("TextDecoder.mlpackage").path)
-        return hasMel && hasEncoder && hasDecoder
     }
 
     private func resolvedLLMFileURL(for preset: LLMPreset) -> URL? {
@@ -1170,24 +998,31 @@ public final class ModelManager {
         return candidate
     }
 
-    private static func formattedDirectorySize(at directory: URL) -> String {
+    private static func formattedTotalStorageUsed(directories: [URL]) -> String {
         let fileManager = FileManager.default
-        guard let enumerator = fileManager.enumerator(
-            at: directory,
-            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            return "0 MB"
-        }
-
+        var seenPaths: Set<String> = []
         var totalBytes: Int64 = 0
-        for case let fileURL as URL in enumerator {
-            guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
-                  values.isRegularFile == true,
-                  let size = values.fileSize else {
+
+        for directory in directories {
+            let standardized = directory.standardizedFileURL.path
+            guard seenPaths.insert(standardized).inserted,
+                  fileManager.fileExists(atPath: standardized),
+                  let enumerator = fileManager.enumerator(
+                      at: directory,
+                      includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+                      options: [.skipsHiddenFiles]
+                  ) else {
                 continue
             }
-            totalBytes += Int64(size)
+
+            for case let fileURL as URL in enumerator {
+                guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                      values.isRegularFile == true,
+                      let size = values.fileSize else {
+                    continue
+                }
+                totalBytes += Int64(size)
+            }
         }
 
         if totalBytes == 0 {

@@ -12,7 +12,7 @@ struct SettingsView: View {
     let store: WorkoutStore
     let modelManager: ModelManager
     let appleSpeechService: AppleSpeechService
-    let whisperService: WhisperTranscriptionService
+    let parakeetService: ParakeetTranscriptionService
     let llmService: LocalLLMService
     let cloudSync: FirebaseSyncService
 
@@ -293,7 +293,7 @@ struct SettingsView: View {
                         VoiceAndAISettingsView(
                             modelManager: modelManager,
                             appleSpeechService: appleSpeechService,
-                            whisperService: whisperService,
+                            parakeetService: parakeetService,
                             llmService: llmService
                         )
                     } label: {
@@ -406,14 +406,14 @@ struct SettingsView: View {
         let aiLabel = modelManager.isLLMDownloaded
             ? modelManager.selectedLLMPreset.displayName
             : "Instant Parser"
-        if modelManager.effectiveSpeechEngine == .whisperKit {
-            return "\(modelManager.selectedWhisperPreset.shortDisplayName) · \(aiLabel)"
+        if modelManager.effectiveSpeechEngine == .parakeet {
+            return "\(modelManager.selectedParakeetPreset.shortDisplayName) · \(aiLabel)"
         }
         return "Apple Speech (\(modelManager.selectedAppleSpeechMode.shortLabel)) · \(aiLabel)"
     }
 
     private var voiceAndAIRowDotColor: Color {
-        if modelManager.effectiveSpeechEngine == .whisperKit {
+        if modelManager.effectiveSpeechEngine == .parakeet {
             return BuddyTheme.emeraldLive
         }
         let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
@@ -453,15 +453,14 @@ struct SettingsView: View {
 private struct VoiceAndAISettingsView: View {
     let modelManager: ModelManager
     let appleSpeechService: AppleSpeechService
-    let whisperService: WhisperTranscriptionService
+    let parakeetService: ParakeetTranscriptionService
     let llmService: LocalLLMService
 
     @State private var showFileImporter: Bool = false
     @State private var importMessage: String?
     @State private var importIsError: Bool = false
-    @State private var manualOptimizeError: String?
 
-    private let whisperPresets: [WhisperPreset] = [.largeV3Turbo, .largeV3TurboCompact, .smallEn]
+    private let parakeetPresets: [ParakeetPreset] = [.v2, .v3, .compact110m]
     private let llmPresets: [LLMPreset] = [.qwen25_1_5B, .qwen25_0_5B, .custom]
 
     var body: some View {
@@ -490,9 +489,7 @@ private struct VoiceAndAISettingsView: View {
 
     private var speechCard: some View {
         let selectedEngine = modelManager.selectedSpeechEngine
-        let isWhisperBusy = modelManager.isDownloadingWhisper
-            || modelManager.isOptimizingWhisper
-            || whisperService.isPrewarming
+        let isParakeetBusy = modelManager.isDownloadingParakeet
 
         return NativeCard(padding: 15, cornerRadius: 14) {
             VStack(alignment: .leading, spacing: 12) {
@@ -502,7 +499,7 @@ private struct VoiceAndAISettingsView: View {
                     speechHeaderStatusPill
                 }
 
-                // Engine segmented toggle: WhisperKit (Local) vs Apple Speech
+                // Engine segmented toggle: Parakeet (Local) vs Apple Speech
                 HStack(spacing: 6) {
                     ForEach(SpeechEngine.allCases) { engine in
                         let selected = (selectedEngine == engine)
@@ -511,7 +508,7 @@ private struct VoiceAndAISettingsView: View {
                             modelManager.selectedSpeechEngine = engine
                             if engine == .appleSpeech {
                                 Task { @MainActor in
-                                    await whisperService.unloadAndWait()
+                                    await parakeetService.unloadAndWait()
                                 }
                             }
                         } label: {
@@ -536,8 +533,8 @@ private struct VoiceAndAISettingsView: View {
 
                 Divider().overlay(BuddyTheme.hairlineBorder)
 
-                if selectedEngine == .whisperKit {
-                    whisperModelSection(isBusy: isWhisperBusy)
+                if selectedEngine == .parakeet {
+                    parakeetModelSection(isBusy: isParakeetBusy)
                 } else {
                     appleSpeechSection
                 }
@@ -547,12 +544,9 @@ private struct VoiceAndAISettingsView: View {
 
     @ViewBuilder
     private var speechHeaderStatusPill: some View {
-        if modelManager.selectedSpeechEngine == .whisperKit {
-            if modelManager.isWhisperDownloaded {
-                statusDotPill(
-                    text: modelManager.isPrewarmed(modelManager.selectedWhisperPreset) ? "ANE Ready" : "Downloaded",
-                    color: BuddyTheme.emeraldLive
-                )
+        if modelManager.selectedSpeechEngine == .parakeet {
+            if modelManager.isParakeetDownloaded {
+                statusDotPill(text: "ANE Ready", color: BuddyTheme.emeraldLive)
             } else {
                 statusDotPill(text: "Download Needed", color: BuddyTheme.amberStreak)
             }
@@ -576,25 +570,23 @@ private struct VoiceAndAISettingsView: View {
     }
 
     @ViewBuilder
-    private func whisperModelSection(isBusy: Bool) -> some View {
-        let selectedPreset = modelManager.selectedWhisperPreset
-        let isDownloaded = modelManager.isWhisperDownloaded
-        let isPrewarmed = modelManager.isPrewarmed(selectedPreset)
+    private func parakeetModelSection(isBusy: Bool) -> some View {
+        let selectedPreset = modelManager.selectedParakeetPreset
+        let isDownloaded = modelManager.isParakeetDownloaded
 
         VStack(spacing: 8) {
-            ForEach(whisperPresets, id: \.self) { preset in
+            ForEach(parakeetPresets, id: \.self) { preset in
                 let isSelected = (selectedPreset == preset)
                 let presetDownloaded = modelManager.isDownloaded(preset)
                 Button {
                     guard !isBusy else { return }
                     BuddyHaptics.selection()
-                    manualOptimizeError = nil
-                    let changed = (modelManager.selectedWhisperPreset != preset)
-                    modelManager.selectedWhisperPreset = preset
+                    let changed = (modelManager.selectedParakeetPreset != preset)
+                    modelManager.selectedParakeetPreset = preset
                     modelManager.refreshDownloadState()
                     if changed {
                         Task { @MainActor in
-                            await whisperService.unloadAndWait()
+                            await parakeetService.unloadAndWait()
                         }
                     }
                 } label: {
@@ -647,76 +639,40 @@ private struct VoiceAndAISettingsView: View {
             }
         }
 
-        if modelManager.isLowRAMDeviceForLargeWhisper && selectedPreset.isLargeModel {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(BuddyTheme.amberStreak)
-                    .padding(.top, 1)
-                Text("This device has ~\(Int(modelManager.deviceRAMGB.rounded())) GB RAM. Whisper Small (217 MB) is recommended on SideStore builds to avoid iOS memory termination.")
-                    .font(.caption)
-                    .foregroundStyle(BuddyTheme.amberStreak)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(BuddyTheme.elevatedSurface)
-            )
-        }
-
         if isBusy {
-            let isStandalonePrewarm = whisperService.isPrewarming
-                && !modelManager.isDownloadingWhisper
-                && !modelManager.isOptimizingWhisper
-            let statusText: String = {
-                if !modelManager.whisperDownloadStatusText.isEmpty {
-                    return modelManager.whisperDownloadStatusText
-                }
-                if whisperService.isPrewarming {
-                    return "Optimizing \(selectedPreset.shortDisplayName) for Neural Engine (one-time)…"
-                }
-                return "Preparing \(selectedPreset.shortDisplayName)…"
-            }()
+            let statusText = modelManager.parakeetDownloadStatusText.isEmpty
+                ? "Preparing \(selectedPreset.shortDisplayName)…"
+                : modelManager.parakeetDownloadStatusText
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    if isStandalonePrewarm {
-                        ProgressView()
-                            .controlSize(.small)
-                            .tint(BuddyTheme.inkPrimary)
-                    }
                     Text(statusText)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(Color.primary)
+                        .lineLimit(1)
                     Spacer()
-                    if !isStandalonePrewarm {
-                        Text("\(Int((min(max(modelManager.whisperDownloadProgress, 0), 1) * 100).rounded()))%")
-                            .font(.caption.weight(.bold))
-                            .monospacedDigit()
-                            .foregroundStyle(Color.primary)
-                    }
+                    Text("\(Int((min(max(modelManager.parakeetDownloadProgress, 0), 1) * 100).rounded()))%")
+                        .font(.caption.weight(.bold))
+                        .monospacedDigit()
+                        .foregroundStyle(Color.primary)
                 }
 
-                if !isStandalonePrewarm {
-                    GeometryReader { proxy in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(BuddyTheme.elevatedSurface)
-                            Capsule()
-                                .fill(BuddyTheme.inkPrimary)
-                                .frame(width: max(8, proxy.size.width * min(max(modelManager.whisperDownloadProgress, 0), 1)))
-                        }
+                GeometryReader { proxy in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(BuddyTheme.elevatedSurface)
+                        Capsule()
+                            .fill(BuddyTheme.inkPrimary)
+                            .frame(width: max(8, proxy.size.width * min(max(modelManager.parakeetDownloadProgress, 0), 1)))
                     }
-                    .frame(height: 6)
                 }
+                .frame(height: 6)
 
                 Button {
                     BuddyHaptics.lightImpact()
-                    modelManager.cancelWhisperDownload()
-                    whisperService.cancelInFlightWork()
+                    modelManager.cancelParakeetDownload()
+                    parakeetService.cancelInFlightWork()
                 } label: {
-                    Text(modelManager.isDownloadingWhisper ? "Cancel Download" : "Cancel Optimization")
+                    Text("Cancel Download")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(BuddyTheme.destructive)
                         .frame(maxWidth: .infinity)
@@ -730,41 +686,17 @@ private struct VoiceAndAISettingsView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(BuddyTheme.emeraldLive)
-                    Text(isPrewarmed ? "Ready offline · Neural Engine cached" : "Ready offline")
+                    Text("Ready offline · Neural Engine")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(Color.primary)
                         .lineLimit(1)
                 }
                 Spacer()
-                if !isPrewarmed {
-                    Button {
-                        BuddyHaptics.lightImpact()
-                        manualOptimizeError = nil
-                        Task { @MainActor in
-                            do {
-                                try await whisperService.prewarmDownloadedModel(selectedPreset)
-                            } catch is CancellationError {
-                                // User cancelled optimization cleanly.
-                            } catch {
-                                manualOptimizeError = "Neural Engine optimization failed: \(error.localizedDescription)"
-                            }
-                        }
-                    } label: {
-                        Text("Optimize")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(Color.primary)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 7)
-                            .background(Capsule().fill(BuddyTheme.chipSurface))
-                    }
-                    .buttonStyle(.plain)
-                }
                 Button {
                     BuddyHaptics.warning()
-                    manualOptimizeError = nil
                     Task { @MainActor in
-                        await whisperService.unloadAndWait()
-                        modelManager.deleteWhisperModel(selectedPreset)
+                        await parakeetService.unloadAndWait()
+                        modelManager.deleteParakeetModel(selectedPreset)
                     }
                 } label: {
                     Text("Delete")
@@ -784,17 +716,16 @@ private struct VoiceAndAISettingsView: View {
         } else {
             Button {
                 BuddyHaptics.mediumImpact()
-                manualOptimizeError = nil
                 Task { @MainActor in
-                    await modelManager.downloadWhisperModel(selectedPreset) { downloadedPreset in
-                        try await whisperService.prewarmDownloadedModel(downloadedPreset)
+                    await modelManager.downloadParakeetModel(selectedPreset) {
+                        await llmService.unloadAndWait()
                     }
                 }
             } label: {
                 HStack(spacing: 7) {
                     Image(systemName: "arrow.down.circle.fill")
                         .font(.system(size: 14, weight: .bold))
-                    Text("Download & Optimize (\(formatSizeMB(selectedPreset.approximateSizeMB)))")
+                    Text("Download (\(formatSizeMB(selectedPreset.approximateSizeMB)))")
                         .font(.system(size: 13.5, weight: .bold))
                 }
                 .foregroundStyle(BuddyTheme.inkInverse)
@@ -805,14 +736,14 @@ private struct VoiceAndAISettingsView: View {
             .buttonStyle(.plain)
         }
 
-        if let error = modelManager.whisperError ?? manualOptimizeError {
+        if let error = modelManager.parakeetError {
             Text(error)
                 .font(.caption)
                 .foregroundStyle(BuddyTheme.destructive)
                 .fixedSize(horizontal: false, vertical: true)
         }
 
-        Text("Memory-Safe Mode: Buddy automatically swaps Whisper & Qwen so only one model uses RAM at a time, and uses Instant Parser for clean sets to keep Whisper fast.")
+        Text("Memory-Safe Mode: Parakeet runs in ~110–120 MB on the Neural Engine (SideStore safe) and swaps cleanly with Qwen so only one model uses RAM at a time.")
             .font(.caption)
             .foregroundStyle(BuddyTheme.mutedText)
             .fixedSize(horizontal: false, vertical: true)
@@ -931,7 +862,7 @@ private struct VoiceAndAISettingsView: View {
                         Text("Gym Noise Isolation")
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(Color.primary)
-                        Text("Apple hardware voice processing suppresses loud gym music and clanks for both WhisperKit and Apple Speech.")
+                        Text("Apple hardware voice processing suppresses loud gym music and clanks for both Parakeet and Apple Speech.")
                             .font(.caption)
                             .foregroundStyle(BuddyTheme.mutedText)
                             .fixedSize(horizontal: false, vertical: true)
@@ -1159,7 +1090,7 @@ private struct VoiceAndAISettingsView: View {
                         .foregroundStyle(importIsError ? BuddyTheme.destructive : BuddyTheme.emeraldLive)
                 }
 
-                Text("Buddy uses the zero-latency Instant Parser automatically whenever no LLM is downloaded or when WhisperKit outputs a clean workout log.")
+                Text("Buddy uses the zero-latency Instant Parser automatically whenever no LLM is downloaded or when Parakeet outputs a clean workout log.")
                     .font(.caption)
                     .foregroundStyle(BuddyTheme.mutedText)
             }
@@ -1167,26 +1098,26 @@ private struct VoiceAndAISettingsView: View {
     }
 
     private var runtimeCard: some View {
-        let usingWhisper = (modelManager.effectiveSpeechEngine == .whisperKit)
+        let usingParakeet = (modelManager.effectiveSpeechEngine == .parakeet)
         let mode = modelManager.selectedAppleSpeechMode
         let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
         let availability = appleSpeechService.checkAvailability(
             for: modelManager.selectedAppleSpeechLocale,
             mode: mode
         )
-        let speechColor: Color = usingWhisper
+        let speechColor: Color = usingParakeet
             ? BuddyTheme.emeraldLive
             : ((isDenied || !availability.isReady) ? BuddyTheme.amberStreak : BuddyTheme.emeraldLive)
         let speechLabel: String = {
-            if usingWhisper {
-                return modelManager.selectedWhisperPreset.shortDisplayName
+            if usingParakeet {
+                return modelManager.selectedParakeetPreset.shortDisplayName
             }
             if isDenied { return "Permission Needed" }
             return !availability.isReady ? "Setup Needed" : "Apple \(mode.shortLabel)"
         }()
 
-        let anyModelLoaded = whisperService.isLoaded || llmService.isLoaded
-        let memoryNotices = [whisperService.lastMemoryNotice, llmService.lastMemoryNotice]
+        let anyModelLoaded = parakeetService.isLoaded || llmService.isLoaded
+        let memoryNotices = [parakeetService.lastMemoryNotice, llmService.lastMemoryNotice]
             .compactMap { notice -> String? in
                 guard let notice, !notice.isEmpty else { return nil }
                 return notice
@@ -1207,14 +1138,14 @@ private struct VoiceAndAISettingsView: View {
                 Divider().overlay(BuddyTheme.hairlineBorder)
 
                 HStack {
-                    Text("Whisper Runtime")
+                    Text("Parakeet Runtime")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(Color.primary)
                     Spacer()
                     runtimeBadge(
-                        isLoaded: whisperService.isLoaded,
-                        isLoading: whisperService.isLoading || whisperService.isPrewarming,
-                        label: whisperService.loadedVariantName
+                        isLoaded: parakeetService.isLoaded,
+                        isLoading: parakeetService.isLoading,
+                        label: parakeetService.loadedModelName
                     )
                 }
 
@@ -1236,6 +1167,11 @@ private struct VoiceAndAISettingsView: View {
 
                 keyValueRow(title: "Model Storage", value: modelManager.totalStorageUsedDescription)
 
+                if let freeMB = modelManager.availableMemoryMB {
+                    Divider().overlay(BuddyTheme.hairlineBorder)
+                    keyValueRow(title: "SideStore Memory Headroom", value: formatMemoryHeadroomMB(freeMB))
+                }
+
                 ForEach(memoryNotices, id: \.self) { notice in
                     Text(notice)
                         .font(.caption)
@@ -1248,9 +1184,9 @@ private struct VoiceAndAISettingsView: View {
                         BuddyHaptics.lightImpact()
                         Task { @MainActor in
                             await llmService.unloadAndWait()
-                            await whisperService.unloadAndWait()
+                            await parakeetService.unloadAndWait()
                             llmService.lastMemoryNotice = nil
-                            whisperService.lastMemoryNotice = nil
+                            parakeetService.lastMemoryNotice = nil
                         }
                     } label: {
                         HStack(spacing: 6) {
@@ -1346,6 +1282,13 @@ private struct VoiceAndAISettingsView: View {
             return String(format: "~%.2f GB", Double(mb) / 1000.0)
         }
         return "~\(mb) MB"
+    }
+
+    private func formatMemoryHeadroomMB(_ mb: Int) -> String {
+        if mb >= 1024 {
+            return String(format: "~%.1f GB free", Double(mb) / 1024.0)
+        }
+        return "~\(mb) MB free"
     }
 }
 

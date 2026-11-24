@@ -18,7 +18,7 @@ struct RootTabView: View {
     let pipeline: VoicePipelineCoordinator
     let modelManager: ModelManager
     let appleSpeechService: AppleSpeechService
-    let whisperService: WhisperTranscriptionService
+    let parakeetService: ParakeetTranscriptionService
     let llmService: LocalLLMService
     let cloudSync: FirebaseSyncService
 
@@ -43,7 +43,7 @@ struct RootTabView: View {
                     pipeline: pipeline,
                     modelManager: modelManager,
                     appleSpeechService: appleSpeechService,
-                    whisperService: whisperService,
+                    parakeetService: parakeetService,
                     llmService: llmService,
                     cloudSync: cloudSync,
                     isTabActive: selectedTab == .workout,
@@ -152,7 +152,8 @@ struct RootTabView: View {
             ModelSetupSheet(
                 modelManager: modelManager,
                 appleSpeechService: appleSpeechService,
-                whisperService: whisperService
+                parakeetService: parakeetService,
+                llmService: llmService
             )
             .buddyAppearance()
             .presentationDetents([.large])
