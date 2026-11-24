@@ -161,8 +161,11 @@ struct RootTabView: View {
         .sheet(
             item: $recapCaptureRequest,
             onDismiss: {
-                if case .recording = pipeline.phase {
+                switch pipeline.phase {
+                case .recording, .transcribing, .parsing:
                     pipeline.cancelRecording()
+                case .idle, .error:
+                    break
                 }
             }
         ) { request in

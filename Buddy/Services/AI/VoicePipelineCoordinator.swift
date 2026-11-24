@@ -72,7 +72,7 @@ public final class VoicePipelineCoordinator {
     private let llmService: LocalLLMService
     private let modelManager: ModelManager
 
-    @ObservationIgnored private var activeRecordingEngine: SpeechEngine = .appleSpeech
+    private var activeRecordingEngine: SpeechEngine = .appleSpeech
     @ObservationIgnored private var operationToken: UInt64 = 0
     @ObservationIgnored private var isFinishingRecording: Bool = false
     @ObservationIgnored private var isRequestingPermission: Bool = false
@@ -141,7 +141,11 @@ public final class VoicePipelineCoordinator {
         _ text: String,
         context: ActiveSessionPromptContext
     ) async -> WorkoutCommandIntent {
-        await llmService.parseVoiceTranscript(text, context: context)
+        await llmService.parseVoiceTranscript(
+            text,
+            context: context,
+            preferInstantParserWhenConfident: whisperService.isLoaded
+        )
     }
 
     public func beginRecording(isHoldMode: Bool) {
@@ -384,6 +388,7 @@ public final class VoicePipelineCoordinator {
         if wasParsing {
             llmService.stopVoiceParsing()
         }
+        whisperService.cancelInFlightWork()
         audioRecorder.setAudioBufferHandler(nil)
         audioRecorder.onEngineRestarted = nil
         audioRecorder.cancelRecording()
@@ -463,6 +468,7 @@ public final class VoicePipelineCoordinator {
         guard phase == .idle || phase.isError else { return }
         activeStoreForAutoStop = store
 
+        activeRecordingEngine = .appleSpeech
         operationToken &+= 1
         let token = operationToken
         liveTranscript = trimmed
@@ -554,11 +560,12 @@ public final class VoicePipelineCoordinator {
             )
         } catch is CancellationError {
             if operationToken == token {
+                pendingAudioSamples = nil
                 phase = .idle
             }
         } catch {
             guard operationToken == token else { return }
-            if UIApplication.shared.applicationState == .background {
+            if UIApplication.shared.applicationState != .active {
                 // Keep `pendingAudioSamples` so `.active` resumes transcription cleanly when unlocked.
                 phase = .idle
             } else {
@@ -612,7 +619,7 @@ public final class VoicePipelineCoordinator {
                     preferInstantParserWhenConfident: false,
                     into: store
                 )
-            } else if UIApplication.shared.applicationState == .background {
+            } else if UIApplication.shared.applicationState != .active {
                 phase = .idle
             } else {
                 phase = .error(error.localizedDescription)
@@ -628,7 +635,7 @@ public final class VoicePipelineCoordinator {
     ) async {
         liveTranscript = cleanedTranscript
 
-        if UIApplication.shared.applicationState == .background {
+        if UIApplication.shared.applicationState != .active {
             let cpuIntent = RuleBasedWorkoutParser.parse(cleanedTranscript, context: store.promptContext())
             if cpuIntent.action != .unknown {
                 applyIntent(cpuIntent, transcript: cleanedTranscript, into: store)
@@ -655,7 +662,9 @@ public final class VoicePipelineCoordinator {
     private func beginBackgroundProcessingTask(forToken token: UInt64) {
         endBackgroundProcessingTask()
         backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "BuddyVoiceProcessing") { [weak self] in
-            self?.handleBackgroundTaskExpiration(forToken: token)
+            Task { @MainActor [weak self] in
+                self?.handleBackgroundTaskExpiration(forToken: token)
+            }
         }
     }
 
@@ -678,6 +687,7 @@ public final class VoicePipelineCoordinator {
             isFinishingRecording = false
             processingTask?.cancel()
             processingTask = nil
+            whisperService.cancelInFlightWork()
             appleSpeechService.cancelStreaming()
             llmService.stopVoiceParsing()
 
@@ -697,6 +707,7 @@ public final class VoicePipelineCoordinator {
         isFinishingRecording = false
         processingTask?.cancel()
         processingTask = nil
+        whisperService.cancelInFlightWork()
         appleSpeechService.cancelStreaming()
         if wasParsing {
             llmService.stopVoiceParsing()

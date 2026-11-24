@@ -73,8 +73,10 @@ public final class LocalLLMService {
     public var loadedModelName: String?
     public var lastMemoryNotice: String?
 
-    /// Invoked right before loading the GGUF model so Buddy can release WhisperKit CoreML RAM first.
-    @ObservationIgnored public var onBeforeLoadModel: (@MainActor () async -> Void)?
+    /// Shared residency coordinator ensuring Qwen GGUF and WhisperKit never overlap in RAM.
+    @ObservationIgnored public var memoryCoordinator: ModelMemoryCoordinator?
+    /// Invoked inside `memoryCoordinator` to cancel & await complete teardown of `WhisperTranscriptionService`.
+    @ObservationIgnored public var onUnloadOpposingModel: (@MainActor () async -> Void)?
 
     private let modelManager: ModelManager
     @ObservationIgnored private var llm: LLM?
@@ -86,6 +88,11 @@ public final class LocalLLMService {
     @ObservationIgnored private var isExecutingExclusiveTask: Bool = false
     @ObservationIgnored private var accessWaiters: [CheckedContinuation<Void, Never>] = []
     @ObservationIgnored private var pendingMemoryUnload: Bool = false
+
+    // Tracks actual GGUF mapping or active llama.cpp inference (NEVER true while waiting on
+    // `memoryCoordinator`), enabling deadlock-free `unloadAndWait()`.
+    @ObservationIgnored private var isMappingOrRunningModel: Bool = false
+    @ObservationIgnored private var modelIdleWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(modelManager: ModelManager) {
         self.modelManager = modelManager
@@ -108,74 +115,130 @@ public final class LocalLLMService {
             return
         }
 
-        if llm != nil {
-            releaseLoadedModel()
-        }
+        try await runCoordinatedLLMTransition {
+            try Task.checkCancellation()
 
-        // Release any active WhisperKit CoreML weights before mapping Qwen GGUF into RAM.
-        await onBeforeLoadModel?()
-        try Task.checkCancellation()
-
-        pendingMemoryUnload = false
-        isLoading = true
-        defer { isLoading = false }
-
-        let loadedBox: UncheckedSendableBox<LLM?> = await Task.detached(priority: .userInitiated) {
-            let instance = LLM(
-                from: fileURL,
-                topK: 40,
-                topP: 0.9,
-                temp: 0.1,
-                repeatPenalty: 1.15,
-                historyLimit: 6,
-                maxTokenCount: 2048
-            )
-            return UncheckedSendableBox(value: instance)
-        }.value
-
-        if pendingMemoryUnload {
-            pendingMemoryUnload = false
-            loadedBox.value?.stop()
-            lastMemoryNotice = "Released model memory cleanly; reloads automatically on next use."
-            throw LocalLLMError.loadFailed("Low memory while loading model. Please try again.")
-        }
-
-        if Task.isCancelled {
-            loadedBox.value?.stop()
-            throw CancellationError()
-        }
-
-        guard let instance = loadedBox.value else {
-            throw LocalLLMError.loadFailed("Failed to initialize \(fileURL.lastPathComponent).")
-        }
-
-        instance.postprocess = { _ in }
-        let hint = await instance.core.getChatTemplateHint()
-
-        if pendingMemoryUnload || Task.isCancelled {
-            instance.stop()
-            if pendingMemoryUnload {
-                pendingMemoryUnload = false
-                lastMemoryNotice = "Released model memory cleanly; reloads automatically on next use."
+            if self.llm != nil, self.isLoaded, self.loadedFilePath == desiredPath {
+                return
             }
-            throw CancellationError()
-        }
 
-        self.llm = instance
-        self.loadedFilePath = desiredPath
-        self.cachedTemplateHint = hint
-        self.loadedModelName = resolvedDisplayName(for: fileURL)
-        self.isLoaded = true
-        self.lastMemoryNotice = nil
+            if self.llm != nil {
+                self.releaseLoadedModel()
+            }
+
+            self.pendingMemoryUnload = false
+            self.isLoading = true
+            self.isMappingOrRunningModel = true
+            defer {
+                self.isLoading = false
+                self.finishModelActivityIfIdle()
+            }
+
+            let loadedBox: UncheckedSendableBox<LLM?> = await Task.detached(priority: .userInitiated) {
+                let instance = LLM(
+                    from: fileURL,
+                    topK: 40,
+                    topP: 0.9,
+                    temp: 0.1,
+                    repeatPenalty: 1.15,
+                    historyLimit: 6,
+                    maxTokenCount: 2048
+                )
+                return UncheckedSendableBox(value: instance)
+            }.value
+
+            if self.pendingMemoryUnload {
+                self.pendingMemoryUnload = false
+                loadedBox.value?.stop()
+                self.memoryCoordinator?.markUnloaded(.llm)
+                self.lastMemoryNotice = "Released model memory cleanly; reloads automatically on next use."
+                throw LocalLLMError.loadFailed("Low memory while loading model. Please try again.")
+            }
+
+            if Task.isCancelled {
+                loadedBox.value?.stop()
+                self.memoryCoordinator?.markUnloaded(.llm)
+                throw CancellationError()
+            }
+
+            guard let instance = loadedBox.value else {
+                self.memoryCoordinator?.markUnloaded(.llm)
+                throw LocalLLMError.loadFailed("Failed to initialize \(fileURL.lastPathComponent).")
+            }
+
+            instance.postprocess = { _ in }
+            let hint = await instance.core.getChatTemplateHint()
+
+            if self.pendingMemoryUnload || Task.isCancelled {
+                instance.stop()
+                self.memoryCoordinator?.markUnloaded(.llm)
+                if self.pendingMemoryUnload {
+                    self.pendingMemoryUnload = false
+                    self.lastMemoryNotice = "Released model memory cleanly; reloads automatically on next use."
+                }
+                throw CancellationError()
+            }
+
+            self.llm = instance
+            self.loadedFilePath = desiredPath
+            self.cachedTemplateHint = hint
+            self.loadedModelName = self.resolvedDisplayName(for: fileURL)
+            self.isLoaded = true
+            self.lastMemoryNotice = nil
+        }
     }
 
     public func unload() {
-        if isLoading || isGenerating {
+        if isLoading || isGenerating || isMappingOrRunningModel {
             pendingMemoryUnload = true
             llm?.stop()
             return
         }
         releaseLoadedModel()
+        lastMemoryNotice = nil
+    }
+
+    /// Stops any active GGUF generation/mapping, awaits until the C++ context exits, and releases
+    /// `llm = nil` so `LLMCore.deinit` frees `llama_model` BEFORE WhisperKit starts loading CoreML.
+    public func unloadAndWait() async {
+        pendingMemoryUnload = true
+        llm?.stop()
+
+        if isMappingOrRunningModel {
+            await withCheckedContinuation { continuation in
+                modelIdleWaiters.append(continuation)
+            }
+        }
+
+        releaseLoadedModel()
+        pendingMemoryUnload = false
+        lastMemoryNotice = nil
+    }
+
+    private func runCoordinatedLLMTransition<T>(
+        _ operation: @MainActor () async throws -> T
+    ) async throws -> T {
+        if let coordinator = memoryCoordinator {
+            return try await coordinator.runExclusiveLoad(
+                for: .llm,
+                unloadOther: { [weak self] in
+                    await self?.onUnloadOpposingModel?()
+                },
+                operation: operation
+            )
+        } else {
+            await onUnloadOpposingModel?()
+            return try await operation()
+        }
+    }
+
+    private func finishModelActivityIfIdle() {
+        isMappingOrRunningModel = false
+        let waiters = modelIdleWaiters
+        modelIdleWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 
     private func releaseLoadedModel() {
@@ -185,6 +248,7 @@ public final class LocalLLMService {
         cachedTemplateHint = nil
         loadedModelName = nil
         isLoaded = false
+        memoryCoordinator?.markUnloaded(.llm)
     }
 
     /// Returns `true` when `RuleBasedWorkoutParser` extracted a complete, unambiguous command
@@ -251,6 +315,9 @@ public final class LocalLLMService {
             guard let bot = llm else {
                 return ruleFallback
             }
+
+            isMappingOrRunningModel = true
+            defer { finishModelActivityIfIdle() }
 
             let systemPrompt = Self.buildParserSystemPrompt(context: context)
             bot.reset()
@@ -341,6 +408,9 @@ public final class LocalLLMService {
         guard let bot = llm else {
             throw LocalLLMError.modelNotDownloaded
         }
+
+        isMappingOrRunningModel = true
+        defer { finishModelActivityIfIdle() }
 
         let coachSystemPrompt = Self.buildCoachSystemPrompt(
             workoutContext: workoutContext,
