@@ -12,6 +12,7 @@ struct SettingsView: View {
     let store: WorkoutStore
     let modelManager: ModelManager
     let appleSpeechService: AppleSpeechService
+    let whisperService: WhisperTranscriptionService
     let llmService: LocalLLMService
     let cloudSync: FirebaseSyncService
 
@@ -292,6 +293,7 @@ struct SettingsView: View {
                         VoiceAndAISettingsView(
                             modelManager: modelManager,
                             appleSpeechService: appleSpeechService,
+                            whisperService: whisperService,
                             llmService: llmService
                         )
                     } label: {
@@ -404,10 +406,16 @@ struct SettingsView: View {
         let aiLabel = modelManager.isLLMDownloaded
             ? modelManager.selectedLLMPreset.displayName
             : "Instant Parser"
+        if modelManager.effectiveSpeechEngine == .whisperKit {
+            return "\(modelManager.selectedWhisperPreset.shortDisplayName) · \(aiLabel)"
+        }
         return "Apple Speech (\(modelManager.selectedAppleSpeechMode.shortLabel)) · \(aiLabel)"
     }
 
     private var voiceAndAIRowDotColor: Color {
+        if modelManager.effectiveSpeechEngine == .whisperKit {
+            return BuddyTheme.emeraldLive
+        }
         let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
         let availability = appleSpeechService.checkAvailability(
             for: modelManager.selectedAppleSpeechLocale,
@@ -445,18 +453,21 @@ struct SettingsView: View {
 private struct VoiceAndAISettingsView: View {
     let modelManager: ModelManager
     let appleSpeechService: AppleSpeechService
+    let whisperService: WhisperTranscriptionService
     let llmService: LocalLLMService
 
     @State private var showFileImporter: Bool = false
     @State private var importMessage: String?
     @State private var importIsError: Bool = false
 
+    private let whisperPresets: [WhisperPreset] = [.largeV3Turbo, .largeV3TurboCompact, .smallEn]
     private let llmPresets: [LLMPreset] = [.qwen25_1_5B, .qwen25_0_5B, .custom]
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 speechCard
+                gymAudioCard
                 localLLMCard
                 runtimeCard
             }
@@ -477,163 +488,431 @@ private struct VoiceAndAISettingsView: View {
     }
 
     private var speechCard: some View {
+        let selectedEngine = modelManager.selectedSpeechEngine
+        let isWhisperBusy = modelManager.isDownloadingWhisper || modelManager.isOptimizingWhisper
+
+        return NativeCard(padding: 15, cornerRadius: 14) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    sectionEyebrow("SPEECH ENGINE")
+                    Spacer()
+                    speechHeaderStatusPill
+                }
+
+                // Engine segmented toggle: WhisperKit (Local) vs Apple Speech
+                HStack(spacing: 6) {
+                    ForEach(SpeechEngine.allCases) { engine in
+                        let selected = (selectedEngine == engine)
+                        Button {
+                            BuddyHaptics.selection()
+                            modelManager.selectedSpeechEngine = engine
+                            if engine == .appleSpeech {
+                                Task { @MainActor in
+                                    await whisperService.unload()
+                                }
+                            }
+                        } label: {
+                            Text(engine.displayName)
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(selected ? BuddyTheme.inkInverse : Color.primary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 9)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                        .fill(selected ? BuddyTheme.inkPrimary : BuddyTheme.chipSurface)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                Text(selectedEngine.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(BuddyTheme.mutedText)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider().overlay(BuddyTheme.hairlineBorder)
+
+                if selectedEngine == .whisperKit {
+                    whisperModelSection(isBusy: isWhisperBusy)
+                } else {
+                    appleSpeechSection
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var speechHeaderStatusPill: some View {
+        if modelManager.selectedSpeechEngine == .whisperKit {
+            if modelManager.isWhisperDownloaded {
+                statusDotPill(
+                    text: modelManager.isPrewarmed(modelManager.selectedWhisperPreset) ? "ANE Ready" : "Downloaded",
+                    color: BuddyTheme.emeraldLive
+                )
+            } else {
+                statusDotPill(text: "Download Needed", color: BuddyTheme.amberStreak)
+            }
+        } else {
+            let mode = modelManager.selectedAppleSpeechMode
+            let availability = appleSpeechService.checkAvailability(
+                for: modelManager.selectedAppleSpeechLocale,
+                mode: mode
+            )
+            let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
+            let readyPillText: String = {
+                if isDenied { return "Permission Off" }
+                if !availability.isReady { return "Setup Needed" }
+                return mode == .offlineOnly ? "Offline Ready" : "Ready"
+            }()
+            statusDotPill(
+                text: readyPillText,
+                color: (isDenied || !availability.isReady) ? BuddyTheme.amberStreak : BuddyTheme.emeraldLive
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func whisperModelSection(isBusy: Bool) -> some View {
+        let selectedPreset = modelManager.selectedWhisperPreset
+        let isDownloaded = modelManager.isWhisperDownloaded
+        let isPrewarmed = modelManager.isPrewarmed(selectedPreset)
+
+        VStack(spacing: 8) {
+            ForEach(whisperPresets, id: \.self) { preset in
+                let isSelected = (selectedPreset == preset)
+                let presetDownloaded = modelManager.isDownloaded(preset)
+                Button {
+                    guard !isBusy else { return }
+                    BuddyHaptics.selection()
+                    let changed = (modelManager.selectedWhisperPreset != preset)
+                    modelManager.selectedWhisperPreset = preset
+                    modelManager.refreshDownloadState()
+                    if changed {
+                        Task { @MainActor in
+                            await whisperService.unload()
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(isSelected ? BuddyTheme.inkPrimary : BuddyTheme.mutedText)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(preset.displayName)
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundStyle(Color.primary)
+                                if presetDownloaded {
+                                    Image(systemName: "checkmark.seal.fill")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(BuddyTheme.emeraldLive)
+                                }
+                            }
+
+                            Text(preset.subtitle)
+                                .font(.caption)
+                                .foregroundStyle(BuddyTheme.mutedText)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                        }
+
+                        Spacer(minLength: 4)
+
+                        Text(formatSizeMB(preset.approximateSizeMB))
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .monospacedDigit()
+                            .foregroundStyle(BuddyTheme.mutedText)
+                    }
+                    .padding(11)
+                    .background(
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .fill(BuddyTheme.elevatedSurface)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .strokeBorder(
+                                isSelected ? BuddyTheme.inkPrimary.opacity(0.45) : Color.clear,
+                                lineWidth: 1.0
+                            )
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(isBusy)
+            }
+        }
+
+        if isBusy {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(
+                        modelManager.whisperDownloadStatusText.isEmpty
+                            ? "Preparing \(selectedPreset.shortDisplayName)…"
+                            : modelManager.whisperDownloadStatusText
+                    )
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.primary)
+                    Spacer()
+                    Text("\(Int((min(max(modelManager.whisperDownloadProgress, 0), 1) * 100).rounded()))%")
+                        .font(.caption.weight(.bold))
+                        .monospacedDigit()
+                        .foregroundStyle(Color.primary)
+                }
+
+                GeometryReader { proxy in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(BuddyTheme.elevatedSurface)
+                        Capsule()
+                            .fill(BuddyTheme.inkPrimary)
+                            .frame(width: max(8, proxy.size.width * min(max(modelManager.whisperDownloadProgress, 0), 1)))
+                    }
+                }
+                .frame(height: 6)
+
+                if modelManager.isDownloadingWhisper {
+                    Button {
+                        BuddyHaptics.lightImpact()
+                        modelManager.cancelWhisperDownload()
+                    } label: {
+                        Text("Cancel Download")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(BuddyTheme.destructive)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 9)
+                            .background(Capsule().fill(BuddyTheme.destructive.opacity(0.12)))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        } else if isDownloaded {
+            HStack(spacing: 10) {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(BuddyTheme.emeraldLive)
+                    Text(isPrewarmed ? "Ready offline · Neural Engine cached" : "Ready offline")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.primary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                if !isPrewarmed {
+                    Button {
+                        BuddyHaptics.lightImpact()
+                        Task { @MainActor in
+                            try? await whisperService.prewarmDownloadedModel(selectedPreset)
+                        }
+                    } label: {
+                        Text(whisperService.isPrewarming ? "Optimizing…" : "Optimize")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(Color.primary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(Capsule().fill(BuddyTheme.chipSurface))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(whisperService.isPrewarming)
+                }
+                Button {
+                    BuddyHaptics.warning()
+                    Task { @MainActor in
+                        await whisperService.unload()
+                        modelManager.deleteWhisperModel(selectedPreset)
+                    }
+                } label: {
+                    Text("Delete")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundStyle(BuddyTheme.destructive)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(Capsule().fill(BuddyTheme.destructive.opacity(0.14)))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(11)
+            .background(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(BuddyTheme.elevatedSurface)
+            )
+        } else {
+            Button {
+                BuddyHaptics.mediumImpact()
+                Task { @MainActor in
+                    await modelManager.downloadWhisperModel(selectedPreset) { downloadedPreset in
+                        try await whisperService.prewarmDownloadedModel(downloadedPreset)
+                    }
+                }
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.system(size: 14, weight: .bold))
+                    Text("Download & Optimize (\(formatSizeMB(selectedPreset.approximateSizeMB)))")
+                        .font(.system(size: 13.5, weight: .bold))
+                }
+                .foregroundStyle(BuddyTheme.inkInverse)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(Capsule().fill(BuddyTheme.inkPrimary))
+            }
+            .buttonStyle(.plain)
+        }
+
+        if let error = modelManager.downloadError, error.hasPrefix("Whisper") {
+            Text(error)
+                .font(.caption)
+                .foregroundStyle(BuddyTheme.destructive)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        Text("Memory-Safe Mode: Buddy automatically swaps Whisper & Qwen so only one model uses RAM at a time, and uses Instant Parser for clean sets to keep Whisper fast.")
+            .font(.caption)
+            .foregroundStyle(BuddyTheme.mutedText)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder
+    private var appleSpeechSection: some View {
         let mode = modelManager.selectedAppleSpeechMode
         let availability = appleSpeechService.checkAvailability(
             for: modelManager.selectedAppleSpeechLocale,
             mode: mode
         )
         let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
-        let readyPillText: String = {
-            if isDenied { return "Permission Off" }
-            if !availability.isReady { return "Setup Needed" }
-            return mode == .offlineOnly ? "Offline Ready" : "Ready"
-        }()
 
-        return NativeCard(padding: 15, cornerRadius: 14) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    sectionEyebrow("APPLE SPEECH & GYM AUDIO")
-                    Spacer()
-                    statusDotPill(
-                        text: readyPillText,
-                        color: (isDenied || !availability.isReady) ? BuddyTheme.amberStreak : BuddyTheme.emeraldLive
-                    )
-                }
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Recognition Mode")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.primary)
 
-                // Recognition Mode selector (Enhanced Auto vs Offline Only)
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Recognition Mode")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Color.primary)
-
-                    HStack(spacing: 6) {
-                        ForEach(AppleSpeechRecognitionMode.allCases) { option in
-                            let selected = (mode == option)
-                            Button {
-                                BuddyHaptics.selection()
-                                modelManager.selectedAppleSpeechMode = option
-                            } label: {
-                                Text(option.displayName)
-                                    .font(.system(size: 12.5, weight: .semibold))
-                                    .foregroundStyle(selected ? BuddyTheme.inkInverse : Color.primary)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 9)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                            .fill(selected ? BuddyTheme.inkPrimary : BuddyTheme.chipSurface)
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                        }
+            HStack(spacing: 6) {
+                ForEach(AppleSpeechRecognitionMode.allCases) { option in
+                    let selected = (mode == option)
+                    Button {
+                        BuddyHaptics.selection()
+                        modelManager.selectedAppleSpeechMode = option
+                    } label: {
+                        Text(option.displayName)
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(selected ? BuddyTheme.inkInverse : Color.primary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 9)
+                            .background(
+                                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                    .fill(selected ? BuddyTheme.inkPrimary : BuddyTheme.chipSurface)
+                            )
                     }
-
-                    Text(mode.subtitle)
-                        .font(.caption)
-                        .foregroundStyle(BuddyTheme.mutedText)
-                        .fixedSize(horizontal: false, vertical: true)
+                    .buttonStyle(.plain)
                 }
+            }
+
+            Text(mode.subtitle)
+                .font(.caption)
+                .foregroundStyle(BuddyTheme.mutedText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        Divider().overlay(BuddyTheme.hairlineBorder)
+
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Voice Accent / Locale")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.primary)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 7) {
+                    ForEach(AppleSpeechLocaleOption.allCases) { option in
+                        let selected = (modelManager.selectedAppleSpeechLocale == option)
+                        Button {
+                            BuddyHaptics.selection()
+                            modelManager.selectedAppleSpeechLocale = option
+                        } label: {
+                            Text(option.displayName)
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(selected ? BuddyTheme.inkInverse : Color.primary)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .fill(selected ? BuddyTheme.inkPrimary : BuddyTheme.chipSurface)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: isDenied || !availability.isReady ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle((isDenied || !availability.isReady) ? BuddyTheme.amberStreak : BuddyTheme.emeraldLive)
+                .padding(.top, 1)
+
+            Text(
+                isDenied
+                    ? "Speech Recognition access is turned off. Enable it in iOS Settings → Buddy."
+                    : availability.statusMessage
+            )
+            .font(.caption)
+            .foregroundStyle((isDenied || !availability.isReady) ? BuddyTheme.amberStreak : BuddyTheme.mutedText)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(BuddyTheme.elevatedSurface)
+        )
+    }
+
+    private var gymAudioCard: some View {
+        NativeCard(padding: 15, cornerRadius: 14) {
+            VStack(alignment: .leading, spacing: 11) {
+                sectionEyebrow("GYM AUDIO CAPTURE")
+
+                Toggle(
+                    isOn: Binding(
+                        get: { modelManager.enableGymNoiseIsolation },
+                        set: { newValue in
+                            BuddyHaptics.selection()
+                            modelManager.enableGymNoiseIsolation = newValue
+                        }
+                    )
+                ) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Gym Noise Isolation")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(Color.primary)
+                        Text("Apple hardware voice processing suppresses loud gym music and clanks for both WhisperKit and Apple Speech.")
+                            .font(.caption)
+                            .foregroundStyle(BuddyTheme.mutedText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .tint(BuddyTheme.emeraldLive)
 
                 Divider().overlay(BuddyTheme.hairlineBorder)
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Voice Accent / Locale")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Color.primary)
-
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 7) {
-                            ForEach(AppleSpeechLocaleOption.allCases) { option in
-                                let selected = (modelManager.selectedAppleSpeechLocale == option)
-                                Button {
-                                    BuddyHaptics.selection()
-                                    modelManager.selectedAppleSpeechLocale = option
-                                } label: {
-                                    Text(option.displayName)
-                                        .font(.system(size: 12.5, weight: .semibold))
-                                        .foregroundStyle(selected ? BuddyTheme.inkInverse : Color.primary)
-                                        .padding(.horizontal, 12)
-                                        .padding(.vertical, 8)
-                                        .background(
-                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                .fill(selected ? BuddyTheme.inkPrimary : BuddyTheme.chipSurface)
-                                        )
-                                }
-                                .buttonStyle(.plain)
-                            }
+                Toggle(
+                    isOn: Binding(
+                        get: { modelManager.preferBuiltInMic },
+                        set: { newValue in
+                            BuddyHaptics.selection()
+                            modelManager.preferBuiltInMic = newValue
                         }
-                    }
-                }
-
-                Divider().overlay(BuddyTheme.hairlineBorder)
-
-                // Loud Gym Audio Capture Toggles
-                VStack(alignment: .leading, spacing: 11) {
-                    Toggle(
-                        isOn: Binding(
-                            get: { modelManager.enableGymNoiseIsolation },
-                            set: { newValue in
-                                BuddyHaptics.selection()
-                                modelManager.enableGymNoiseIsolation = newValue
-                            }
-                        )
-                    ) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Gym Noise Isolation")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(Color.primary)
-                            Text("Apple hardware voice processing suppresses loud gym music and clanks.")
-                                .font(.caption)
-                                .foregroundStyle(BuddyTheme.mutedText)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    .tint(BuddyTheme.emeraldLive)
-
-                    Divider().overlay(BuddyTheme.hairlineBorder)
-
-                    Toggle(
-                        isOn: Binding(
-                            get: { modelManager.preferBuiltInMic },
-                            set: { newValue in
-                                BuddyHaptics.selection()
-                                modelManager.preferBuiltInMic = newValue
-                            }
-                        )
-                    ) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Prefer iPhone Mic")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(Color.primary)
-                            Text("Keeps AirPods in stereo music mode and records from iPhone's close-talk mic instead of low-bitrate Bluetooth call audio.")
-                                .font(.caption)
-                                .foregroundStyle(BuddyTheme.mutedText)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    .tint(BuddyTheme.emeraldLive)
-                }
-
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: isDenied || !availability.isReady ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle((isDenied || !availability.isReady) ? BuddyTheme.amberStreak : BuddyTheme.emeraldLive)
-                        .padding(.top, 1)
-
-                    Text(
-                        isDenied
-                            ? "Speech Recognition access is turned off. Enable it in iOS Settings → Buddy."
-                            : availability.statusMessage
                     )
-                    .font(.caption)
-                    .foregroundStyle((isDenied || !availability.isReady) ? BuddyTheme.amberStreak : BuddyTheme.mutedText)
-                    .fixedSize(horizontal: false, vertical: true)
+                ) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Prefer iPhone Mic")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(Color.primary)
+                        Text("Keeps AirPods in stereo music mode and records from iPhone's close-talk mic instead of low-bitrate Bluetooth call audio.")
+                            .font(.caption)
+                            .foregroundStyle(BuddyTheme.mutedText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(BuddyTheme.elevatedSurface)
-                )
+                .tint(BuddyTheme.emeraldLive)
             }
         }
     }
@@ -817,7 +1096,7 @@ private struct VoiceAndAISettingsView: View {
                 }
                 .buttonStyle(.plain)
 
-                if let error = modelManager.downloadError {
+                if let error = modelManager.downloadError, !error.hasPrefix("Whisper") {
                     Text(error)
                         .font(.caption)
                         .foregroundStyle(BuddyTheme.destructive)
@@ -829,7 +1108,7 @@ private struct VoiceAndAISettingsView: View {
                         .foregroundStyle(importIsError ? BuddyTheme.destructive : BuddyTheme.emeraldLive)
                 }
 
-                Text("Buddy uses the zero-latency Instant Parser automatically whenever no LLM is downloaded.")
+                Text("Buddy uses the zero-latency Instant Parser automatically whenever no LLM is downloaded or when WhisperKit outputs a clean workout log.")
                     .font(.caption)
                     .foregroundStyle(BuddyTheme.mutedText)
             }
@@ -837,27 +1116,51 @@ private struct VoiceAndAISettingsView: View {
     }
 
     private var runtimeCard: some View {
+        let usingWhisper = (modelManager.effectiveSpeechEngine == .whisperKit)
         let mode = modelManager.selectedAppleSpeechMode
         let isDenied = (appleSpeechService.authorizationStatus == .denied || appleSpeechService.authorizationStatus == .restricted)
         let availability = appleSpeechService.checkAvailability(
             for: modelManager.selectedAppleSpeechLocale,
             mode: mode
         )
-        let speechColor: Color = (isDenied || !availability.isReady) ? BuddyTheme.amberStreak : BuddyTheme.emeraldLive
-        let speechLabel: String = isDenied
-            ? "Permission Needed"
-            : (!availability.isReady ? "Setup Needed" : "Apple \(mode.shortLabel)")
+        let speechColor: Color = usingWhisper
+            ? BuddyTheme.emeraldLive
+            : ((isDenied || !availability.isReady) ? BuddyTheme.amberStreak : BuddyTheme.emeraldLive)
+        let speechLabel: String = {
+            if usingWhisper {
+                return modelManager.selectedWhisperPreset.shortDisplayName
+            }
+            if isDenied { return "Permission Needed" }
+            return !availability.isReady ? "Setup Needed" : "Apple \(mode.shortLabel)"
+        }()
+
+        let anyModelLoaded = whisperService.isLoaded || llmService.isLoaded
+        let combinedNotice = whisperService.lastMemoryNotice ?? llmService.lastMemoryNotice
 
         return NativeCard(padding: 15, cornerRadius: 14) {
             VStack(alignment: .leading, spacing: 12) {
                 sectionEyebrow("MEMORY & RUNTIME")
 
                 HStack {
-                    Text("Speech Engine")
+                    Text("Active Speech")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(Color.primary)
                     Spacer()
                     statusDotPill(text: speechLabel, color: speechColor)
+                }
+
+                Divider().overlay(BuddyTheme.hairlineBorder)
+
+                HStack {
+                    Text("Whisper Runtime")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Color.primary)
+                    Spacer()
+                    runtimeBadge(
+                        isLoaded: whisperService.isLoaded,
+                        isLoading: whisperService.isLoading || whisperService.isPrewarming,
+                        label: whisperService.loadedVariantName
+                    )
                 }
 
                 Divider().overlay(BuddyTheme.hairlineBorder)
@@ -878,21 +1181,24 @@ private struct VoiceAndAISettingsView: View {
 
                 keyValueRow(title: "Model Storage", value: modelManager.totalStorageUsedDescription)
 
-                if let memoryNotice = llmService.lastMemoryNotice, !memoryNotice.isEmpty {
-                    Text(memoryNotice)
+                if let combinedNotice, !combinedNotice.isEmpty {
+                    Text(combinedNotice)
                         .font(.caption)
                         .foregroundStyle(BuddyTheme.mutedText)
                 }
 
-                if llmService.isLoaded {
+                if anyModelLoaded {
                     Button {
                         BuddyHaptics.lightImpact()
                         llmService.unload()
+                        Task { @MainActor in
+                            await whisperService.unload()
+                        }
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "memorychip")
                                 .font(.system(size: 13, weight: .semibold))
-                            Text("Free LLM Memory")
+                            Text("Free Model Memory")
                                 .font(.system(size: 13.5, weight: .semibold))
                         }
                         .foregroundStyle(Color.primary)

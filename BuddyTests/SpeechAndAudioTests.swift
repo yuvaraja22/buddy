@@ -176,26 +176,95 @@ final class SpeechAndAudioTests: XCTestCase {
     }
 
     @MainActor
-    func testModelManagerPersistsAppleSpeechLocaleAndPurgesLegacyWhisperDefaults() throws {
+    func testModelManagerPersistsSpeechEngineWhisperPresetAndPrewarmState() throws {
         let suiteName = "com.yuvaraja.buddy.tests.speech.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        // Seed legacy WhisperKit defaults to verify automatic cleanup on initialization.
-        defaults.set("whisperkit", forKey: "buddy.models.speechEngine")
-        defaults.set("openai_whisper-base.en", forKey: "buddy.models.selectedWhisperPreset")
-        defaults.set(["openai_whisper-base.en": "legacy"], forKey: "buddy.models.whisperRelativePaths")
-
-        let manager = ModelManager(defaults: defaults)
+        let manager = ModelManager(defaults: defaults, osBuildMarker: "iOS 18.5 (22F76)")
+        XCTAssertEqual(manager.selectedSpeechEngine, .appleSpeech)
+        XCTAssertEqual(manager.selectedWhisperPreset, .largeV3Turbo)
+        XCTAssertEqual(manager.effectiveSpeechEngine, .appleSpeech)
         XCTAssertEqual(manager.selectedAppleSpeechLocale, .auto)
+        XCTAssertFalse(manager.isPrewarmed(.largeV3Turbo))
         XCTAssertFalse(manager.isAllReady(appleSpeechReady: false))
-        XCTAssertNil(defaults.object(forKey: "buddy.models.speechEngine"))
-        XCTAssertNil(defaults.object(forKey: "buddy.models.selectedWhisperPreset"))
-        XCTAssertNil(defaults.object(forKey: "buddy.models.whisperRelativePaths"))
 
+        // Selecting WhisperKit before downloading still falls back cleanly to Apple Speech.
+        manager.selectedSpeechEngine = .whisperKit
+        manager.selectedWhisperPreset = .largeV3TurboCompact
         manager.selectedAppleSpeechLocale = .enIN
-        let reloaded = ModelManager(defaults: defaults)
-        XCTAssertEqual(reloaded.selectedAppleSpeechLocale, .enIN)
+        manager.markPrewarmed(.largeV3TurboCompact)
+        XCTAssertEqual(manager.effectiveSpeechEngine, .appleSpeech)
+        XCTAssertTrue(manager.isPrewarmed(.largeV3TurboCompact))
+
+        let reloadedSameOS = ModelManager(defaults: defaults, osBuildMarker: "iOS 18.5 (22F76)")
+        XCTAssertEqual(reloadedSameOS.selectedSpeechEngine, .whisperKit)
+        XCTAssertEqual(reloadedSameOS.selectedWhisperPreset, .largeV3TurboCompact)
+        XCTAssertEqual(reloadedSameOS.selectedAppleSpeechLocale, .enIN)
+        XCTAssertTrue(reloadedSameOS.isPrewarmed(.largeV3TurboCompact))
+
+        // iOS updates invalidate CoreML ANE caches, so prewarm state must reset on a new OS build.
+        let reloadedNewOS = ModelManager(defaults: defaults, osBuildMarker: "iOS 19.0 (23A100)")
+        XCTAssertFalse(reloadedNewOS.isPrewarmed(.largeV3TurboCompact))
+    }
+
+    func testWhisperHelpersPadShortClipsSanitizeArtifactsAndKeepPromptSafe() {
+        // Short 0.25s clip (4000 samples @ 16kHz) is padded to 20,000 samples (1.25s) with zeros.
+        let shortClip = Array(repeating: Float(0.25), count: 4_000)
+        let padded = WhisperTranscriptionService.prepareAudioSamplesForWhisper(shortClip)
+        XCTAssertEqual(padded.count, 20_000)
+        XCTAssertEqual(padded[3_999], 0.25, accuracy: 0.0001)
+        XCTAssertEqual(padded[4_000], 0.0, accuracy: 0.0001)
+
+        // Clips >= 20,000 samples are returned unchanged.
+        let longClip = Array(repeating: Float(0.1), count: 24_000)
+        XCTAssertEqual(WhisperTranscriptionService.prepareAudioSamplesForWhisper(longClip).count, 24_000)
+
+        // Control tokens, bracketed sound tags, and parenthetical audio labels are stripped cleanly.
+        let dirty = "<|startoftranscript|> [MUSIC] Incline dumbbell press 30 kg 3 sets 10 reps (clanking) [BLANK_AUDIO] <|endoftext|>"
+        XCTAssertEqual(
+            WhisperTranscriptionService.cleanTranscript(dirty),
+            "Incline dumbbell press 30 kg 3 sets 10 reps"
+        )
+
+        // Gym bias prompt prioritizes active exercises and excludes destructive command words.
+        let prompt = WhisperTranscriptionService.buildGymBiasPrompt(
+            recentExercises: ["Cable Lateral Raise", "Bench Press", "bench press"]
+        )
+        XCTAssertTrue(prompt.contains("Cable Lateral Raise"))
+        XCTAssertTrue(prompt.contains("Romanian deadlift"))
+        let lowerPrompt = prompt.lowercased()
+        XCTAssertFalse(lowerPrompt.contains("delete"))
+        XCTAssertFalse(lowerPrompt.contains("finish"))
+        XCTAssertFalse(lowerPrompt.contains("end workout"))
+    }
+
+    func testAudioResampleTo16kHzProducesExpectedFrameCount() {
+        // 1.0 second of 48 kHz mono sine wave -> ~16,000 samples at 16 kHz.
+        let sampleRate = 48_000.0
+        let count = Int(sampleRate)
+        let input: [Float] = (0..<count).map { idx in
+            sin(Float(2.0 * Double.pi * 440.0 * Double(idx) / sampleRate)) * 0.5
+        }
+        let resampled = AudioRecorderService.resampleTo16kHz(samples: input, fromSampleRate: sampleRate)
+        XCTAssertGreaterThan(resampled.count, 15_500)
+        XCTAssertLessThan(resampled.count, 16_500)
+
+        // Already 16 kHz passes through untouched.
+        let passthrough = AudioRecorderService.resampleTo16kHz(samples: [0.1, -0.2, 0.3], fromSampleRate: 16_000)
+        XCTAssertEqual(passthrough, [0.1, -0.2, 0.3])
+    }
+
+    func testLocalLLMConfidentRuleParseFastPath() {
+        let context = ActiveSessionPromptContext(preferredUnit: .kg)
+        let cleanSet = RuleBasedWorkoutParser.parse("Bench press 60 kg 3 sets 10 reps", context: context)
+        XCTAssertTrue(LocalLLMService.isConfidentRuleParse(cleanSet))
+
+        let undoCmd = RuleBasedWorkoutParser.parse("undo last set", context: context)
+        XCTAssertTrue(LocalLLMService.isConfidentRuleParse(undoCmd))
+
+        let vague = RuleBasedWorkoutParser.parse("my shoulder felt weird today", context: context)
+        XCTAssertFalse(LocalLLMService.isConfidentRuleParse(vague))
     }
 
     func testAudioSessionConfigurationPrefersBuiltInMicWithoutBluetoothHFP() {

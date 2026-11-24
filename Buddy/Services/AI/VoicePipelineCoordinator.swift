@@ -37,14 +37,29 @@ public final class VoicePipelineCoordinator {
     }
 
     public var transcribingStageTitle: String {
-        "Finalizing speech…"
+        if activeRecordingEngine == .whisperKit {
+            if whisperService.isPrewarming {
+                return "Optimizing Whisper (one-time)…"
+            }
+            if whisperService.isLoading {
+                return "Loading \(modelManager.selectedWhisperPreset.shortDisplayName)…"
+            }
+            return "Transcribing with Whisper…"
+        }
+        return "Finalizing speech…"
     }
 
     public var parsingStageTitle: String {
-        modelManager.isLLMDownloaded ? "Parsing with Qwen…" : "Parsing sets…"
+        if activeRecordingEngine == .whisperKit {
+            return "Parsing sets…"
+        }
+        return modelManager.isLLMDownloaded ? "Parsing with Qwen…" : "Parsing sets…"
     }
 
     public var processingModeCaption: String {
+        if activeRecordingEngine == .whisperKit {
+            return "\(modelManager.selectedWhisperPreset.shortDisplayName) · 100% Offline"
+        }
         if appleSpeechService.isUsingCloudEnhancedSpeech {
             return "Apple Cloud-Enhanced Speech"
         }
@@ -53,26 +68,31 @@ public final class VoicePipelineCoordinator {
 
     private let audioRecorder: AudioRecorderService
     private let appleSpeechService: AppleSpeechService
+    private let whisperService: WhisperTranscriptionService
     private let llmService: LocalLLMService
     private let modelManager: ModelManager
 
+    @ObservationIgnored private var activeRecordingEngine: SpeechEngine = .appleSpeech
     @ObservationIgnored private var operationToken: UInt64 = 0
     @ObservationIgnored private var isFinishingRecording: Bool = false
     @ObservationIgnored private var isRequestingPermission: Bool = false
     @ObservationIgnored private var startRecordingTask: Task<Void, Never>?
     @ObservationIgnored private var processingTask: Task<Void, Never>?
     @ObservationIgnored private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+    @ObservationIgnored private var pendingAudioSamples: [Float]?
     @ObservationIgnored private var pendingTranscript: String?
     @ObservationIgnored private weak var activeStoreForAutoStop: WorkoutStore?
 
     public init(
         audioRecorder: AudioRecorderService,
         appleSpeechService: AppleSpeechService,
+        whisperService: WhisperTranscriptionService,
         llmService: LocalLLMService,
         modelManager: ModelManager
     ) {
         self.audioRecorder = audioRecorder
         self.appleSpeechService = appleSpeechService
+        self.whisperService = whisperService
         self.llmService = llmService
         self.modelManager = modelManager
 
@@ -165,48 +185,56 @@ public final class VoicePipelineCoordinator {
             return
         }
 
-        let speechStatus = SFSpeechRecognizer.authorizationStatus()
-        if speechStatus == .notDetermined {
-            isRequestingPermission = true
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                let granted = await self.appleSpeechService.requestAuthorization()
-                self.isRequestingPermission = false
-                if granted {
-                    if !isHoldMode && UIApplication.shared.applicationState != .background {
-                        self.beginRecording(isHoldMode: false, preserveRecapMode: preserveRecapMode)
+        let chosenEngine = modelManager.effectiveSpeechEngine
+
+        // Apple Speech requires Speech Recognition permission & locale availability;
+        // WhisperKit runs 100% locally via CoreML and only needs Microphone access.
+        if chosenEngine == .appleSpeech {
+            let speechStatus = SFSpeechRecognizer.authorizationStatus()
+            if speechStatus == .notDetermined {
+                isRequestingPermission = true
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    let granted = await self.appleSpeechService.requestAuthorization()
+                    self.isRequestingPermission = false
+                    if granted {
+                        if !isHoldMode && UIApplication.shared.applicationState != .background {
+                            self.beginRecording(isHoldMode: false, preserveRecapMode: preserveRecapMode)
+                        }
+                    } else {
+                        self.isRecapCaptureMode = false
+                        self.recapTargetDate = nil
+                        self.phase = .error(AppleSpeechError.permissionDenied.localizedDescription)
                     }
-                } else {
-                    self.isRecapCaptureMode = false
-                    self.recapTargetDate = nil
-                    self.phase = .error(AppleSpeechError.permissionDenied.localizedDescription)
                 }
+                return
             }
-            return
+
+            guard speechStatus == .authorized else {
+                isRecapCaptureMode = false
+                recapTargetDate = nil
+                phase = .error(AppleSpeechError.permissionDenied.localizedDescription)
+                return
+            }
+
+            let speechMode = modelManager.selectedAppleSpeechMode
+            let availability = appleSpeechService.checkAvailability(
+                for: modelManager.selectedAppleSpeechLocale,
+                mode: speechMode
+            )
+            guard availability.isReady else {
+                isRecapCaptureMode = false
+                recapTargetDate = nil
+                phase = .error(availability.statusMessage)
+                return
+            }
         }
 
-        guard speechStatus == .authorized else {
-            isRecapCaptureMode = false
-            recapTargetDate = nil
-            phase = .error(AppleSpeechError.permissionDenied.localizedDescription)
-            return
-        }
-
-        let speechMode = modelManager.selectedAppleSpeechMode
-        let availability = appleSpeechService.checkAvailability(
-            for: modelManager.selectedAppleSpeechLocale,
-            mode: speechMode
-        )
-        guard availability.isReady else {
-            isRecapCaptureMode = false
-            recapTargetDate = nil
-            phase = .error(availability.statusMessage)
-            return
-        }
-
+        activeRecordingEngine = chosenEngine
         operationToken &+= 1
         let token = operationToken
         isFinishingRecording = false
+        pendingAudioSamples = nil
         pendingTranscript = nil
         liveTranscript = ""
         phase = .recording(isHoldMode: isHoldMode)
@@ -215,40 +243,53 @@ public final class VoicePipelineCoordinator {
         startRecordingTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let localeOption = self.modelManager.selectedAppleSpeechLocale
-                let recognitionMode = self.modelManager.selectedAppleSpeechMode
                 let captureOptions = self.modelManager.audioCaptureOptions
-                let parserContext = self.activeStoreForAutoStop?.promptContext() ?? ActiveSessionPromptContext()
-                let recentExercises = self.activeStoreForAutoStop?.activeSession?.sortedEntries.map(\.canonicalName) ?? []
-                let contextualStrings = AppleSpeechService.buildGymContextualStrings(recentExercises: recentExercises)
 
-                self.audioRecorder.setAudioBufferHandler { [weak speech = self.appleSpeechService] buffer in
-                    speech?.appendBuffer(buffer)
-                }
-
-                // AudioRecorderService removes the old bus-0 tap and stops the engine BEFORE
-                // invoking onEngineRestarted, so starting a fresh SFSpeechAudioBufferRecognitionRequest
-                // safely adopts the new hardware format and propagates any recognizer errors.
-                self.audioRecorder.onEngineRestarted = { [weak self] in
-                    guard let self, self.operationToken == token else { return }
-                    try self.startAppleSpeechSession(
-                        token: token,
-                        localeOption: localeOption,
-                        recognitionMode: recognitionMode,
-                        contextualStrings: contextualStrings,
-                        parserContext: parserContext
+                if chosenEngine == .whisperKit {
+                    self.audioRecorder.setAudioBufferHandler(nil)
+                    self.audioRecorder.onEngineRestarted = nil
+                    try await self.audioRecorder.startRecording(
+                        options: captureOptions,
+                        captureRawSamples: true
                     )
-                }
+                } else {
+                    let localeOption = self.modelManager.selectedAppleSpeechLocale
+                    let recognitionMode = self.modelManager.selectedAppleSpeechMode
+                    let parserContext = self.activeStoreForAutoStop?.promptContext() ?? ActiveSessionPromptContext()
+                    let recentExercises = self.activeStoreForAutoStop?.activeSession?.sortedEntries.map(\.canonicalName) ?? []
+                    let contextualStrings = AppleSpeechService.buildGymContextualStrings(recentExercises: recentExercises)
 
-                try await self.audioRecorder.startRecording(options: captureOptions) { [weak self] in
-                    guard let self, self.operationToken == token else { return }
-                    try self.startAppleSpeechSession(
-                        token: token,
-                        localeOption: localeOption,
-                        recognitionMode: recognitionMode,
-                        contextualStrings: contextualStrings,
-                        parserContext: parserContext
-                    )
+                    self.audioRecorder.setAudioBufferHandler { [weak speech = self.appleSpeechService] buffer in
+                        speech?.appendBuffer(buffer)
+                    }
+
+                    // AudioRecorderService removes the old bus-0 tap and stops the engine BEFORE
+                    // invoking onEngineRestarted, so starting a fresh SFSpeechAudioBufferRecognitionRequest
+                    // safely adopts the new hardware format and propagates any recognizer errors.
+                    self.audioRecorder.onEngineRestarted = { [weak self] in
+                        guard let self, self.operationToken == token else { return }
+                        try self.startAppleSpeechSession(
+                            token: token,
+                            localeOption: localeOption,
+                            recognitionMode: recognitionMode,
+                            contextualStrings: contextualStrings,
+                            parserContext: parserContext
+                        )
+                    }
+
+                    try await self.audioRecorder.startRecording(
+                        options: captureOptions,
+                        captureRawSamples: false
+                    ) { [weak self] in
+                        guard let self, self.operationToken == token else { return }
+                        try self.startAppleSpeechSession(
+                            token: token,
+                            localeOption: localeOption,
+                            recognitionMode: recognitionMode,
+                            contextualStrings: contextualStrings,
+                            parserContext: parserContext
+                        )
+                    }
                 }
 
                 if self.operationToken != token || Task.isCancelled {
@@ -279,6 +320,7 @@ public final class VoicePipelineCoordinator {
         isFinishingRecording = true
 
         let token = operationToken
+        let engine = activeRecordingEngine
         processingTask?.cancel()
         processingTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -302,15 +344,28 @@ public final class VoicePipelineCoordinator {
             self.audioRecorder.setAudioBufferHandler(nil)
             self.audioRecorder.onEngineRestarted = nil
 
-            let capturedDuration = self.audioRecorder.stopRecording()
-            let existingPartial = self.liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
-            if capturedDuration < 0.15 && existingPartial.isEmpty {
-                self.appleSpeechService.cancelStreaming()
-                self.phase = .error("Recording was too short. Hold or tap a bit longer while speaking your set.")
-                return
-            }
+            if engine == .whisperKit {
+                self.phase = .transcribing
+                let captured = await self.audioRecorder.stopRecordingAndDrain16kHzSamples()
+                guard self.operationToken == token, !Task.isCancelled else { return }
 
-            await self.runAppleSpeechFinishAndParse(token: token, into: store)
+                if captured.duration < 0.15 || captured.samples.count < 1_600 {
+                    self.phase = .error("Recording was too short. Hold or tap a bit longer while speaking your set.")
+                    return
+                }
+
+                await self.runWhisperTranscriptionAndParse(samples: captured.samples, token: token, into: store)
+            } else {
+                let capturedDuration = self.audioRecorder.stopRecording()
+                let existingPartial = self.liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+                if capturedDuration < 0.15 && existingPartial.isEmpty {
+                    self.appleSpeechService.cancelStreaming()
+                    self.phase = .error("Recording was too short. Hold or tap a bit longer while speaking your set.")
+                    return
+                }
+
+                await self.runAppleSpeechFinishAndParse(token: token, into: store)
+            }
         }
     }
 
@@ -324,6 +379,7 @@ public final class VoicePipelineCoordinator {
         startRecordingTask = nil
         processingTask?.cancel()
         processingTask = nil
+        pendingAudioSamples = nil
         pendingTranscript = nil
         if wasParsing {
             llmService.stopVoiceParsing()
@@ -379,12 +435,23 @@ public final class VoicePipelineCoordinator {
         }
     }
 
-    /// Resumes any captured transcript that was deferred while backgrounded.
+    /// Resumes any captured audio or transcript that was deferred while backgrounded.
     public func resumePendingWorkIfNeeded(into store: WorkoutStore) {
         activeStoreForAutoStop = store
         guard phase == .idle || phase.isError else { return }
 
-        if let transcript = pendingTranscript, !transcript.isEmpty {
+        if let samples = pendingAudioSamples, samples.count >= 1_600 {
+            pendingAudioSamples = nil
+            activeRecordingEngine = .whisperKit
+            operationToken &+= 1
+            let token = operationToken
+            liveTranscript = ""
+            processingTask?.cancel()
+            processingTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.runWhisperTranscriptionAndParse(samples: samples, token: token, into: store)
+            }
+        } else if let transcript = pendingTranscript, !transcript.isEmpty {
             pendingTranscript = nil
             processTypedInput(transcript, into: store)
         }
@@ -412,7 +479,12 @@ public final class VoicePipelineCoordinator {
             }
 
             let context = store.promptContext()
-            let intent = await self.llmService.parseVoiceTranscript(trimmed, context: context)
+            let preferInstant = self.whisperService.isLoaded
+            let intent = await self.llmService.parseVoiceTranscript(
+                trimmed,
+                context: context,
+                preferInstantParserWhenConfident: preferInstant
+            )
             guard self.operationToken == token, !Task.isCancelled else { return }
 
             self.applyIntent(intent, transcript: trimmed, into: store)
@@ -445,6 +517,57 @@ public final class VoicePipelineCoordinator {
         }
     }
 
+    private func runWhisperTranscriptionAndParse(
+        samples: [Float],
+        token: UInt64,
+        into store: WorkoutStore
+    ) async {
+        pendingAudioSamples = samples
+        beginBackgroundProcessingTask(forToken: token)
+        defer {
+            if operationToken == token {
+                endBackgroundProcessingTask()
+            }
+        }
+
+        phase = .transcribing
+        do {
+            let recentExercises = store.activeSession?.sortedEntries.map(\.exerciseName) ?? []
+            let transcript = try await whisperService.transcribe(
+                samples: samples,
+                recentExercises: recentExercises
+            )
+            guard operationToken == token, !Task.isCancelled else { return }
+
+            pendingAudioSamples = nil
+            let cleanedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanedTranscript.isEmpty else {
+                phase = .error("No speech detected. Try speaking slightly closer to the microphone.")
+                return
+            }
+
+            await parseAndApplyTranscript(
+                cleanedTranscript,
+                token: token,
+                preferInstantParserWhenConfident: true,
+                into: store
+            )
+        } catch is CancellationError {
+            if operationToken == token {
+                phase = .idle
+            }
+        } catch {
+            guard operationToken == token else { return }
+            if UIApplication.shared.applicationState == .background {
+                // Keep `pendingAudioSamples` so `.active` resumes transcription cleanly when unlocked.
+                phase = .idle
+            } else {
+                pendingAudioSamples = nil
+                phase = .error(error.localizedDescription)
+            }
+        }
+    }
+
     private func runAppleSpeechFinishAndParse(
         token: UInt64,
         into store: WorkoutStore
@@ -469,7 +592,12 @@ public final class VoicePipelineCoordinator {
                 return
             }
 
-            await parseAndApplyTranscript(cleanedTranscript, token: token, into: store)
+            await parseAndApplyTranscript(
+                cleanedTranscript,
+                token: token,
+                preferInstantParserWhenConfident: false,
+                into: store
+            )
         } catch is CancellationError {
             if operationToken == token {
                 phase = .idle
@@ -478,7 +606,12 @@ public final class VoicePipelineCoordinator {
             guard operationToken == token else { return }
             let partialFallback = liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
             if !partialFallback.isEmpty {
-                await parseAndApplyTranscript(partialFallback, token: token, into: store)
+                await parseAndApplyTranscript(
+                    partialFallback,
+                    token: token,
+                    preferInstantParserWhenConfident: false,
+                    into: store
+                )
             } else if UIApplication.shared.applicationState == .background {
                 phase = .idle
             } else {
@@ -490,6 +623,7 @@ public final class VoicePipelineCoordinator {
     private func parseAndApplyTranscript(
         _ cleanedTranscript: String,
         token: UInt64,
+        preferInstantParserWhenConfident: Bool,
         into store: WorkoutStore
     ) async {
         liveTranscript = cleanedTranscript
@@ -508,7 +642,11 @@ public final class VoicePipelineCoordinator {
 
         phase = .parsing
         let context = store.promptContext()
-        let intent = await llmService.parseVoiceTranscript(cleanedTranscript, context: context)
+        let intent = await llmService.parseVoiceTranscript(
+            cleanedTranscript,
+            context: context,
+            preferInstantParserWhenConfident: preferInstantParserWhenConfident
+        )
         guard operationToken == token, !Task.isCancelled else { return }
 
         applyIntent(intent, transcript: cleanedTranscript, into: store)
