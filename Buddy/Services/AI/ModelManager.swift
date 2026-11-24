@@ -1,11 +1,13 @@
 import Foundation
 import Observation
+import UIKit
 import WhisperKit
 
 public enum ModelManagerError: LocalizedError, Sendable {
     case invalidDownloadURL
     case badHTTPStatus(Int)
     case invalidGGUFFile(String)
+    case whisperTokenizerMissing(String)
     case cancelled
 
     public var errorDescription: String? {
@@ -15,6 +17,8 @@ public enum ModelManagerError: LocalizedError, Sendable {
         case .badHTTPStatus(let code):
             return "Model download failed with HTTP status \(code). Check your internet connection and try again."
         case .invalidGGUFFile(let reason):
+            return reason
+        case .whisperTokenizerMissing(let reason):
             return reason
         case .cancelled:
             return "Download cancelled."
@@ -174,7 +178,7 @@ public final class ModelManager {
         public var subtitle: String {
             switch self {
             case .whisperKit:
-                return "OpenAI Whisper Large v3 Turbo running 100% offline on Apple Neural Engine with gym vocabulary prompting."
+                return "OpenAI Whisper running 100% offline on Apple Neural Engine with gym vocabulary prompting."
             case .appleSpeech:
                 return "Zero-download built-in iOS speech with live captions and cloud/offline fallback."
             }
@@ -215,11 +219,11 @@ public final class ModelManager {
         public var subtitle: String {
             switch self {
             case .largeV3Turbo:
-                return "Best accuracy for loud gyms & global accents (iPhone 13+ / A15+)"
+                return "Best accuracy for loud gyms & global accents (8 GB+ iPhone recommended)"
             case .largeV3TurboCompact:
-                return "Same Large v3 Turbo accuracy with ~80 MB lighter RAM footprint"
+                return "Same Large v3 Turbo accuracy with ~80 MB lighter RAM (great for 6 GB iPhones)"
             case .smallEn:
-                return "Fastest load & ultra-low RAM for 4 GB or older iPhones"
+                return "Fastest load & ultra-low RAM (recommended on 4 GB / older iPhones)"
             }
         }
 
@@ -228,6 +232,13 @@ public final class ModelManager {
             case .largeV3Turbo: return 626
             case .largeV3TurboCompact: return 547
             case .smallEn: return 217
+            }
+        }
+
+        public var isLargeModel: Bool {
+            switch self {
+            case .largeV3Turbo, .largeV3TurboCompact: return true
+            case .smallEn: return false
             }
         }
 
@@ -251,10 +262,7 @@ public final class ModelManager {
     }
 
     public enum AppleSpeechRecognitionMode: String, CaseIterable, Identifiable, Codable, Sendable {
-        /// Uses Apple's higher-accuracy cloud-assisted speech model when online (better in loud gym
-        /// music and accents), and automatically falls back to on-device speech when offline.
         case hybridAuto = "hybrid-auto"
-        /// Strictly enforces on-device recognition (`requiresOnDeviceRecognition = true`).
         case offlineOnly = "offline-only"
 
         public var id: String { rawValue }
@@ -466,7 +474,13 @@ public final class ModelManager {
 
     public var llmDownloadProgress: Double = 0
     public var isDownloadingLLM: Bool = false
-    public var downloadError: String?
+    public var whisperError: String?
+    public var llmError: String?
+
+    /// Combined error view for callers that display a single error banner.
+    public var downloadError: String? {
+        whisperError ?? llmError
+    }
 
     public var isLLMDownloaded: Bool = false
     public var activeLLMFileURL: URL?
@@ -481,8 +495,26 @@ public final class ModelManager {
         return .appleSpeech
     }
 
-    public var deviceRAMGB: Double {
-        Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0
+    public let deviceRAMGB: Double
+
+    /// `true` on 4 GB RAM iPhones (e.g. iPhone 11/12/SE2/SE3) where SideStore's Jetsam ceiling
+    /// makes `Whisper Small (217 MB)` much safer than 547–626 MB Large v3 variants.
+    public var isLowRAMDeviceForLargeWhisper: Bool {
+        deviceRAMGB < 5.5
+    }
+
+    /// Selects a RAM-safe default Whisper preset for first-time setup on SideStore builds.
+    public nonisolated static func recommendedWhisperPreset(
+        forPhysicalMemoryBytes bytes: UInt64 = ProcessInfo.processInfo.physicalMemory
+    ) -> WhisperPreset {
+        let gb = Double(bytes) / 1_073_741_824.0
+        if gb < 5.5 {
+            return .smallEn
+        }
+        if gb < 7.5 {
+            return .largeV3TurboCompact
+        }
+        return .largeV3Turbo
     }
 
     /// Returns `true` when either WhisperKit or Apple Speech is ready AND the local LLM is downloaded.
@@ -494,16 +526,20 @@ public final class ModelManager {
     private let defaults: UserDefaults
     private let currentOSBuildMarker: String
     @ObservationIgnored private var activeWhisperDownloadTask: Task<Void, Never>?
+    @ObservationIgnored private var activeWhisperDownloadID: UUID?
+    @ObservationIgnored private var whisperBackgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     @ObservationIgnored private var activeLLMDownloadSession: URLSession?
     @ObservationIgnored private var activeLLMDownloadTask: URLSessionDownloadTask?
     @ObservationIgnored private var activeLLMDownloadID: UUID?
 
     public init(
         defaults: UserDefaults = .standard,
-        osBuildMarker: String = ProcessInfo.processInfo.operatingSystemVersionString
+        osBuildMarker: String = ProcessInfo.processInfo.operatingSystemVersionString,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
     ) {
         self.defaults = defaults
         self.currentOSBuildMarker = osBuildMarker
+        self.deviceRAMGB = Double(physicalMemoryBytes) / 1_073_741_824.0
 
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
@@ -519,6 +555,8 @@ public final class ModelManager {
         if let storedWhisper = defaults.string(forKey: DefaultsKey.selectedWhisperPreset),
            let parsedWhisper = WhisperPreset(rawValue: storedWhisper) {
             self.selectedWhisperPreset = parsedWhisper
+        } else {
+            self.selectedWhisperPreset = Self.recommendedWhisperPreset(forPhysicalMemoryBytes: physicalMemoryBytes)
         }
 
         if let storedLocale = defaults.string(forKey: DefaultsKey.selectedAppleSpeechLocale),
@@ -591,18 +629,26 @@ public final class ModelManager {
         }
 
         ensureModelDirectories()
+        let downloadID = UUID()
+        activeWhisperDownloadID = downloadID
         isDownloadingWhisper = true
         isOptimizingWhisper = false
         whisperDownloadProgress = 0
         whisperDownloadStatusText = "Downloading \(targetPreset.shortDisplayName)…"
-        downloadError = nil
+        whisperError = nil
+
+        beginWhisperBackgroundTask(forDownloadID: downloadID)
 
         let task = Task<Void, Never> { @MainActor [weak self] in
             guard let self else { return }
             defer {
-                self.isDownloadingWhisper = false
-                self.isOptimizingWhisper = false
-                self.activeWhisperDownloadTask = nil
+                if self.activeWhisperDownloadID == downloadID {
+                    self.isDownloadingWhisper = false
+                    self.isOptimizingWhisper = false
+                    self.activeWhisperDownloadTask = nil
+                    self.activeWhisperDownloadID = nil
+                    self.endWhisperBackgroundTask()
+                }
             }
 
             do {
@@ -616,11 +662,14 @@ public final class ModelManager {
                     ) { [weak self] progress in
                         let fraction = min(0.88, max(0.0, progress.fractionCompleted * 0.88))
                         Task { @MainActor [weak self] in
-                            self?.whisperDownloadProgress = fraction
+                            guard let self, self.activeWhisperDownloadID == downloadID else { return }
+                            self.whisperDownloadProgress = fraction
                         }
                     }
                 } catch {
-                    if Task.isCancelled { throw CancellationError() }
+                    if Self.isCancellationError(error) || Task.isCancelled || self.activeWhisperDownloadID != downloadID {
+                        throw CancellationError()
+                    }
                     // Fallback to shorter glob if upstream folder naming changes.
                     folderURL = try await WhisperKit.download(
                         variant: targetPreset.variantGlob,
@@ -630,14 +679,17 @@ public final class ModelManager {
                     ) { [weak self] progress in
                         let fraction = min(0.88, max(0.0, progress.fractionCompleted * 0.88))
                         Task { @MainActor [weak self] in
-                            self?.whisperDownloadProgress = fraction
+                            guard let self, self.activeWhisperDownloadID == downloadID else { return }
+                            self.whisperDownloadProgress = fraction
                         }
                     }
                 }
 
-                try Task.checkCancellation()
+                guard self.activeWhisperDownloadID == downloadID, !Task.isCancelled else {
+                    throw CancellationError()
+                }
 
-                // Pre-cache tokenizer files while online so Airplane Mode works 100% offline.
+                // Pre-cache tokenizer + config files while online so Airplane Mode works 100% offline.
                 self.whisperDownloadProgress = 0.90
                 self.whisperDownloadStatusText = "Caching offline tokenizer…"
                 _ = try await ModelUtilities.loadTokenizer(
@@ -646,8 +698,12 @@ public final class ModelManager {
                     additionalSearchPaths: [folderURL]
                 )
 
+                guard self.activeWhisperDownloadID == downloadID, !Task.isCancelled else {
+                    throw CancellationError()
+                }
+
                 guard self.hasCachedTokenizer(for: targetPreset, modelFolder: folderURL) else {
-                    throw ModelManagerError.invalidGGUFFile(
+                    throw ModelManagerError.whisperTokenizerMissing(
                         "Whisper tokenizer files were not cached locally. Check your Wi-Fi connection and retry."
                     )
                 }
@@ -665,22 +721,37 @@ public final class ModelManager {
                     self.isOptimizingWhisper = true
                     self.whisperDownloadProgress = 0.94
                     self.whisperDownloadStatusText = "Optimizing for Neural Engine (one-time)…"
-                    try? await onOptimizeModel(targetPreset)
+                    do {
+                        try await onOptimizeModel(targetPreset)
+                    } catch {
+                        if Self.isCancellationError(error) || Task.isCancelled || self.activeWhisperDownloadID != downloadID {
+                            throw CancellationError()
+                        }
+                        // Model weights are downloaded cleanly; surface optimization warning without failing download.
+                        self.whisperError = "Model downloaded, but Neural Engine pre-optimization paused: \(error.localizedDescription)"
+                    }
+                }
+
+                guard self.activeWhisperDownloadID == downloadID, !Task.isCancelled else {
+                    throw CancellationError()
                 }
 
                 self.whisperDownloadProgress = 1.0
                 self.whisperDownloadStatusText = ""
                 self.selectedSpeechEngine = .whisperKit
                 self.refreshDownloadState()
-            } catch is CancellationError {
-                self.whisperDownloadProgress = 0
-                self.whisperDownloadStatusText = ""
-                self.refreshDownloadState()
             } catch {
-                self.downloadError = "Whisper download failed: \(error.localizedDescription)"
-                self.whisperDownloadProgress = 0
-                self.whisperDownloadStatusText = ""
-                self.refreshDownloadState()
+                guard self.activeWhisperDownloadID == downloadID else { return }
+                if Self.isCancellationError(error) || Task.isCancelled {
+                    self.whisperDownloadProgress = 0
+                    self.whisperDownloadStatusText = ""
+                    self.refreshDownloadState()
+                } else {
+                    self.whisperError = "Whisper download failed: \(error.localizedDescription)"
+                    self.whisperDownloadProgress = 0
+                    self.whisperDownloadStatusText = ""
+                    self.refreshDownloadState()
+                }
             }
         }
 
@@ -689,12 +760,17 @@ public final class ModelManager {
     }
 
     public func cancelWhisperDownload() {
-        activeWhisperDownloadTask?.cancel()
+        let taskToCancel = activeWhisperDownloadTask
+        activeWhisperDownloadID = nil
         activeWhisperDownloadTask = nil
         isDownloadingWhisper = false
         isOptimizingWhisper = false
         whisperDownloadProgress = 0
         whisperDownloadStatusText = ""
+        taskToCancel?.cancel()
+        endWhisperBackgroundTask()
+        cleanupIncompleteWhisperCache()
+        refreshDownloadState()
     }
 
     public func deleteWhisperModel(_ preset: WhisperPreset? = nil) {
@@ -704,8 +780,11 @@ public final class ModelManager {
         }
         removeWhisperRelativePath(for: targetPreset)
         clearPrewarmed(targetPreset)
+        cleanupIncompleteWhisperCache()
+        cleanupOrphanedTokenizer(for: targetPreset)
         whisperDownloadProgress = 0
         whisperDownloadStatusText = ""
+        whisperError = nil
         refreshDownloadState()
         if selectedSpeechEngine == .whisperKit && !isWhisperDownloaded {
             selectedSpeechEngine = .appleSpeech
@@ -719,7 +798,7 @@ public final class ModelManager {
         guard targetPreset != .custom,
               let remoteURL = targetPreset.downloadURL,
               !targetPreset.fileName.isEmpty else {
-            downloadError = ModelManagerError.invalidDownloadURL.localizedDescription
+            llmError = ModelManagerError.invalidDownloadURL.localizedDescription
             return
         }
 
@@ -732,7 +811,7 @@ public final class ModelManager {
         activeLLMDownloadID = downloadID
         isDownloadingLLM = true
         llmDownloadProgress = 0
-        downloadError = nil
+        llmError = nil
 
         let destinationURL = llmBaseDirectory.appendingPathComponent(targetPreset.fileName, isDirectory: false)
         let fallbackBytes = Double(targetPreset.approximateSizeMB) * 1_048_576.0
@@ -786,7 +865,7 @@ public final class ModelManager {
             }
         } catch {
             if activeLLMDownloadID == downloadID {
-                downloadError = "LLM download failed: \(error.localizedDescription)"
+                llmError = "LLM download failed: \(error.localizedDescription)"
                 llmDownloadProgress = 0
                 refreshDownloadState()
             }
@@ -806,7 +885,7 @@ public final class ModelManager {
     }
 
     public func downloadRecommendedPack() async {
-        downloadError = nil
+        llmError = nil
         if !isDownloaded(.qwen25_1_5B) {
             await downloadLLMModel(.qwen25_1_5B)
         } else if selectedLLMPreset != .qwen25_1_5B {
@@ -817,7 +896,7 @@ public final class ModelManager {
 
     public func importCustomGGUF(from url: URL) throws {
         ensureModelDirectories()
-        downloadError = nil
+        llmError = nil
 
         let didStartScope = url.startAccessingSecurityScopedResource()
         defer {
@@ -870,6 +949,7 @@ public final class ModelManager {
             customLLMFileName = nil
         }
         llmDownloadProgress = 0
+        llmError = nil
         refreshDownloadState()
     }
 
@@ -939,6 +1019,30 @@ public final class ModelManager {
         llmBaseDirectory.appendingPathComponent("Custom", isDirectory: true)
     }
 
+    private func beginWhisperBackgroundTask(forDownloadID downloadID: UUID) {
+        endWhisperBackgroundTask()
+        whisperBackgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "BuddyWhisperDownload") { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, self.activeWhisperDownloadID == downloadID else { return }
+                self.endWhisperBackgroundTask()
+            }
+        }
+    }
+
+    private func endWhisperBackgroundTask() {
+        let taskID = whisperBackgroundTaskID
+        guard taskID != .invalid else { return }
+        whisperBackgroundTaskID = .invalid
+        UIApplication.shared.endBackgroundTask(taskID)
+    }
+
+    private static func isCancellationError(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
+    }
+
     private func ensureModelDirectories() {
         let fileManager = FileManager.default
         for directory in [modelsRootDirectory, whisperBaseDirectory, llmBaseDirectory, customLLMDirectory] {
@@ -975,6 +1079,8 @@ public final class ModelManager {
         defaults.set(stored, forKey: DefaultsKey.whisperRelativePaths)
     }
 
+    /// Verifies BOTH `tokenizer.json` and `tokenizer_config.json` exist locally (both are required
+    /// by `AutoTokenizer.from(modelFolder:)` for 100% offline Airplane Mode loading).
     private func hasCachedTokenizer(for preset: WhisperPreset, modelFolder: URL) -> Bool {
         let fileManager = FileManager.default
         let tokenizerRepoName = preset.tokenizerRepoName
@@ -986,8 +1092,44 @@ public final class ModelManager {
         ]
         return candidateFolders.contains { folder in
             let tokenizerFile = folder.appendingPathComponent("tokenizer.json", isDirectory: false)
+            let configFile = folder.appendingPathComponent("tokenizer_config.json", isDirectory: false)
             return fileManager.fileExists(atPath: tokenizerFile.path)
+                && fileManager.fileExists(atPath: configFile.path)
         }
+    }
+
+    /// Sweeps partial `.incomplete` Hub download cache files so cancelled or deleted downloads
+    /// never bloat `BuddyModels/Whisper` storage.
+    private func cleanupIncompleteWhisperCache() {
+        let fileManager = FileManager.default
+        let hubCacheDir = whisperBaseDirectory
+            .appendingPathComponent("models", isDirectory: true)
+            .appendingPathComponent("argmaxinc", isDirectory: true)
+            .appendingPathComponent("whisperkit-coreml", isDirectory: true)
+            .appendingPathComponent(".cache", isDirectory: true)
+
+        guard fileManager.fileExists(atPath: hubCacheDir.path),
+              let enumerator = fileManager.enumerator(at: hubCacheDir, includingPropertiesForKeys: nil) else {
+            return
+        }
+
+        for case let fileURL as URL in enumerator where fileURL.pathExtension == "incomplete" {
+            try? fileManager.removeItem(at: fileURL)
+        }
+    }
+
+    /// Removes the cached HuggingFace tokenizer folder if no other installed Whisper preset needs it.
+    private func cleanupOrphanedTokenizer(for deletedPreset: WhisperPreset) {
+        let repoName = deletedPreset.tokenizerRepoName
+        let stillNeeded = WhisperPreset.allCases.contains { other in
+            other != deletedPreset && other.tokenizerRepoName == repoName && isDownloaded(other)
+        }
+        guard !stillNeeded else { return }
+
+        let tokenizerFolder = whisperBaseDirectory
+            .appendingPathComponent("models", isDirectory: true)
+            .appendingPathComponent(repoName, isDirectory: true)
+        try? FileManager.default.removeItem(at: tokenizerFolder)
     }
 
     private static func isValidWhisperFolder(_ url: URL) -> Bool {

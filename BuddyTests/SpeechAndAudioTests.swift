@@ -181,7 +181,12 @@ final class SpeechAndAudioTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let manager = ModelManager(defaults: defaults, osBuildMarker: "iOS 18.5 (22F76)")
+        let eightGB: UInt64 = 8 * 1_073_741_824
+        let manager = ModelManager(
+            defaults: defaults,
+            osBuildMarker: "iOS 18.5 (22F76)",
+            physicalMemoryBytes: eightGB
+        )
         XCTAssertEqual(manager.selectedSpeechEngine, .appleSpeech)
         XCTAssertEqual(manager.selectedWhisperPreset, .largeV3Turbo)
         XCTAssertEqual(manager.effectiveSpeechEngine, .appleSpeech)
@@ -197,15 +202,113 @@ final class SpeechAndAudioTests: XCTestCase {
         XCTAssertEqual(manager.effectiveSpeechEngine, .appleSpeech)
         XCTAssertTrue(manager.isPrewarmed(.largeV3TurboCompact))
 
-        let reloadedSameOS = ModelManager(defaults: defaults, osBuildMarker: "iOS 18.5 (22F76)")
+        let reloadedSameOS = ModelManager(
+            defaults: defaults,
+            osBuildMarker: "iOS 18.5 (22F76)",
+            physicalMemoryBytes: eightGB
+        )
         XCTAssertEqual(reloadedSameOS.selectedSpeechEngine, .whisperKit)
         XCTAssertEqual(reloadedSameOS.selectedWhisperPreset, .largeV3TurboCompact)
         XCTAssertEqual(reloadedSameOS.selectedAppleSpeechLocale, .enIN)
         XCTAssertTrue(reloadedSameOS.isPrewarmed(.largeV3TurboCompact))
 
         // iOS updates invalidate CoreML ANE caches, so prewarm state must reset on a new OS build.
-        let reloadedNewOS = ModelManager(defaults: defaults, osBuildMarker: "iOS 19.0 (23A100)")
+        let reloadedNewOS = ModelManager(
+            defaults: defaults,
+            osBuildMarker: "iOS 19.0 (23A100)",
+            physicalMemoryBytes: eightGB
+        )
         XCTAssertFalse(reloadedNewOS.isPrewarmed(.largeV3TurboCompact))
+    }
+
+    @MainActor
+    func testModelManagerSelectsRAMSafeDefaultWhisperPreset() throws {
+        let suite4 = "com.yuvaraja.buddy.tests.ram4.\(UUID().uuidString)"
+        let suite6 = "com.yuvaraja.buddy.tests.ram6.\(UUID().uuidString)"
+        let suite8 = "com.yuvaraja.buddy.tests.ram8.\(UUID().uuidString)"
+        let defaults4 = try XCTUnwrap(UserDefaults(suiteName: suite4))
+        let defaults6 = try XCTUnwrap(UserDefaults(suiteName: suite6))
+        let defaults8 = try XCTUnwrap(UserDefaults(suiteName: suite8))
+        defer {
+            defaults4.removePersistentDomain(forName: suite4)
+            defaults6.removePersistentDomain(forName: suite6)
+            defaults8.removePersistentDomain(forName: suite8)
+        }
+
+        let gib: UInt64 = 1_073_741_824
+        XCTAssertEqual(ModelManager.recommendedWhisperPreset(forPhysicalMemoryBytes: 4 * gib), .smallEn)
+        XCTAssertEqual(ModelManager.recommendedWhisperPreset(forPhysicalMemoryBytes: 6 * gib), .largeV3TurboCompact)
+        XCTAssertEqual(ModelManager.recommendedWhisperPreset(forPhysicalMemoryBytes: 8 * gib), .largeV3Turbo)
+
+        let m4 = ModelManager(defaults: defaults4, physicalMemoryBytes: 4 * gib)
+        XCTAssertEqual(m4.selectedWhisperPreset, .smallEn)
+        XCTAssertTrue(m4.isLowRAMDeviceForLargeWhisper)
+
+        let m6 = ModelManager(defaults: defaults6, physicalMemoryBytes: 6 * gib)
+        XCTAssertEqual(m6.selectedWhisperPreset, .largeV3TurboCompact)
+        XCTAssertFalse(m6.isLowRAMDeviceForLargeWhisper)
+
+        let m8 = ModelManager(defaults: defaults8, physicalMemoryBytes: 8 * gib)
+        XCTAssertEqual(m8.selectedWhisperPreset, .largeV3Turbo)
+        XCTAssertFalse(m8.isLowRAMDeviceForLargeWhisper)
+    }
+
+    @MainActor
+    func testModelMemoryCoordinatorSerializesConcurrentWhisperAndLLMLoads() async throws {
+        let coordinator = ModelMemoryCoordinator()
+        var whisperResident = false
+        var llmResident = false
+        var peakConcurrentModels = 0
+
+        let whisperTask = Task { @MainActor in
+            try await coordinator.runExclusiveLoad(
+                for: .whisper,
+                unloadOther: {
+                    if llmResident {
+                        try? await Task.sleep(for: .milliseconds(25))
+                        llmResident = false
+                        coordinator.markUnloaded(.llm)
+                    }
+                },
+                operation: {
+                    XCTAssertFalse(llmResident, "LLM must be completely unloaded before Whisper loads")
+                    whisperResident = true
+                    peakConcurrentModels = max(peakConcurrentModels, (whisperResident ? 1 : 0) + (llmResident ? 1 : 0))
+                    try? await Task.sleep(for: .milliseconds(35))
+                    return "whisper"
+                }
+            )
+        }
+
+        let llmTask = Task { @MainActor in
+            try await coordinator.runExclusiveLoad(
+                for: .llm,
+                unloadOther: {
+                    if whisperResident {
+                        try? await Task.sleep(for: .milliseconds(25))
+                        whisperResident = false
+                        coordinator.markUnloaded(.whisper)
+                    }
+                },
+                operation: {
+                    XCTAssertFalse(whisperResident, "Whisper must be completely unloaded before LLM loads")
+                    llmResident = true
+                    peakConcurrentModels = max(peakConcurrentModels, (whisperResident ? 1 : 0) + (llmResident ? 1 : 0))
+                    try? await Task.sleep(for: .milliseconds(35))
+                    return "llm"
+                }
+            )
+        }
+
+        let first = try await whisperTask.value
+        let second = try await llmTask.value
+        XCTAssertEqual(first, "whisper")
+        XCTAssertEqual(second, "llm")
+        XCTAssertEqual(peakConcurrentModels, 1, "Whisper and Qwen must never be resident simultaneously")
+        XCTAssertEqual((whisperResident ? 1 : 0) + (llmResident ? 1 : 0), 1)
+
+        coordinator.markUnloaded(coordinator.activeOwner)
+        XCTAssertEqual(coordinator.activeOwner, .none)
     }
 
     func testWhisperHelpersPadShortClipsSanitizeArtifactsAndKeepPromptSafe() {
@@ -227,28 +330,94 @@ final class SpeechAndAudioTests: XCTestCase {
             "Incline dumbbell press 30 kg 3 sets 10 reps"
         )
 
-        // Gym bias prompt prioritizes active exercises and excludes destructive command words.
+        // Gym bias prompt prioritizes active exercises, stays compact, and excludes destructive words.
         let prompt = WhisperTranscriptionService.buildGymBiasPrompt(
             recentExercises: ["Cable Lateral Raise", "Bench Press", "bench press"]
         )
         XCTAssertTrue(prompt.contains("Cable Lateral Raise"))
-        XCTAssertTrue(prompt.contains("Romanian deadlift"))
+        XCTAssertTrue(prompt.contains("RDL"))
+        XCTAssertLessThan(prompt.count, 220, "Bias prompt must remain compact to stay well under WhisperKit's 111-token suffix cap")
         let lowerPrompt = prompt.lowercased()
         XCTAssertFalse(lowerPrompt.contains("delete"))
         XCTAssertFalse(lowerPrompt.contains("finish"))
         XCTAssertFalse(lowerPrompt.contains("end workout"))
     }
 
-    func testAudioResampleTo16kHzProducesExpectedFrameCount() {
-        // 1.0 second of 48 kHz mono sine wave -> ~16,000 samples at 16 kHz.
-        let sampleRate = 48_000.0
-        let count = Int(sampleRate)
-        let input: [Float] = (0..<count).map { idx in
-            sin(Float(2.0 * Double.pi * 440.0 * Double(idx) / sampleRate)) * 0.5
+    func testWhisperSilenceGuardAndCompactPromptBudget() {
+        XCTAssertFalse(WhisperTranscriptionService.hasAudibleSpeech(in: []))
+        XCTAssertFalse(WhisperTranscriptionService.hasAudibleSpeech(in: Array(repeating: Float(0), count: 16_000)))
+        XCTAssertFalse(WhisperTranscriptionService.hasAudibleSpeech(in: Array(repeating: Float(0.0001), count: 16_000)))
+
+        let speechWave: [Float] = (0..<16_000).map { idx in
+            sin(Float(2.0 * Double.pi * 220.0 * Double(idx) / 16_000.0)) * 0.05
         }
-        let resampled = AudioRecorderService.resampleTo16kHz(samples: input, fromSampleRate: sampleRate)
-        XCTAssertGreaterThan(resampled.count, 15_500)
-        XCTAssertLessThan(resampled.count, 16_500)
+        XCTAssertTrue(WhisperTranscriptionService.hasAudibleSpeech(in: speechWave))
+
+        var transientClip = Array(repeating: Float(0), count: 16_000)
+        transientClip[8_000] = 0.02
+        XCTAssertTrue(WhisperTranscriptionService.hasAudibleSpeech(in: transientClip))
+
+        // Long active exercise list must preserve the first 5 exercises at the front and cap total length.
+        let crowdedPrompt = WhisperTranscriptionService.buildGymBiasPrompt(recentExercises: [
+            "Bulgarian Split Squat",
+            "Seated Cable Row",
+            "Overhead Tricep Extension",
+            "Incline Smith Machine Press",
+            "Preacher Curl",
+            "Calf Raise",
+            "Face Pull"
+        ])
+        XCTAssertTrue(crowdedPrompt.contains("Bulgarian Split Squat"))
+        XCTAssertTrue(crowdedPrompt.contains("Preacher Curl"))
+        XCTAssertFalse(crowdedPrompt.contains("Calf Raise"))
+        XCTAssertLessThan(crowdedPrompt.count, 240)
+    }
+
+    func testAudioInterleavedStereoExtractionAndRMS() throws {
+        // Build a real interleaved 2-channel Float32 AVAudioPCMBuffer:
+        // Frame 0: (0.2, 0.6) -> mono 0.4
+        // Frame 1: (-0.4, 0.0) -> mono -0.2
+        // Frame 2: (0.8, 0.4) -> mono 0.6
+        // Frame 3: (-0.2, -0.6) -> mono -0.4
+        let format = try XCTUnwrap(
+            AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000, channels: 2, interleaved: true)
+        )
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4))
+        buffer.frameLength = 4
+
+        let interleavedData: [Float] = [0.2, 0.6, -0.4, 0.0, 0.8, 0.4, -0.2, -0.6]
+        let floatChannels = try XCTUnwrap(buffer.floatChannelData)
+        for index in 0..<interleavedData.count {
+            floatChannels[0][index] = interleavedData[index]
+        }
+
+        var output = Array(repeating: Float(0), count: 4)
+        output.withUnsafeMutableBufferPointer { dst in
+            AudioRecorderService.writeMonoFloatSamples(from: buffer, maxFrames: 4, into: dst.baseAddress!)
+        }
+
+        XCTAssertEqual(output[0], 0.4, accuracy: 0.0001)
+        XCTAssertEqual(output[1], -0.2, accuracy: 0.0001)
+        XCTAssertEqual(output[2], 0.6, accuracy: 0.0001)
+        XCTAssertEqual(output[3], -0.4, accuracy: 0.0001)
+
+        // Expected RMS of [0.4, -0.2, 0.6, -0.4] = sqrt((0.16 + 0.04 + 0.36 + 0.16) / 4) = sqrt(0.18)
+        let expectedRMS = sqrt(Float(0.18))
+        let actualRMS = AudioRecorderService.computeRMSInPlace(from: buffer)
+        XCTAssertEqual(actualRMS, expectedRMS, accuracy: 0.0005)
+    }
+
+    func testAudioResampleTo16kHzProducesExpectedFrameCount() {
+        // Test common iOS hardware sample rates (48 kHz, 44.1 kHz, 24 kHz Bluetooth HFP).
+        for sampleRate in [48_000.0, 44_100.0, 24_000.0] {
+            let count = Int(sampleRate)
+            let input: [Float] = (0..<count).map { idx in
+                sin(Float(2.0 * Double.pi * 440.0 * Double(idx) / sampleRate)) * 0.5
+            }
+            let resampled = AudioRecorderService.resampleTo16kHz(samples: input, fromSampleRate: sampleRate)
+            XCTAssertGreaterThan(resampled.count, 15_500, "Sample rate \(sampleRate) produced too few frames")
+            XCTAssertLessThan(resampled.count, 16_500, "Sample rate \(sampleRate) produced too many frames")
+        }
 
         // Already 16 kHz passes through untouched.
         let passthrough = AudioRecorderService.resampleTo16kHz(samples: [0.1, -0.2, 0.3], fromSampleRate: 16_000)

@@ -45,7 +45,7 @@ struct ModelSetupSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 18) {
-                    heroHeader(isVoiceReady: isVoiceReady)
+                    heroHeader(isVoiceReady: isVoiceReady, isWhisperReady: isWhisperReady)
 
                     VStack(spacing: 12) {
                         modelRowCard(
@@ -54,16 +54,38 @@ struct ModelSetupSheet: View {
                             subtitle: whisperPreset.subtitle,
                             sizeText: formatSizeMB(whisperPreset.approximateSizeMB),
                             isDownloaded: isWhisperReady,
-                            isDownloading: modelManager.isDownloadingWhisper || modelManager.isOptimizingWhisper,
+                            isDownloading: modelManager.isDownloadingWhisper
+                                || modelManager.isOptimizingWhisper
+                                || whisperService.isPrewarming,
                             progress: modelManager.whisperDownloadProgress,
+                            downloadingStatusText: modelManager.whisperDownloadStatusText.isEmpty
+                                ? "Optimizing for Neural Engine (one-time)…"
+                                : modelManager.whisperDownloadStatusText,
                             onDownload: {
                                 Task {
                                     await modelManager.downloadWhisperModel(whisperPreset) { downloadedPreset in
                                         try await whisperService.prewarmDownloadedModel(downloadedPreset)
                                     }
                                 }
+                            },
+                            onCancel: {
+                                modelManager.cancelWhisperDownload()
+                                whisperService.cancelInFlightWork()
                             }
                         )
+
+                        if modelManager.isLowRAMDeviceForLargeWhisper && whisperPreset.isLargeModel {
+                            NativeCard(padding: 12, cornerRadius: 12, tint: BuddyTheme.amberStreak) {
+                                HStack(alignment: .top, spacing: 10) {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundStyle(BuddyTheme.amberStreak)
+                                    Text("This device has ~\(Int(modelManager.deviceRAMGB.rounded())) GB RAM. Switch to Whisper Small (217 MB) in Settings → Voice & Local AI for best stability on SideStore.")
+                                        .font(.footnote)
+                                        .foregroundStyle(.primary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                        }
 
                         speechCard
 
@@ -75,13 +97,18 @@ struct ModelSetupSheet: View {
                             isDownloaded: isLLMReady,
                             isDownloading: modelManager.isDownloadingLLM,
                             progress: modelManager.llmDownloadProgress,
+                            downloadingStatusText: "Downloading \(llmCardTitle)…",
                             onDownload: {
                                 Task { await modelManager.downloadLLMModel(preset) }
+                            },
+                            onCancel: {
+                                modelManager.cancelLLMDownload()
                             }
                         )
                     }
 
-                    if let error = modelManager.downloadError {
+                    let activeErrors = [modelManager.whisperError, modelManager.llmError].compactMap { $0 }
+                    ForEach(activeErrors, id: \.self) { error in
                         NativeCard(padding: 12, cornerRadius: 12, tint: BuddyTheme.destructive) {
                             HStack(alignment: .top, spacing: 10) {
                                 Image(systemName: "exclamationmark.triangle.fill")
@@ -89,6 +116,7 @@ struct ModelSetupSheet: View {
                                 Text(error)
                                     .font(.footnote)
                                     .foregroundStyle(.primary)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                     }
@@ -189,7 +217,7 @@ struct ModelSetupSheet: View {
         }
     }
 
-    private func heroHeader(isVoiceReady: Bool) -> some View {
+    private func heroHeader(isVoiceReady: Bool, isWhisperReady: Bool) -> some View {
         VStack(spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -207,9 +235,11 @@ struct ModelSetupSheet: View {
                     .multilineTextAlignment(.center)
 
                 Text(
-                    isVoiceReady
-                        ? "Voice logging works right away with Apple On-Device Speech. Download a local Qwen model once over Wi-Fi for your offline Gym Coach and natural-language parsing."
-                        : "Enable offline Dictation in iOS Settings for voice logging, and download a local Qwen model once over Wi-Fi for your offline Gym Coach."
+                    isWhisperReady
+                        ? "Local Whisper voice transcription is ready offline. Download Qwen once over Wi-Fi for your on-device Gym Coach and natural-language parsing."
+                        : (isVoiceReady
+                            ? "Voice logging works right away with Apple Speech, or download WhisperKit for higher loud-gym accuracy. Download Qwen once over Wi-Fi for your offline Gym Coach."
+                            : "Download WhisperKit for 100% offline gym voice logging (or enable Apple Dictation), plus Qwen once over Wi-Fi for your offline Gym Coach.")
                 )
                 .font(.subheadline)
                 .foregroundStyle(BuddyTheme.mutedText)
@@ -235,7 +265,9 @@ struct ModelSetupSheet: View {
         isDownloaded: Bool,
         isDownloading: Bool,
         progress: Double,
-        onDownload: @escaping () -> Void
+        downloadingStatusText: String = "Downloading…",
+        onDownload: @escaping () -> Void,
+        onCancel: (() -> Void)? = nil
     ) -> some View {
         NativeCard(padding: 15, cornerRadius: 14) {
             VStack(alignment: .leading, spacing: 12) {
@@ -274,19 +306,28 @@ struct ModelSetupSheet: View {
                 }
 
                 if isDownloading {
-                    VStack(alignment: .leading, spacing: 5) {
+                    VStack(alignment: .leading, spacing: 6) {
                         ProgressView(value: min(max(progress, 0), 1))
                             .tint(BuddyTheme.inkPrimary)
 
-                        HStack {
-                            Text("Downloading…")
+                        HStack(spacing: 8) {
+                            Text(downloadingStatusText)
                                 .font(.caption2.weight(.medium))
                                 .foregroundStyle(BuddyTheme.mutedText)
+                                .lineLimit(1)
                             Spacer()
                             Text("\(Int((min(max(progress, 0), 1) * 100).rounded()))%")
                                 .font(.caption2.weight(.bold))
                                 .buddyNumeric()
                                 .foregroundStyle(.primary)
+                            if let onCancel {
+                                Button("Cancel") {
+                                    BuddyHaptics.lightImpact()
+                                    onCancel()
+                                }
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(BuddyTheme.destructive)
+                            }
                         }
                     }
                 } else if isDownloaded {

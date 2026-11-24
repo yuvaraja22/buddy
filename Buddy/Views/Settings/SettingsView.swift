@@ -459,6 +459,7 @@ private struct VoiceAndAISettingsView: View {
     @State private var showFileImporter: Bool = false
     @State private var importMessage: String?
     @State private var importIsError: Bool = false
+    @State private var manualOptimizeError: String?
 
     private let whisperPresets: [WhisperPreset] = [.largeV3Turbo, .largeV3TurboCompact, .smallEn]
     private let llmPresets: [LLMPreset] = [.qwen25_1_5B, .qwen25_0_5B, .custom]
@@ -489,7 +490,9 @@ private struct VoiceAndAISettingsView: View {
 
     private var speechCard: some View {
         let selectedEngine = modelManager.selectedSpeechEngine
-        let isWhisperBusy = modelManager.isDownloadingWhisper || modelManager.isOptimizingWhisper
+        let isWhisperBusy = modelManager.isDownloadingWhisper
+            || modelManager.isOptimizingWhisper
+            || whisperService.isPrewarming
 
         return NativeCard(padding: 15, cornerRadius: 14) {
             VStack(alignment: .leading, spacing: 12) {
@@ -508,7 +511,7 @@ private struct VoiceAndAISettingsView: View {
                             modelManager.selectedSpeechEngine = engine
                             if engine == .appleSpeech {
                                 Task { @MainActor in
-                                    await whisperService.unload()
+                                    await whisperService.unloadAndWait()
                                 }
                             }
                         } label: {
@@ -585,12 +588,13 @@ private struct VoiceAndAISettingsView: View {
                 Button {
                     guard !isBusy else { return }
                     BuddyHaptics.selection()
+                    manualOptimizeError = nil
                     let changed = (modelManager.selectedWhisperPreset != preset)
                     modelManager.selectedWhisperPreset = preset
                     modelManager.refreshDownloadState()
                     if changed {
                         Task { @MainActor in
-                            await whisperService.unload()
+                            await whisperService.unloadAndWait()
                         }
                     }
                 } label: {
@@ -643,47 +647,83 @@ private struct VoiceAndAISettingsView: View {
             }
         }
 
+        if modelManager.isLowRAMDeviceForLargeWhisper && selectedPreset.isLargeModel {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(BuddyTheme.amberStreak)
+                    .padding(.top, 1)
+                Text("This device has ~\(Int(modelManager.deviceRAMGB.rounded())) GB RAM. Whisper Small (217 MB) is recommended on SideStore builds to avoid iOS memory termination.")
+                    .font(.caption)
+                    .foregroundStyle(BuddyTheme.amberStreak)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(BuddyTheme.elevatedSurface)
+            )
+        }
+
         if isBusy {
+            let isStandalonePrewarm = whisperService.isPrewarming
+                && !modelManager.isDownloadingWhisper
+                && !modelManager.isOptimizingWhisper
+            let statusText: String = {
+                if !modelManager.whisperDownloadStatusText.isEmpty {
+                    return modelManager.whisperDownloadStatusText
+                }
+                if whisperService.isPrewarming {
+                    return "Optimizing \(selectedPreset.shortDisplayName) for Neural Engine (one-time)…"
+                }
+                return "Preparing \(selectedPreset.shortDisplayName)…"
+            }()
+
             VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text(
-                        modelManager.whisperDownloadStatusText.isEmpty
-                            ? "Preparing \(selectedPreset.shortDisplayName)…"
-                            : modelManager.whisperDownloadStatusText
-                    )
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.primary)
-                    Spacer()
-                    Text("\(Int((min(max(modelManager.whisperDownloadProgress, 0), 1) * 100).rounded()))%")
-                        .font(.caption.weight(.bold))
-                        .monospacedDigit()
+                HStack(spacing: 8) {
+                    if isStandalonePrewarm {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(BuddyTheme.inkPrimary)
+                    }
+                    Text(statusText)
+                        .font(.caption.weight(.semibold))
                         .foregroundStyle(Color.primary)
-                }
-
-                GeometryReader { proxy in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(BuddyTheme.elevatedSurface)
-                        Capsule()
-                            .fill(BuddyTheme.inkPrimary)
-                            .frame(width: max(8, proxy.size.width * min(max(modelManager.whisperDownloadProgress, 0), 1)))
+                    Spacer()
+                    if !isStandalonePrewarm {
+                        Text("\(Int((min(max(modelManager.whisperDownloadProgress, 0), 1) * 100).rounded()))%")
+                            .font(.caption.weight(.bold))
+                            .monospacedDigit()
+                            .foregroundStyle(Color.primary)
                     }
                 }
-                .frame(height: 6)
 
-                if modelManager.isDownloadingWhisper {
-                    Button {
-                        BuddyHaptics.lightImpact()
-                        modelManager.cancelWhisperDownload()
-                    } label: {
-                        Text("Cancel Download")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(BuddyTheme.destructive)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 9)
-                            .background(Capsule().fill(BuddyTheme.destructive.opacity(0.12)))
+                if !isStandalonePrewarm {
+                    GeometryReader { proxy in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(BuddyTheme.elevatedSurface)
+                            Capsule()
+                                .fill(BuddyTheme.inkPrimary)
+                                .frame(width: max(8, proxy.size.width * min(max(modelManager.whisperDownloadProgress, 0), 1)))
+                        }
                     }
-                    .buttonStyle(.plain)
+                    .frame(height: 6)
                 }
+
+                Button {
+                    BuddyHaptics.lightImpact()
+                    modelManager.cancelWhisperDownload()
+                    whisperService.cancelInFlightWork()
+                } label: {
+                    Text(modelManager.isDownloadingWhisper ? "Cancel Download" : "Cancel Optimization")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(BuddyTheme.destructive)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(Capsule().fill(BuddyTheme.destructive.opacity(0.12)))
+                }
+                .buttonStyle(.plain)
             }
         } else if isDownloaded {
             HStack(spacing: 10) {
@@ -699,11 +739,18 @@ private struct VoiceAndAISettingsView: View {
                 if !isPrewarmed {
                     Button {
                         BuddyHaptics.lightImpact()
+                        manualOptimizeError = nil
                         Task { @MainActor in
-                            try? await whisperService.prewarmDownloadedModel(selectedPreset)
+                            do {
+                                try await whisperService.prewarmDownloadedModel(selectedPreset)
+                            } catch is CancellationError {
+                                // User cancelled optimization cleanly.
+                            } catch {
+                                manualOptimizeError = "Neural Engine optimization failed: \(error.localizedDescription)"
+                            }
                         }
                     } label: {
-                        Text(whisperService.isPrewarming ? "Optimizing…" : "Optimize")
+                        Text("Optimize")
                             .font(.system(size: 12, weight: .bold))
                             .foregroundStyle(Color.primary)
                             .padding(.horizontal, 10)
@@ -711,12 +758,12 @@ private struct VoiceAndAISettingsView: View {
                             .background(Capsule().fill(BuddyTheme.chipSurface))
                     }
                     .buttonStyle(.plain)
-                    .disabled(whisperService.isPrewarming)
                 }
                 Button {
                     BuddyHaptics.warning()
+                    manualOptimizeError = nil
                     Task { @MainActor in
-                        await whisperService.unload()
+                        await whisperService.unloadAndWait()
                         modelManager.deleteWhisperModel(selectedPreset)
                     }
                 } label: {
@@ -737,6 +784,7 @@ private struct VoiceAndAISettingsView: View {
         } else {
             Button {
                 BuddyHaptics.mediumImpact()
+                manualOptimizeError = nil
                 Task { @MainActor in
                     await modelManager.downloadWhisperModel(selectedPreset) { downloadedPreset in
                         try await whisperService.prewarmDownloadedModel(downloadedPreset)
@@ -757,7 +805,7 @@ private struct VoiceAndAISettingsView: View {
             .buttonStyle(.plain)
         }
 
-        if let error = modelManager.downloadError, error.hasPrefix("Whisper") {
+        if let error = modelManager.whisperError ?? manualOptimizeError {
             Text(error)
                 .font(.caption)
                 .foregroundStyle(BuddyTheme.destructive)
@@ -1041,8 +1089,10 @@ private struct VoiceAndAISettingsView: View {
                         Spacer()
                         Button {
                             BuddyHaptics.warning()
-                            llmService.unload()
-                            modelManager.deleteLLMModel(selected)
+                            Task { @MainActor in
+                                await llmService.unloadAndWait()
+                                modelManager.deleteLLMModel(selected)
+                            }
                         } label: {
                             Text("Delete")
                                 .font(.system(size: 12.5, weight: .bold))
@@ -1096,10 +1146,11 @@ private struct VoiceAndAISettingsView: View {
                 }
                 .buttonStyle(.plain)
 
-                if let error = modelManager.downloadError, !error.hasPrefix("Whisper") {
+                if let error = modelManager.llmError {
                     Text(error)
                         .font(.caption)
                         .foregroundStyle(BuddyTheme.destructive)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if let importMessage {
@@ -1135,7 +1186,11 @@ private struct VoiceAndAISettingsView: View {
         }()
 
         let anyModelLoaded = whisperService.isLoaded || llmService.isLoaded
-        let combinedNotice = whisperService.lastMemoryNotice ?? llmService.lastMemoryNotice
+        let memoryNotices = [whisperService.lastMemoryNotice, llmService.lastMemoryNotice]
+            .compactMap { notice -> String? in
+                guard let notice, !notice.isEmpty else { return nil }
+                return notice
+            }
 
         return NativeCard(padding: 15, cornerRadius: 14) {
             VStack(alignment: .leading, spacing: 12) {
@@ -1181,18 +1236,21 @@ private struct VoiceAndAISettingsView: View {
 
                 keyValueRow(title: "Model Storage", value: modelManager.totalStorageUsedDescription)
 
-                if let combinedNotice, !combinedNotice.isEmpty {
-                    Text(combinedNotice)
+                ForEach(memoryNotices, id: \.self) { notice in
+                    Text(notice)
                         .font(.caption)
                         .foregroundStyle(BuddyTheme.mutedText)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if anyModelLoaded {
                     Button {
                         BuddyHaptics.lightImpact()
-                        llmService.unload()
                         Task { @MainActor in
-                            await whisperService.unload()
+                            await llmService.unloadAndWait()
+                            await whisperService.unloadAndWait()
+                            llmService.lastMemoryNotice = nil
+                            whisperService.lastMemoryNotice = nil
                         }
                     } label: {
                         HStack(spacing: 6) {

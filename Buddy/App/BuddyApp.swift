@@ -30,20 +30,19 @@ struct BuddyApp: App {
         let manager = ModelManager()
         let recorder = AudioRecorderService()
         let appleSpeech = AppleSpeechService()
+        let memoryCoordinator = ModelMemoryCoordinator()
         let whisper = WhisperTranscriptionService(modelManager: manager)
         let llm = LocalLLMService(modelManager: manager)
 
-        // Strict mutual RAM exclusion: Whisper Large v3 Turbo and Qwen LLM never occupy RAM
-        // simultaneously, keeping peak footprint safely under SideStore's iOS Jetsam ceiling.
-        whisper.onBeforeLoadModel = { [weak llm] in
-            guard let llm, llm.isLoaded || llm.isLoading else { return }
-            llm.unload()
-            try? await Task.sleep(for: .milliseconds(150))
+        // Serialized mutual RAM exclusion: Whisper Large v3 Turbo and Qwen LLM await complete
+        // teardown of the opposing model through ModelMemoryCoordinator before allocating memory.
+        whisper.memoryCoordinator = memoryCoordinator
+        whisper.onUnloadOpposingModel = { [weak llm] in
+            await llm?.unloadAndWait()
         }
-        llm.onBeforeLoadModel = { [weak whisper] in
-            guard let whisper, whisper.isLoaded || whisper.isLoading || whisper.isPrewarming else { return }
-            await whisper.unload()
-            try? await Task.sleep(for: .milliseconds(150))
+        llm.memoryCoordinator = memoryCoordinator
+        llm.onUnloadOpposingModel = { [weak whisper] in
+            await whisper?.unloadAndWait()
         }
 
         let coordinator = VoicePipelineCoordinator(

@@ -73,7 +73,7 @@ struct VoiceRecapCaptureSheet: View {
                             ProgressView()
                                 .controlSize(.small)
                                 .tint(BuddyTheme.inkPrimary)
-                            Text(pipeline.phase == .transcribing ? "FINALIZING SPEECH…" : "PARSING FULL SESSION…")
+                            Text(pipeline.phase == .transcribing ? pipeline.transcribingStageTitle.uppercased() : "PARSING FULL SESSION…")
                                 .font(.system(size: 11, weight: .bold))
                                 .tracking(0.6)
                                 .foregroundStyle(Color.primary)
@@ -170,14 +170,30 @@ struct VoiceRecapCaptureSheet: View {
                     }
                     .buttonStyle(.plain)
                 } else if isProcessing {
+                    Button {
+                        BuddyHaptics.lightImpact()
+                        pipeline.cancelRecording()
+                        dismiss()
+                    } label: {
+                        Text("Cancel")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(Color.primary)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 14)
+                            .background(Capsule().fill(BuddyTheme.elevatedSurface))
+                    }
+                    .buttonStyle(.plain)
+
                     HStack(spacing: 8) {
                         ProgressView()
                             .tint(BuddyTheme.inkPrimary)
-                        Text("Extracting every exercise offline…")
-                            .font(.system(size: 14, weight: .semibold))
+                        Text(pipeline.phase == .transcribing ? pipeline.transcribingStageTitle : "Extracting exercises offline…")
+                            .font(.system(size: 13.5, weight: .semibold))
                             .foregroundStyle(BuddyTheme.mutedText)
+                            .lineLimit(1)
                     }
                     .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 12)
                     .padding(.vertical, 14)
                     .background(Capsule().fill(BuddyTheme.elevatedSurface))
                 } else {
@@ -301,6 +317,7 @@ struct SessionRecapReviewSheet: View {
     @State private var showTranscriptEditor: Bool = false
     @State private var isReparsing: Bool = false
     @State private var reparseError: String?
+    @State private var reparseTask: Task<Void, Never>?
 
     private let splitQuickTitles: [String] = ["Push Day", "Pull Day", "Leg Day", "Upper Body", "Full Body", "Cardio"]
 
@@ -357,6 +374,10 @@ struct SessionRecapReviewSheet: View {
             bottomSaveBar
         }
         .background(BuddyTheme.canvasBackground.ignoresSafeArea())
+        .onDisappear {
+            reparseTask?.cancel()
+            reparseTask = nil
+        }
     }
 
     // MARK: - Header
@@ -915,11 +936,14 @@ struct SessionRecapReviewSheet: View {
         let cleaned = transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return }
 
+        reparseTask?.cancel()
         isReparsing = true
         reparseError = nil
-        Task { @MainActor in
+        reparseTask = Task { @MainActor in
             let intent = await pipeline.reparseRecapTranscript(cleaned, context: store.promptContext())
+            guard !Task.isCancelled else { return }
             isReparsing = false
+            reparseTask = nil
             if intent.action == .logSets && !intent.items.isEmpty {
                 draftItems = intent.items.map {
                     EditableRecapItem(from: $0, defaultUnit: store.preferredUnit)
