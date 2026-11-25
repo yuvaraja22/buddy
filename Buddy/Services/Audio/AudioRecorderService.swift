@@ -48,7 +48,7 @@ private final class LockedFloatLevel: @unchecked Sendable {
 ///
 /// On CoreAudio's realtime tap thread (`record`), NO Swift heap allocations or array resizes occur:
 /// - In Apple Speech mode (`shouldStoreSamples == false`), only duration is incremented.
-/// - In WhisperKit mode (`shouldStoreSamples == true`), mono Float32 samples are written directly
+/// - In Parakeet mode (`shouldStoreSamples == true`), mono Float32 samples are written directly
 ///   into a fixed pre-allocated staging ring buffer (~2s @ 48 kHz) protected by `os_unfair_lock`,
 ///   and drained off-thread onto a serial utility `DispatchQueue` into resizable `[Segment]` storage.
 private final class RealtimeSafeAudioBuffer: @unchecked Sendable {
@@ -285,7 +285,7 @@ public struct AudioSessionConfiguration: Equatable, @unchecked Sendable {
 @Observable
 @MainActor
 public final class AudioRecorderService {
-    /// Target mono sample rate required by OpenAI Whisper / WhisperKit CoreML models.
+    /// Target mono sample rate required by NVIDIA Parakeet TDT CoreML models.
     public static let targetSampleRate: Double = 16_000
     /// Supports uninterrupted 3-minute full-session post-gym voice recaps.
     public static let maxRecordingSeconds: TimeInterval = 180
@@ -362,7 +362,7 @@ public final class AudioRecorderService {
 
     /// Activates `AVAudioSession`, configures gym mic routing & hardware noise isolation,
     /// invokes `onSessionActivated`, and starts `AVAudioEngine` with a zero-allocation realtime tap.
-    /// Set `captureRawSamples = true` when recording for offline WhisperKit transcription.
+    /// Set `captureRawSamples = true` when recording for offline Parakeet transcription.
     public func startRecording(
         options: AudioCaptureOptions = AudioCaptureOptions(),
         captureRawSamples: Bool = false,
@@ -433,7 +433,7 @@ public final class AudioRecorderService {
     }
 
     /// Stops recording and resamples captured hardware-rate mono audio to 16 kHz Float32 off-MainActor
-    /// for WhisperKit transcription.
+    /// for Parakeet transcription.
     public func stopRecordingAndDrain16kHzSamples() async -> (duration: TimeInterval, samples: [Float]) {
         teardownEngine(deactivateSession: true)
         let drained = rawAudioBuffer.drain()
@@ -867,7 +867,7 @@ public final class AudioRecorderService {
         let elapsed = recordingStartDate.map { Date().timeIntervalSince($0) } ?? 0
         let bufferedDuration = rawAudioBuffer.totalSeconds
 
-        // In WhisperKit raw-sample capture mode, `RealtimeSafeAudioBuffer` cleanly segments
+        // In Parakeet raw-sample capture mode, `RealtimeSafeAudioBuffer` cleanly segments
         // across sample-rate switches, so mid-recording AirPods/Bluetooth route changes seamlessly
         // restart the engine without prematurely cutting off the user's recap.
         let canRecoverSeamlessly = isCapturingRawSamples

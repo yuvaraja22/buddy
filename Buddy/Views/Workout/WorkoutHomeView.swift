@@ -47,7 +47,7 @@ struct WorkoutHomeView: View {
     let pipeline: VoicePipelineCoordinator
     let modelManager: ModelManager
     let appleSpeechService: AppleSpeechService
-    let whisperService: WhisperTranscriptionService
+    let parakeetService: ParakeetTranscriptionService
     let llmService: LocalLLMService
     let cloudSync: FirebaseSyncService
     var isTabActive: Bool = true
@@ -174,7 +174,7 @@ struct WorkoutHomeView: View {
                     store: store,
                     modelManager: modelManager,
                     appleSpeechService: appleSpeechService,
-                    whisperService: whisperService,
+                    parakeetService: parakeetService,
                     llmService: llmService,
                     cloudSync: cloudSync
                 )

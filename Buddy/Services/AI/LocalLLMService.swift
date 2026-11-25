@@ -73,9 +73,9 @@ public final class LocalLLMService {
     public var loadedModelName: String?
     public var lastMemoryNotice: String?
 
-    /// Shared residency coordinator ensuring Qwen GGUF and WhisperKit never overlap in RAM.
+    /// Shared residency coordinator ensuring Qwen GGUF and Parakeet CoreML never overlap in RAM.
     @ObservationIgnored public var memoryCoordinator: ModelMemoryCoordinator?
-    /// Invoked inside `memoryCoordinator` to cancel & await complete teardown of `WhisperTranscriptionService`.
+    /// Invoked inside `memoryCoordinator` to cancel & await complete teardown of `ParakeetTranscriptionService`.
     @ObservationIgnored public var onUnloadOpposingModel: (@MainActor () async -> Void)?
 
     private let modelManager: ModelManager
@@ -199,7 +199,7 @@ public final class LocalLLMService {
     }
 
     /// Stops any active GGUF generation/mapping, awaits until the C++ context exits, and releases
-    /// `llm = nil` so `LLMCore.deinit` frees `llama_model` BEFORE WhisperKit starts loading CoreML.
+    /// `llm = nil` so `LLMCore.deinit` frees `llama_model` BEFORE Parakeet starts loading CoreML.
     public func unloadAndWait() async {
         pendingMemoryUnload = true
         llm?.stop()
@@ -252,7 +252,7 @@ public final class LocalLLMService {
     }
 
     /// Returns `true` when `RuleBasedWorkoutParser` extracted a complete, unambiguous command
-    /// (so Buddy can log immediately in <1 ms without evicting WhisperKit from RAM to load Qwen).
+    /// (so Buddy can log immediately in <1 ms without evicting Parakeet from RAM to load Qwen).
     public nonisolated static func isConfidentRuleParse(_ intent: WorkoutCommandIntent) -> Bool {
         switch intent.action {
         case .updateLastSet, .deleteLastSet, .deleteLastExercise, .endSession:

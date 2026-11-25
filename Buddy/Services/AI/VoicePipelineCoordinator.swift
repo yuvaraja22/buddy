@@ -37,28 +37,25 @@ public final class VoicePipelineCoordinator {
     }
 
     public var transcribingStageTitle: String {
-        if activeRecordingEngine == .whisperKit {
-            if whisperService.isPrewarming {
-                return "Optimizing Whisper (one-time)…"
+        if activeRecordingEngine == .parakeet {
+            if parakeetService.isLoading {
+                return "Loading \(modelManager.selectedParakeetPreset.shortDisplayName)…"
             }
-            if whisperService.isLoading {
-                return "Loading \(modelManager.selectedWhisperPreset.shortDisplayName)…"
-            }
-            return "Transcribing with Whisper…"
+            return "Transcribing with Parakeet…"
         }
         return "Finalizing speech…"
     }
 
     public var parsingStageTitle: String {
-        if activeRecordingEngine == .whisperKit {
+        if activeRecordingEngine == .parakeet {
             return "Parsing sets…"
         }
         return modelManager.isLLMDownloaded ? "Parsing with Qwen…" : "Parsing sets…"
     }
 
     public var processingModeCaption: String {
-        if activeRecordingEngine == .whisperKit {
-            return "\(modelManager.selectedWhisperPreset.shortDisplayName) · 100% Offline"
+        if activeRecordingEngine == .parakeet {
+            return "\(modelManager.selectedParakeetPreset.shortDisplayName) · 100% Offline"
         }
         if appleSpeechService.isUsingCloudEnhancedSpeech {
             return "Apple Cloud-Enhanced Speech"
@@ -68,7 +65,7 @@ public final class VoicePipelineCoordinator {
 
     private let audioRecorder: AudioRecorderService
     private let appleSpeechService: AppleSpeechService
-    private let whisperService: WhisperTranscriptionService
+    private let parakeetService: ParakeetTranscriptionService
     private let llmService: LocalLLMService
     private let modelManager: ModelManager
 
@@ -86,13 +83,13 @@ public final class VoicePipelineCoordinator {
     public init(
         audioRecorder: AudioRecorderService,
         appleSpeechService: AppleSpeechService,
-        whisperService: WhisperTranscriptionService,
+        parakeetService: ParakeetTranscriptionService,
         llmService: LocalLLMService,
         modelManager: ModelManager
     ) {
         self.audioRecorder = audioRecorder
         self.appleSpeechService = appleSpeechService
-        self.whisperService = whisperService
+        self.parakeetService = parakeetService
         self.llmService = llmService
         self.modelManager = modelManager
 
@@ -144,7 +141,7 @@ public final class VoicePipelineCoordinator {
         await llmService.parseVoiceTranscript(
             text,
             context: context,
-            preferInstantParserWhenConfident: whisperService.isLoaded
+            preferInstantParserWhenConfident: parakeetService.isLoaded
         )
     }
 
@@ -192,7 +189,7 @@ public final class VoicePipelineCoordinator {
         let chosenEngine = modelManager.effectiveSpeechEngine
 
         // Apple Speech requires Speech Recognition permission & locale availability;
-        // WhisperKit runs 100% locally via CoreML and only needs Microphone access.
+        // Parakeet runs 100% locally via CoreML and only needs Microphone access.
         if chosenEngine == .appleSpeech {
             let speechStatus = SFSpeechRecognizer.authorizationStatus()
             if speechStatus == .notDetermined {
@@ -249,7 +246,7 @@ public final class VoicePipelineCoordinator {
             do {
                 let captureOptions = self.modelManager.audioCaptureOptions
 
-                if chosenEngine == .whisperKit {
+                if chosenEngine == .parakeet {
                     self.audioRecorder.setAudioBufferHandler(nil)
                     self.audioRecorder.onEngineRestarted = nil
                     try await self.audioRecorder.startRecording(
@@ -348,7 +345,7 @@ public final class VoicePipelineCoordinator {
             self.audioRecorder.setAudioBufferHandler(nil)
             self.audioRecorder.onEngineRestarted = nil
 
-            if engine == .whisperKit {
+            if engine == .parakeet {
                 self.phase = .transcribing
                 let captured = await self.audioRecorder.stopRecordingAndDrain16kHzSamples()
                 guard self.operationToken == token, !Task.isCancelled else { return }
@@ -358,7 +355,7 @@ public final class VoicePipelineCoordinator {
                     return
                 }
 
-                await self.runWhisperTranscriptionAndParse(samples: captured.samples, token: token, into: store)
+                await self.runParakeetTranscriptionAndParse(samples: captured.samples, token: token, into: store)
             } else {
                 let capturedDuration = self.audioRecorder.stopRecording()
                 let existingPartial = self.liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -388,7 +385,7 @@ public final class VoicePipelineCoordinator {
         if wasParsing {
             llmService.stopVoiceParsing()
         }
-        whisperService.cancelInFlightWork()
+        parakeetService.cancelInFlightWork()
         audioRecorder.setAudioBufferHandler(nil)
         audioRecorder.onEngineRestarted = nil
         audioRecorder.cancelRecording()
@@ -447,14 +444,14 @@ public final class VoicePipelineCoordinator {
 
         if let samples = pendingAudioSamples, samples.count >= 1_600 {
             pendingAudioSamples = nil
-            activeRecordingEngine = .whisperKit
+            activeRecordingEngine = .parakeet
             operationToken &+= 1
             let token = operationToken
             liveTranscript = ""
             processingTask?.cancel()
             processingTask = Task { @MainActor [weak self] in
                 guard let self else { return }
-                await self.runWhisperTranscriptionAndParse(samples: samples, token: token, into: store)
+                await self.runParakeetTranscriptionAndParse(samples: samples, token: token, into: store)
             }
         } else if let transcript = pendingTranscript, !transcript.isEmpty {
             pendingTranscript = nil
@@ -485,7 +482,7 @@ public final class VoicePipelineCoordinator {
             }
 
             let context = store.promptContext()
-            let preferInstant = self.whisperService.isLoaded
+            let preferInstant = self.parakeetService.isLoaded
             let intent = await self.llmService.parseVoiceTranscript(
                 trimmed,
                 context: context,
@@ -523,7 +520,7 @@ public final class VoicePipelineCoordinator {
         }
     }
 
-    private func runWhisperTranscriptionAndParse(
+    private func runParakeetTranscriptionAndParse(
         samples: [Float],
         token: UInt64,
         into store: WorkoutStore
@@ -538,11 +535,7 @@ public final class VoicePipelineCoordinator {
 
         phase = .transcribing
         do {
-            let recentExercises = store.activeSession?.sortedEntries.map(\.exerciseName) ?? []
-            let transcript = try await whisperService.transcribe(
-                samples: samples,
-                recentExercises: recentExercises
-            )
+            let transcript = try await parakeetService.transcribe(samples: samples)
             guard operationToken == token, !Task.isCancelled else { return }
 
             pendingAudioSamples = nil
@@ -687,7 +680,7 @@ public final class VoicePipelineCoordinator {
             isFinishingRecording = false
             processingTask?.cancel()
             processingTask = nil
-            whisperService.cancelInFlightWork()
+            parakeetService.cancelInFlightWork()
             appleSpeechService.cancelStreaming()
             llmService.stopVoiceParsing()
 
@@ -707,7 +700,7 @@ public final class VoicePipelineCoordinator {
         isFinishingRecording = false
         processingTask?.cancel()
         processingTask = nil
-        whisperService.cancelInFlightWork()
+        parakeetService.cancelInFlightWork()
         appleSpeechService.cancelStreaming()
         if wasParsing {
             llmService.stopVoiceParsing()

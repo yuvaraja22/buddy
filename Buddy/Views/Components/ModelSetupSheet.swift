@@ -6,7 +6,8 @@ struct ModelSetupSheet: View {
 
     let modelManager: ModelManager
     let appleSpeechService: AppleSpeechService
-    let whisperService: WhisperTranscriptionService
+    let parakeetService: ParakeetTranscriptionService
+    let llmService: LocalLLMService
 
     @State private var sceneRefreshTick: Int = 0
 
@@ -23,9 +24,9 @@ struct ModelSetupSheet: View {
     var body: some View {
         let _ = sceneRefreshTick
         let preset = activeLLMPreset
-        let whisperPreset = modelManager.selectedWhisperPreset
-        let isWhisperReady = modelManager.isDownloaded(whisperPreset)
-        let isVoiceReady = isWhisperReady || appleSpeechService.isReadyForVoice(
+        let parakeetPreset = modelManager.selectedParakeetPreset
+        let isParakeetReady = modelManager.isDownloaded(parakeetPreset)
+        let isVoiceReady = isParakeetReady || appleSpeechService.isReadyForVoice(
             for: modelManager.selectedAppleSpeechLocale,
             mode: modelManager.selectedAppleSpeechMode
         )
@@ -45,47 +46,32 @@ struct ModelSetupSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 18) {
-                    heroHeader(isVoiceReady: isVoiceReady, isWhisperReady: isWhisperReady)
+                    heroHeader(isVoiceReady: isVoiceReady, isParakeetReady: isParakeetReady)
 
                     VStack(spacing: 12) {
                         modelRowCard(
                             icon: "waveform.circle.fill",
-                            title: whisperPreset.displayName,
-                            subtitle: whisperPreset.subtitle,
-                            sizeText: formatSizeMB(whisperPreset.approximateSizeMB),
-                            isDownloaded: isWhisperReady,
-                            isDownloading: modelManager.isDownloadingWhisper
-                                || modelManager.isOptimizingWhisper
-                                || whisperService.isPrewarming,
-                            progress: modelManager.whisperDownloadProgress,
-                            downloadingStatusText: modelManager.whisperDownloadStatusText.isEmpty
-                                ? "Optimizing for Neural Engine (one-time)…"
-                                : modelManager.whisperDownloadStatusText,
+                            title: parakeetPreset.displayName,
+                            subtitle: parakeetPreset.subtitle,
+                            sizeText: formatSizeMB(parakeetPreset.approximateSizeMB),
+                            isDownloaded: isParakeetReady,
+                            isDownloading: modelManager.isDownloadingParakeet,
+                            progress: modelManager.parakeetDownloadProgress,
+                            downloadingStatusText: modelManager.parakeetDownloadStatusText.isEmpty
+                                ? "Preparing \(parakeetPreset.shortDisplayName)…"
+                                : modelManager.parakeetDownloadStatusText,
                             onDownload: {
-                                Task {
-                                    await modelManager.downloadWhisperModel(whisperPreset) { downloadedPreset in
-                                        try await whisperService.prewarmDownloadedModel(downloadedPreset)
+                                Task { @MainActor in
+                                    await modelManager.downloadParakeetModel(parakeetPreset) {
+                                        await llmService.unloadAndWait()
                                     }
                                 }
                             },
                             onCancel: {
-                                modelManager.cancelWhisperDownload()
-                                whisperService.cancelInFlightWork()
+                                modelManager.cancelParakeetDownload()
+                                parakeetService.cancelInFlightWork()
                             }
                         )
-
-                        if modelManager.isLowRAMDeviceForLargeWhisper && whisperPreset.isLargeModel {
-                            NativeCard(padding: 12, cornerRadius: 12, tint: BuddyTheme.amberStreak) {
-                                HStack(alignment: .top, spacing: 10) {
-                                    Image(systemName: "exclamationmark.triangle.fill")
-                                        .foregroundStyle(BuddyTheme.amberStreak)
-                                    Text("This device has ~\(Int(modelManager.deviceRAMGB.rounded())) GB RAM. Switch to Whisper Small (217 MB) in Settings → Voice & Local AI for best stability on SideStore.")
-                                        .font(.footnote)
-                                        .foregroundStyle(.primary)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                            }
-                        }
 
                         speechCard
 
@@ -107,7 +93,7 @@ struct ModelSetupSheet: View {
                         )
                     }
 
-                    let activeErrors = [modelManager.whisperError, modelManager.llmError].compactMap { $0 }
+                    let activeErrors = [modelManager.parakeetError, modelManager.llmError].compactMap { $0 }
                     ForEach(activeErrors, id: \.self) { error in
                         NativeCard(padding: 12, cornerRadius: 12, tint: BuddyTheme.destructive) {
                             HStack(alignment: .top, spacing: 10) {
@@ -217,7 +203,7 @@ struct ModelSetupSheet: View {
         }
     }
 
-    private func heroHeader(isVoiceReady: Bool, isWhisperReady: Bool) -> some View {
+    private func heroHeader(isVoiceReady: Bool, isParakeetReady: Bool) -> some View {
         VStack(spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -235,11 +221,11 @@ struct ModelSetupSheet: View {
                     .multilineTextAlignment(.center)
 
                 Text(
-                    isWhisperReady
-                        ? "Local Whisper voice transcription is ready offline. Download Qwen once over Wi-Fi for your on-device Gym Coach and natural-language parsing."
+                    isParakeetReady
+                        ? "Local Parakeet TDT voice transcription is ready offline on the Neural Engine. Download Qwen once over Wi-Fi for your on-device Gym Coach."
                         : (isVoiceReady
-                            ? "Voice logging works right away with Apple Speech, or download WhisperKit for higher loud-gym accuracy. Download Qwen once over Wi-Fi for your offline Gym Coach."
-                            : "Download WhisperKit for 100% offline gym voice logging (or enable Apple Dictation), plus Qwen once over Wi-Fi for your offline Gym Coach.")
+                            ? "Voice logging works right away with Apple Speech, or download Parakeet TDT for higher loud-gym accuracy (~110 MB RAM). Download Qwen once over Wi-Fi for your offline Gym Coach."
+                            : "Download Parakeet TDT for 100% offline Neural Engine voice logging (or enable Apple Dictation), plus Qwen once over Wi-Fi for your offline Gym Coach.")
                 )
                 .font(.subheadline)
                 .foregroundStyle(BuddyTheme.mutedText)
